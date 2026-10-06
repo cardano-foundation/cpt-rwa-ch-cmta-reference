@@ -144,7 +144,8 @@ fn sanitise_initial_datum(datum: GlobalStateDatum, self_mint: Value) -> Bool {
 // - The initial datum is well-formed (basic field checks + trusted entity vkey list is sorted and has no duplicates + power user ll and denylist ll roots are minted).
 // Note: No Check of the receiver address is performed here; the NFT can be sent to any address. 
 //       It MUST be sent to the address of the global_state spend validator address, which we don't know on initialization due to circular dependency.
-//       The global_state spend validator will ensure that the NFT never leaves the script address after this initial minting step.
+//       After this initial minting step the global_state spend validator keeps the NFT at its own address,
+//       except through MigrateGlobalState, which moves it to a new GlobalState validator (admin-signed, until LockUpgrades).
 validator global_state_mint_validator(tx0: ByteArray, index0: Int) {
   mint(_redeemer: Data, policy_id: PolicyId, self: Transaction) {
     let one_time_utxo = OutputReference(tx0, index0)
