@@ -55,7 +55,9 @@ use utils.{must_be_signed_by_credential}
 ///      `third_party_transfer_logic_script` at permissive scripts,
 ///      permanently destroying transfer-side compliance. IRREVERSIBLE.
 ///   2. GLOBALSTATE MUST BE SPENT for any supply change, so its
-///      `MintSecurity` branch runs and decrements `mintable_amount`. Merely
+///      `MintSecurity` branch runs and decrements `mintable_amount`. "Its"
+///      means whichever validator holds the GlobalState NFT — after a
+///      `MigrateGlobalState`, the target; that target must keep this branch. Merely
 ///      referencing it leaves the supply cap — a core CMTAT/BaFin invariant
 ///      — entirely unenforced. IRREVERSIBLE (tokens already exist).
 ///   3. ONLY `security_asset_name` may be minted under the issuance policy.
@@ -1009,6 +1011,7 @@ fn make_gs_input(requires_receiver_kyc: Bool) -> Input {
     // self-authorisation guard, which this validator never checks.
     minting_script_credential_hash: test_authority_hash,
     upgrades_locked: False,
+    extensions: builtin.constr_data(0, []),
   }
   Input {
     output_reference: test_out_ref(0),

@@ -100,8 +100,8 @@ pub type GlobalStateDatum {
   // would simply deploy their own permissive authority), and it would go
   // STALE the moment `transfer_logic_script` is upgraded through
   // `UpgradeRegistryNode` — the list is fixed at compile time, while the
-  // scripts it names are not, and GlobalState cannot be redeployed to
-  // refresh it because the NFT lives at its address.
+  // scripts it names are not, and refreshing it would mean migrating
+  // GlobalState itself (`MigrateGlobalState`) for every such change.
   //
   // Verify instead at deployment and after every rotation, with a smoke test
   // that a mint lacking a power-user signature is REJECTED. The failure mode
@@ -115,7 +115,7 @@ pub type GlobalStateDatum {
   // After granting or rotating any role, assert that an operation exercising
   // it without that operator's signature is REJECTED.
   minting_script_credential_hash: ByteArray,
-  // ONE-WAY upgrade lock. While False (the genesis value) all three paths
+  // ONE-WAY upgrade lock. While False (the genesis value) all four paths
   // below are open; once set True by `LockUpgrades` it can never be cleared — no
   // branch writes it back, and every branch reproduces the datum wholesale,
   // so there is no path that unsets it. Setting it permanently freezes:
@@ -126,7 +126,9 @@ pub type GlobalStateDatum {
   //     `third_party_transfer_logic_script` can no longer be re-pointed, so
   //     the transfer rules in force become final; and
   //   * `SetMintableAmount` — the admin can no longer reset the supply
-  //     headroom, so `mintable_amount` moves only through mint and burn.
+  //     headroom, so `mintable_amount` moves only through mint and burn; and
+  //   * `MigrateGlobalState` — the GlobalState validator itself can no longer
+  //     be replaced, so the rules of every GlobalState action become final.
   //
   // This is the on-chain form of "this token's rules can no longer change",
   // meaningful to holders and regulators precisely BECAUSE an admin key
@@ -137,6 +139,14 @@ pub type GlobalStateDatum {
   // this is set, the only remaining lever over the token is
   // `DeactivateContract`. Lock only when the deployment is considered final.
   upgrades_locked: Bool,
+  // OPAQUE forward-compatibility slot. Set to `Constr 0 []` at genesis and never
+  // written by any branch of this version (each reproduces the datum except its
+  // one field). Exists because the datum's outer shape is frozen forever once
+  // deployed: the power-users and denylist validators and the minting proxy
+  // decode it strictly and cannot be upgraded, so a longer datum would break
+  // them. A future GlobalState version (reached via MigrateGlobalState) keeps
+  // any new state INSIDE this field instead of adding one.
+  extensions: Data,
 }
 
 // ============================================================================
@@ -175,6 +185,8 @@ pub const idx_network_id = 11
 pub const idx_minting_script_credential_hash = 12
 
 pub const idx_upgrades_locked = 13
+
+pub const idx_extensions = 14
 
 // Getters take the already-unconstr'd field list (`builtin.unconstr_fields`),
 // hiding the index + builtin unwrap behind a typed name. Reading several fields?
@@ -242,6 +254,10 @@ pub fn get_minting_script_credential_hash(fields: List<Data>) -> ByteArray {
   builtin.un_b_data(
     utils.safe_list_at(fields, idx_minting_script_credential_hash),
   )
+}
+
+pub fn get_extensions(fields: List<Data>) -> Data {
+  utils.safe_list_at(fields, idx_extensions)
 }
 
 pub fn get_upgrades_locked(fields: List<Data>) -> Bool {
@@ -337,6 +353,13 @@ pub fn set_requires_receiver_kyc(fields: List<Data>, value: Bool) -> Data {
       idx_requires_receiver_kyc,
       utils.bool_to_data(value),
     ),
+  )
+}
+
+pub fn set_extensions(fields: List<Data>, value: Data) -> Data {
+  builtin.constr_data(
+    0,
+    utils.replace_data_field(fields, idx_extensions, value),
   )
 }
 
@@ -486,7 +509,7 @@ pub type GlobalStateSpendAction {
   /// script itself can no longer be trusted to co-sign.
   RotateMintingScript { new_minting_script_credential_hash: ByteArray }
   /// ONE-WAY upgrade lock — see `upgrades_locked`; closes `RotateMintingScript`,
-  /// registry-node upgrades and `SetMintableAmount`. Admin-signed, and
+  /// registry-node upgrades, `SetMintableAmount` and `MigrateGlobalState`. Admin-signed, and
   /// deliberately not reversible: a lock an admin can lift is not a
   /// commitment. Rejected if already locked, so the action is not a silent
   /// no-op.
@@ -543,6 +566,23 @@ pub type GlobalStateSpendAction {
   /// APPENDED LAST on purpose: constructor indices are the on-chain redeemer
   /// encoding, so inserting it earlier would renumber every action after it.
   SetMintableAmount { new_mintable_amount: Int }
+  /// Moves the GlobalState NFT and its datum, byte-identical, to a NEW GlobalState
+  /// spend validator at `Script(new_spend_script_hash)` (same stake credential).
+  /// The one branch that relocates the supply-cap host: whatever validator holds
+  /// the NFT afterwards governs every later GlobalState spend — including the cap.
+  ///
+  /// Admin-signed and closed by `LockUpgrades`, like `RotateMintingScript`, and
+  /// with the same trust: until the lock, the admin chooses the code. Migrating to a
+  /// permissive script hands control of GlobalState to anyone, which is STRONGER
+  /// than a fail-open minting authority — off-chain tooling must pin the target to
+  /// a reviewed build. On chain this only refuses BRICKING: a reference input must
+  /// carry the target script, so a migration can never land on a hash whose script
+  /// nobody can produce (GlobalState would be unspendable forever).
+  ///
+  /// The datum is carried over unchanged; a new version changes state through its
+  /// own actions, keeping anything new inside `extensions`. Appended last: the
+  /// constructor index is the redeemer encoding.
+  MigrateGlobalState { new_spend_script_hash: ByteArray }
 }
 
 pub type GlobalStateSpendRedeemer {
@@ -576,6 +616,7 @@ fn test_gs_input_with(transfers_paused: Bool, deactivated: Bool) -> Input {
     network_id: 1,
     minting_script_credential_hash: #"",
     upgrades_locked: False,
+    extensions: builtin.constr_data(0, []),
   }
   Input {
     output_reference: OutputReference {
@@ -630,6 +671,7 @@ fn test_layout_datum() -> GlobalStateDatum {
     network_id: 9,
     minting_script_credential_hash: #"a8",
     upgrades_locked: True,
+    extensions: builtin.i_data(14),
   }
 }
 
@@ -656,6 +698,7 @@ test gs_getters_read_correct_fields() {
     get_network_id(fields) == d.network_id,
     get_minting_script_credential_hash(fields) == d.minting_script_credential_hash,
     get_upgrades_locked(fields) == d.upgrades_locked,
+    builtin.equals_data(get_extensions(fields), d.extensions),
   }
 }
 
@@ -713,6 +756,10 @@ test gs_setters_round_trip() {
     builtin.equals_data(
       set_upgrades_locked(fields, False),
       GlobalStateDatum { ..d, upgrades_locked: False },
+    ),
+    builtin.equals_data(
+      set_extensions(fields, builtin.i_data(7)),
+      GlobalStateDatum { ..d, extensions: builtin.i_data(7) },
     ),
   }
 }

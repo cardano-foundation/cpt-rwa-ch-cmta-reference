@@ -372,6 +372,7 @@ fn t_gs_datum(
     network_id: 1,
     minting_script_credential_hash: #"",
     upgrades_locked: False,
+    extensions: builtin.constr_data(0, []),
   }
 }
 
@@ -592,6 +593,7 @@ fn t_gs_datum_with_tel(
     network_id: 1,
     minting_script_credential_hash: #"",
     upgrades_locked: False,
+    extensions: builtin.constr_data(0, []),
   }
 }
 
@@ -937,6 +939,7 @@ fn t_gs_datum_with_member_root(
     network_id: 1,
     minting_script_credential_hash: #"",
     upgrades_locked: False,
+    extensions: builtin.constr_data(0, []),
   }
 }
 

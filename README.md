@@ -84,8 +84,8 @@ referenced by compact identifiers or hashes.
   [`documents/pentesting/`](documents/pentesting/). The 2026-08-19/20 internal review and its
   fixes ([`documents/security/security-fixes.md`](documents/security/security-fixes.md)), the
   minting-proxy upgradability, and the `GlobalStateLocation` change all postdate both engagements,
-  so neither report covers the current code. `SetMintableAmount` (2026-10-06) also postdates
-  every review listed here.
+  so neither report covers the current code. `SetMintableAmount` (2026-10-06) and `MigrateGlobalState` (2026-10-06, a new
+  admin power over the validator that holds the supply cap) also postdate every review listed here.
 * **Formal security audit** — an official third-party audit is **planned and not yet completed**.
   Until it has been, treat this code as unaudited.
 * **Internal security review** — an adversarial self-review of the compliance layer found and fixed
@@ -110,7 +110,8 @@ referenced by compact identifiers or hashes.
 
 * **Admin** — the `admin_credential_hash` held in the GlobalState datum. Controls the power-user
   list itself (add, remove, modify), the security metadata, the remaining supply cap
-  (`SetMintableAmount`, until `LockUpgrades`), and the irreversible deactivation switch. Rotatable, so the master key can be replaced without redeploying.
+  (`SetMintableAmount`, until `LockUpgrades`), the GlobalState validator itself
+  (`MigrateGlobalState`, until `LockUpgrades`), and the irreversible deactivation switch. Rotatable, so the master key can be replaced without redeploying.
 * **Power user** — a node in the power-users linked list, carrying independently grantable flags:
   * `is_admin` — add and remove denylist entries. Deliberately split from the master admin key, so a
     compliance function can be delegated without handing over control of the protocol.
@@ -177,7 +178,7 @@ referenced by compact identifiers or hashes.
 
 ### Upgrading and locking the rules
 
-The GlobalState admin has two distinct upgrade paths, plus control over the supply cap, while
+The GlobalState admin has three distinct upgrade paths, plus control over the supply cap, while
 `upgrades_locked` is false:
 
 * `RotateMintingScript` changes `minting_script_credential_hash` in GlobalState. The permanent
@@ -193,9 +194,19 @@ The GlobalState admin has two distinct upgrade paths, plus control over the supp
 * `SetMintableAmount { new_mintable_amount }` sets `mintable_amount` to an absolute value in
   `[0, 2^63 − 1]`. Admin-signed; it cannot mint, burn or move the security token in the same
   transaction.
+* `MigrateGlobalState { new_spend_script_hash }` moves the GlobalState NFT and its datum,
+  byte-identical, to a new GlobalState spend validator (same stake credential). Admin-signed. The
+  transaction must carry the target script as a reference input, so a migration can never land on a
+  script nobody can produce. **The target governs every later GlobalState action, the supply cap
+  included** — migrating to a permissive script hands GlobalState to anyone, which is stronger than
+  a permissive minting authority. Migrate only to a reviewed build of this repository. Readers find
+  GlobalState by its NFT, never its address, so nothing else changes. The datum's outer shape is
+  fixed forever once deployed (the list validators decode it strictly); a new version keeps any new
+  state inside the opaque `extensions` field, which is empty at genesis.
 
-`LockUpgrades` is an admin-signed, one-way GlobalState action that closes **all three** for later
-transactions — after it, `mintable_amount` moves only through mint and burn. It does not deactivate transfers, minting or burning. If a registry upgrade is bundled
+`LockUpgrades` is an admin-signed, one-way GlobalState action that closes **all four** for later
+transactions — after it, `mintable_amount` moves only through mint and burn and the GlobalState
+validator can no longer be replaced. It does not deactivate transfers, minting or burning. If a registry upgrade is bundled
 with the lock in one transaction, the upgrade reads the pre-lock GlobalState input and can still
 succeed; audit the whole transaction when deciding which rules were locked. The same pre-state rule
 applies to a registry upgrade bundled with admin rotation or deactivation.

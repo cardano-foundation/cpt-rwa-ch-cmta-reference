@@ -229,8 +229,17 @@ this action changed the GlobalState spend validator's hash, and therefore its ad
 branch pins the continuing output to the current address, so a deployment made before it cannot
 gain the action. It requires a fresh deployment.
 
-`LockUpgrades` irreversibly closes the authority-rotation and registry-upgrade paths, and admin
-changes to the supply cap, for **later** transactions. A registry upgrade bundled into the same transaction can still read the
+To replace the GlobalState validator, first publish the new validator as a reference script, then
+spend GlobalState with `MigrateGlobalState { new_spend_script_hash }` (constructor index 14), signed
+by the admin. Include the published reference script among the reference inputs, send the
+continuing output to `Script(new_spend_script_hash)` with the same stake credential, and carry the
+datum and the non-ADA value over unchanged. No security token may be minted, burned or spent in the
+same transaction. Off-chain code must take the GlobalState validator from the address that holds the
+NFT, never from a fixed blueprint, because that address changes with each migration. Locate
+GlobalState by its NFT as every validator does.
+
+`LockUpgrades` irreversibly closes the authority-rotation, registry-upgrade and GlobalState-migration
+paths, and admin changes to the supply cap, for **later** transactions. A registry upgrade bundled into the same transaction can still read the
 unlocked input state and succeed; inspect all redeemers in the locking transaction. Admin-only
 GlobalState actions similarly expose their pre-state to a bundled registry operation. Record the
 active script hashes, operator credentials, base-layer version and lock transaction as deployment

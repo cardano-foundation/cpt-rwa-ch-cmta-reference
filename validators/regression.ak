@@ -244,6 +244,7 @@ fn gs_datum(
     network_id: 1,
     minting_script_credential_hash: authority_hash,
     upgrades_locked: False,
+    extensions: builtin.constr_data(0, []),
   }
 }
 
