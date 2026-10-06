@@ -1165,7 +1165,7 @@ This change set is **redeploy-only** — it moves the denylist policy id and the
 address. Nothing is on mainnet, so that is the clean path.
 
 Do **not** call `LockUpgrades` until these fixes are deployed. It permanently closes both upgrade
-paths.
+paths (and, since `SetMintableAmount` was added, admin changes to the supply cap).
 
 ---
 

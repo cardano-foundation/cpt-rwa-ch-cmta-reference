@@ -84,7 +84,8 @@ referenced by compact identifiers or hashes.
   [`documents/pentesting/`](documents/pentesting/). The 2026-08-19/20 internal review and its
   fixes ([`documents/security/security-fixes.md`](documents/security/security-fixes.md)), the
   minting-proxy upgradability, and the `GlobalStateLocation` change all postdate both engagements,
-  so neither report covers the current code.
+  so neither report covers the current code. `SetMintableAmount` (2026-10-06) also postdates
+  every review listed here.
 * **Formal security audit** — an official third-party audit is **planned and not yet completed**.
   Until it has been, treat this code as unaudited.
 * **Internal security review** — an adversarial self-review of the compliance layer found and fixed
@@ -108,8 +109,8 @@ referenced by compact identifiers or hashes.
 ## Actors
 
 * **Admin** — the `admin_credential_hash` held in the GlobalState datum. Controls the power-user
-  list itself (add, remove, modify), the security metadata, and the irreversible deactivation
-  switch. Rotatable, so the master key can be replaced without redeploying.
+  list itself (add, remove, modify), the security metadata, the remaining supply cap
+  (`SetMintableAmount`, until `LockUpgrades`), and the irreversible deactivation switch. Rotatable, so the master key can be replaced without redeploying.
 * **Power user** — a node in the power-users linked list, carrying independently grantable flags:
   * `is_admin` — add and remove denylist entries. Deliberately split from the master admin key, so a
     compliance function can be delegated without handing over control of the protocol.
@@ -143,7 +144,10 @@ referenced by compact identifiers or hashes.
   static (every such change is still signed, on-chain, power-user-gated and cap-enforced), and a
   holder minted to during a pause cannot move the tokens until it lifts — so do not mint to third
   parties mid-pause.
-* Minting is capped; burning returns headroom to the cap. **Burning existing supply spends a
+* Minting is capped; burning returns headroom to the cap. The cap is remaining headroom, not total
+  supply: until `LockUpgrades`, the admin may also reset it to any absolute value in
+  `[0, 2^63 − 1]` with `SetMintableAmount` (setting it below what is already minted simply stops
+  further minting). That action cannot share a transaction with a mint. **Burning existing supply spends a
   programmable-base UTxO, so the CIP-113 base layer makes the transfer logic run over it** — which
   means a burn during a pause, or from a sanctioned holder, must instead be routed through the
   forced-transfer path and needs `can_force_transfer`, not just `can_burn`.
@@ -173,7 +177,8 @@ referenced by compact identifiers or hashes.
 
 ### Upgrading and locking the rules
 
-The GlobalState admin has two distinct upgrade paths while `upgrades_locked` is false:
+The GlobalState admin has two distinct upgrade paths, plus control over the supply cap, while
+`upgrades_locked` is false:
 
 * `RotateMintingScript` changes `minting_script_credential_hash` in GlobalState. The permanent
   minting proxy then requires the replacement authority's withdraw-0. The proxy checks delegation,
@@ -185,9 +190,12 @@ The GlobalState admin has two distinct upgrade paths while `upgrades_locked` is 
   continuing node. The minting proxy, GlobalState policy and disabled unfracking hook stay pinned;
   an upgrade cannot mint or burn this token in the same transaction. Register replacement logic
   stake credentials before use.
+* `SetMintableAmount { new_mintable_amount }` sets `mintable_amount` to an absolute value in
+  `[0, 2^63 − 1]`. Admin-signed; it cannot mint, burn or move the security token in the same
+  transaction.
 
-`LockUpgrades` is an admin-signed, one-way GlobalState action that closes **both** paths for later
-transactions. It does not deactivate transfers, minting or burning. If a registry upgrade is bundled
+`LockUpgrades` is an admin-signed, one-way GlobalState action that closes **all three** for later
+transactions — after it, `mintable_amount` moves only through mint and burn. It does not deactivate transfers, minting or burning. If a registry upgrade is bundled
 with the lock in one transaction, the upgrade reads the pre-lock GlobalState input and can still
 succeed; audit the whole transaction when deciding which rules were locked. The same pre-state rule
 applies to a registry upgrade bundled with admin rotation or deactivation.

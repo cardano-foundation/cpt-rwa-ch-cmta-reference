@@ -19,12 +19,12 @@ use types/global_state.{
   AddTrustedEntity, DeactivateContract, GlobalStateDatum,
   GlobalStateSpendRedeemer, LockUpgrades, MintSecurity, ModifySecurityInfo,
   PauseTransfers, RemoveTrustedEntity, RotateAdmin, RotateMintingScript,
-  SetRequiresReceiverKyc, SetRequiresSenderKyc, TrustedEntityMetadata,
-  UpdateMemberRootHash, UpdateTrustedEntity, set_admin_credential_hash,
-  set_deactivated, set_member_root_hash, set_mintable_amount,
-  set_minting_script_credential_hash, set_requires_receiver_kyc,
-  set_requires_sender_kyc, set_security_info, set_transfers_paused,
-  set_trusted_entity_vkeys, set_upgrades_locked,
+  SetMintableAmount, SetRequiresReceiverKyc, SetRequiresSenderKyc,
+  TrustedEntityMetadata, UpdateMemberRootHash, UpdateTrustedEntity,
+  set_admin_credential_hash, set_deactivated, set_member_root_hash,
+  set_mintable_amount, set_minting_script_credential_hash,
+  set_requires_receiver_kyc, set_requires_sender_kyc, set_security_info,
+  set_transfers_paused, set_trusted_entity_vkeys, set_upgrades_locked,
 }
 use types/power_users.{PowerUser}
 use utils.{must_be_signed_by_credential, quantity_of_policy_id}
@@ -191,9 +191,11 @@ validator global_state_mint_validator(tx0: ByteArray, index0: Int) {
 //
 // INVARIANT: non-Mint branches MUST reject concurrent security-token mints.
 // Together with the minting_logic_script input-branch check, this is what
-// makes `mintable_amount` a truly binding supply cap: the only way to mint a
-// security token in steady state is through MintSecurity, which decrements
-// `mintable_amount`.
+// makes `mintable_amount` a binding supply cap on operators: the only way to
+// mint a security token in steady state is through MintSecurity, which
+// decrements `mintable_amount`. The cap itself is admin-settable via
+// `SetMintableAmount` until `upgrades_locked` — that branch writes the field
+// but, like every non-Mint branch, cannot mint alongside the write.
 //
 // ADMIN: admin credential hash now lives in the input datum (field
 // `admin_credential_hash`). No compile-time owner parameter. Rotation via the
@@ -589,6 +591,29 @@ validator global_state_spend_validator(
           // UTxO. Nothing anywhere sets this field back to False — every
           // branch reproduces the datum wholesale and only this branch
           // touches it — so False is reachable exactly once, at genesis.
+          !input_datum.upgrades_locked,
+          must_be_signed_by_credential(self, input_datum.admin_credential_hash),
+          builtin.equals_data(expected_output_datum, global_state_output_datum),
+        }
+      }
+      SetMintableAmount { new_mintable_amount } -> {
+        let expected_output_datum = set_mintable_amount(
+          input_fields,
+          new_mintable_amount,
+        )
+        and {
+          // Load-bearing here, not just hygiene: without it a mint could ride
+          // along on a cap write and never be decremented from the cap.
+          no_concurrent_security_mint,
+          no_security_token_spent,
+          address_preserved,
+          nft_preserved,
+          value_preserved,
+          no_reference_script,
+          new_mintable_amount >= 0,
+          // Bounds what this action WRITES, not the field — see the constant.
+          new_mintable_amount <= constants.max_mintable_amount,
+          // The one-way upgrade lock makes the cap final as well.
           !input_datum.upgrades_locked,
           must_be_signed_by_credential(self, input_datum.admin_credential_hash),
           builtin.equals_data(expected_output_datum, global_state_output_datum),
@@ -2912,5 +2937,314 @@ test update_member_root_hash_rejects_when_the_security_token_is_minted_into_an_o
     with_security_token_minted_into_an_output(
       t_tx(input_datum, output_datum, [t_admin]),
     ),
+  )
+}
+
+// ── SetMintableAmount — admin-only, bounded, closed by LockUpgrades ──────────
+//
+// Every negative below is a one-change copy of a passing positive: the output
+// datum always equals the input with `mintable_amount` set to the redeemer's
+// value, so only the guard under test can be what rejects it.
+
+fn set_mintable_amount_redeemer(
+  new_mintable_amount: Int,
+) -> GlobalStateSpendRedeemer {
+  GlobalStateSpendRedeemer {
+    global_state_output_index: 0,
+    action: SetMintableAmount { new_mintable_amount },
+  }
+}
+
+/// Input `input_datum`, output identical except `mintable_amount = value`,
+/// redeemer naming the same `value`.
+fn t_set_mintable_tx(
+  input_datum: GlobalStateDatum,
+  value: Int,
+  signatories: List<ByteArray>,
+) -> Transaction {
+  t_tx(
+    input_datum,
+    GlobalStateDatum { ..input_datum, mintable_amount: value },
+    signatories,
+  )
+}
+
+test set_mintable_amount_succeeds_when_admin_signs_raise() {
+  let input_datum = t_datum(False, False)
+  let value = input_datum.mintable_amount + 5_000_000
+  run_spend(
+    input_datum,
+    set_mintable_amount_redeemer(value),
+    t_set_mintable_tx(input_datum, value, [t_admin]),
+  )
+}
+
+test set_mintable_amount_succeeds_when_admin_signs_lower() {
+  let input_datum = t_datum(False, False)
+  let value = input_datum.mintable_amount - 1
+  run_spend(
+    input_datum,
+    set_mintable_amount_redeemer(value),
+    t_set_mintable_tx(input_datum, value, [t_admin]),
+  )
+}
+
+test set_mintable_amount_succeeds_to_zero() {
+  let input_datum = t_datum(False, False)
+  run_spend(
+    input_datum,
+    set_mintable_amount_redeemer(0),
+    t_set_mintable_tx(input_datum, 0, [t_admin]),
+  )
+}
+
+test set_mintable_amount_succeeds_at_max() {
+  let input_datum = t_datum(False, False)
+  run_spend(
+    input_datum,
+    set_mintable_amount_redeemer(constants.max_mintable_amount),
+    t_set_mintable_tx(input_datum, constants.max_mintable_amount, [t_admin]),
+  )
+}
+
+test set_mintable_amount_rejects_negative() {
+  let input_datum = t_datum(False, False)
+  !run_spend(
+    input_datum,
+    set_mintable_amount_redeemer(-1),
+    t_set_mintable_tx(input_datum, -1, [t_admin]),
+  )
+}
+
+test set_mintable_amount_rejects_above_max() {
+  let input_datum = t_datum(False, False)
+  let value = constants.max_mintable_amount + 1
+  !run_spend(
+    input_datum,
+    set_mintable_amount_redeemer(value),
+    t_set_mintable_tx(input_datum, value, [t_admin]),
+  )
+}
+
+test set_mintable_amount_fails_without_admin_signature() {
+  let input_datum = t_datum(False, False)
+  !run_spend(
+    input_datum,
+    set_mintable_amount_redeemer(42),
+    t_set_mintable_tx(input_datum, 42, []),
+  )
+}
+
+test set_mintable_amount_fails_with_non_admin_signature() {
+  let input_datum = t_datum(False, False)
+  !run_spend(
+    input_datum,
+    set_mintable_amount_redeemer(42),
+    t_set_mintable_tx(input_datum, 42, [t_new_admin]),
+  )
+}
+
+// Positive control for the locked negative: identical except the lock.
+test set_mintable_amount_succeeds_when_upgrades_unlocked() {
+  let input_datum = GlobalStateDatum {
+    ..t_datum_locked(),
+    upgrades_locked: False,
+  }
+  run_spend(
+    input_datum,
+    set_mintable_amount_redeemer(42),
+    t_set_mintable_tx(input_datum, 42, [t_admin]),
+  )
+}
+
+test set_mintable_amount_fails_once_upgrades_are_locked() {
+  // LockUpgrades makes the cap final, like the mint/transfer rules.
+  let input_datum = t_datum_locked()
+  !run_spend(
+    input_datum,
+    set_mintable_amount_redeemer(42),
+    t_set_mintable_tx(input_datum, 42, [t_admin]),
+  )
+}
+
+test set_mintable_amount_output_must_match_redeemer() {
+  let input_datum = t_datum(False, False)
+  !run_spend(
+    input_datum,
+    set_mintable_amount_redeemer(42),
+    t_set_mintable_tx(input_datum, 43, [t_admin]),
+  )
+}
+
+test set_mintable_amount_cannot_smuggle_another_field_change() {
+  let input_datum = t_datum(False, False)
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    mintable_amount: 42,
+    transfers_paused: True,
+  }
+  !run_spend(
+    input_datum,
+    set_mintable_amount_redeemer(42),
+    t_tx(input_datum, output_datum, [t_admin]),
+  )
+}
+
+test set_mintable_amount_succeeds_when_security_token_absent_from_tx() {
+  // Positive control paired with the three security-token negatives below.
+  let input_datum = t_datum(False, False)
+  run_spend(
+    input_datum,
+    set_mintable_amount_redeemer(42),
+    t_set_mintable_tx(input_datum, 42, [t_admin]),
+  )
+}
+
+test set_mintable_amount_rejects_concurrent_security_mint() {
+  // Load-bearing here: without it a mint could ride along on a cap write
+  // without being decremented from the cap.
+  let input_datum = t_datum(False, False)
+  !run_spend(
+    input_datum,
+    set_mintable_amount_redeemer(42),
+    with_security_token_minted_into_an_output(
+      t_set_mintable_tx(input_datum, 42, [t_admin]),
+    ),
+  )
+}
+
+test set_mintable_amount_rejects_concurrent_security_burn() {
+  // Mint field only (no token input), so `no_concurrent_security_mint` is the
+  // sole guard that can reject it.
+  let input_datum = t_datum(False, False)
+  let tx = t_set_mintable_tx(input_datum, 42, [t_admin])
+  !run_spend(
+    input_datum,
+    set_mintable_amount_redeemer(42),
+    Transaction { ..tx, mint: from_asset(t_issuance_policy, t_sec_name, -1) },
+  )
+}
+
+test set_mintable_amount_rejects_security_token_spent() {
+  let input_datum = t_datum(False, False)
+  !run_spend(
+    input_datum,
+    set_mintable_amount_redeemer(42),
+    with_security_token_input(t_set_mintable_tx(input_datum, 42, [t_admin])),
+  )
+}
+
+test set_mintable_amount_rejects_a_foreign_asset_added_to_the_continuing_output() {
+  let input_datum = t_datum(False, False)
+  !run_spend(
+    input_datum,
+    set_mintable_amount_redeemer(42),
+    with_gs_output_value(
+      t_set_mintable_tx(input_datum, 42, [t_admin]),
+      fn(v) { merge(v, from_asset(t_foreign_policy, "X", 1)) },
+    ),
+  )
+}
+
+test set_mintable_amount_rejects_changed_output_address() {
+  let input_datum = t_datum(False, False)
+  let tx = t_set_mintable_tx(input_datum, 42, [t_admin])
+  expect [gs_out, ..rest] = tx.outputs
+  let moved = Output {
+    ..gs_out,
+    address: Address {
+      payment_credential: Script(t_new_minting_script),
+      stake_credential: None,
+    },
+  }
+  !run_spend(
+    input_datum,
+    set_mintable_amount_redeemer(42),
+    Transaction { ..tx, outputs: [moved, ..rest] },
+  )
+}
+
+test set_mintable_amount_rejects_reference_script_on_output() {
+  let input_datum = t_datum(False, False)
+  let output_datum = GlobalStateDatum { ..input_datum, mintable_amount: 42 }
+  !run_spend(
+    input_datum,
+    set_mintable_amount_redeemer(42),
+    Transaction {
+      ..t_tx(input_datum, output_datum, [t_admin]),
+      outputs: [t_output_with_reference_script(output_datum)],
+    },
+  )
+}
+
+test deactivated_input_rejects_set_mintable_amount() fail {
+  // Terminal `expect !deactivated` traps before dispatch.
+  let input_datum = t_datum(True, True)
+  run_spend(
+    input_datum,
+    set_mintable_amount_redeemer(42),
+    t_set_mintable_tx(input_datum, 42, [t_admin]),
+  )
+}
+
+// ── Burns after SetMintableAmount — headroom semantics ───────────────────────
+//
+// The GlobalState validator never sees circulating supply, only headroom: a
+// MintSecurity spend writes `mintable_amount - minted`, and a burn mints a
+// NEGATIVE quantity. So a cap of 0, or one set below what is already in
+// circulation (indistinguishable on chain), never blocks a burn — and every
+// burn hands its quantity back as headroom that can be minted again.
+
+test burn_succeeds_when_mintable_amount_is_zero() {
+  let input_datum = GlobalStateDatum {
+    ..t_datum(False, False),
+    mintable_amount: 0,
+  }
+  let output_datum = GlobalStateDatum { ..input_datum, mintable_amount: 100 }
+  run_spend(
+    input_datum,
+    mintsecurity_redeemer(),
+    t_mintsecurity_tx(input_datum, output_datum, -100, [t_admin]),
+  )
+}
+
+test mint_rejected_when_mintable_amount_is_zero() {
+  let input_datum = GlobalStateDatum {
+    ..t_datum(False, False),
+    mintable_amount: 0,
+  }
+  let output_datum = GlobalStateDatum { ..input_datum, mintable_amount: -1 }
+  !run_spend(
+    input_datum,
+    mintsecurity_redeemer(),
+    t_mintsecurity_tx(input_datum, output_datum, 1, [t_admin]),
+  )
+}
+
+// After a burn of 100 at a zero cap, exactly the burned 100 may be re-minted…
+test mint_up_to_burned_headroom_succeeds_after_zero_cap() {
+  let input_datum = GlobalStateDatum {
+    ..t_datum(False, False),
+    mintable_amount: 100,
+  }
+  let output_datum = GlobalStateDatum { ..input_datum, mintable_amount: 0 }
+  run_spend(
+    input_datum,
+    mintsecurity_redeemer(),
+    t_mintsecurity_tx(input_datum, output_datum, 100, [t_admin]),
+  )
+}
+
+// …and not one unit more.
+test mint_beyond_burned_headroom_rejected_after_zero_cap() {
+  let input_datum = GlobalStateDatum {
+    ..t_datum(False, False),
+    mintable_amount: 100,
+  }
+  let output_datum = GlobalStateDatum { ..input_datum, mintable_amount: -1 }
+  !run_spend(
+    input_datum,
+    mintsecurity_redeemer(),
+    t_mintsecurity_tx(input_datum, output_datum, 101, [t_admin]),
   )
 }

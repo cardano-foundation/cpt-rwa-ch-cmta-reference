@@ -219,8 +219,18 @@ pins the node to this issuance policy, retains this deployment's GlobalState and
 unfracking setting, and checks `upgrades_locked == False`. Register replacement logic stake
 credentials before their first use. This transaction cannot change the token supply.
 
-`LockUpgrades` irreversibly closes both the authority-rotation and registry-upgrade paths for
-**later** transactions. A registry upgrade bundled into the same transaction can still read the
+To adjust the supply cap, spend GlobalState with `GlobalStateSpendRedeemer {
+global_state_output_index, action: SetMintableAmount { new_mintable_amount } }` (constructor
+index 13), signed by the admin. The continuing output must equal the input datum with only
+`mintable_amount` replaced by `new_mintable_amount`, which must lie in `[0, 2^63 − 1]`. The value
+is absolute remaining headroom, not a delta and not total supply. The transaction must not mint,
+burn or spend the security token, so a raise followed by a mint takes two transactions. Adding
+this action changed the GlobalState spend validator's hash, and therefore its address; every
+branch pins the continuing output to the current address, so a deployment made before it cannot
+gain the action. It requires a fresh deployment.
+
+`LockUpgrades` irreversibly closes the authority-rotation and registry-upgrade paths, and admin
+changes to the supply cap, for **later** transactions. A registry upgrade bundled into the same transaction can still read the
 unlocked input state and succeed; inspect all redeemers in the locking transaction. Admin-only
 GlobalState actions similarly expose their pre-state to a bundled registry operation. Record the
 active script hashes, operator credentials, base-layer version and lock transaction as deployment
