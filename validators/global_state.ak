@@ -648,7 +648,12 @@ validator global_state_spend_validator(
             stake_credential: own_input.output.address.stake_credential,
           },
           // Anti-brick: the target's script must be producible — published as a
-          // reference script in this very transaction's reference inputs.
+          // reference script in this very transaction's reference inputs. KEEP IT:
+          // a migration to a hash nobody can produce is permanent (GlobalState could
+          // never be spent again). The reference script goes UNUSED in this tx, which
+          // the Conway ledger accepts; aiken-java-binding 0.1.0 (uplc 1.1.13) rejects
+          // it off-chain as `RequiredRedeemersMismatch { extra }` — evaluate this tx
+          // with a ledger-faithful evaluator rather than removing the guard.
           list.any(
             self.reference_inputs,
             fn(i) { i.output.reference_script == Some(new_spend_script_hash) },
