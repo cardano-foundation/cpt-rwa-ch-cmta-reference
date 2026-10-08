@@ -578,7 +578,8 @@ pub type GlobalStateSpendAction {
   /// encoding, so inserting it earlier would renumber every action after it.
   SetMintableAmount { new_mintable_amount: Int }
   /// Moves the GlobalState NFT and its datum, byte-identical, to a NEW GlobalState
-  /// spend validator at `Script(new_spend_script_hash)` (same stake credential).
+  /// spend validator whose payment credential is `Script(new_spend_script_hash)`
+  /// (the stake part is not constrained).
   /// The one branch that relocates the supply-cap host: whatever validator holds
   /// the NFT afterwards governs every later GlobalState spend — including the cap.
   ///

@@ -232,7 +232,8 @@ gain the action. It requires a fresh deployment.
 To replace the GlobalState validator, first publish the new validator as a reference script, then
 spend GlobalState with `MigrateGlobalState { new_spend_script_hash }` (constructor index 14), signed
 by the admin. Include the published reference script among the reference inputs, send the
-continuing output to `Script(new_spend_script_hash)` with the same stake credential, and carry the
+continuing output to an address whose payment credential is `Script(new_spend_script_hash)` (any
+stake part), and carry the
 datum and the non-ADA value over unchanged. No security token may be minted, burned or spent in the
 same transaction. Off-chain code must take the GlobalState validator from the address that holds the
 NFT, never from a fixed blueprint, because that address changes with each migration. Locate

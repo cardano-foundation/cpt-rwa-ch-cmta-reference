@@ -264,7 +264,8 @@ The GlobalState admin has three distinct upgrade paths, plus control over the su
   `[0, 2^63 − 1]`. Admin-signed; it cannot mint, burn or move the security token in the same
   transaction.
 * `MigrateGlobalState { new_spend_script_hash }` moves the GlobalState NFT and its datum,
-  byte-identical, to a new GlobalState spend validator (same stake credential). Admin-signed. The
+  byte-identical, to a new GlobalState spend validator (only the payment credential is checked;
+  the stake part may change). Admin-signed. The
   transaction must carry the target script as a reference input, so a migration can never land on a
   script nobody can produce. **The target governs every later GlobalState action, the supply cap
   included** — migrating to a permissive script hands GlobalState to anyone, which is stronger than

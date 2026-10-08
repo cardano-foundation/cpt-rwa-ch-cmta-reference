@@ -638,12 +638,13 @@ validator global_state_spend_validator(
           !input_datum.upgrades_locked,
           must_be_signed_by_credential(self, input_datum.admin_credential_hash),
           // The one rule that differs from every other branch: the address MOVES —
-          // to exactly the named SCRIPT (never a key with the same bytes), keeping
-          // the stake credential.
-          global_state_output.address == Address {
-            payment_credential: Script(new_spend_script_hash),
-            stake_credential: own_input.output.address.stake_credential,
-          },
+          // its payment credential must be exactly the named SCRIPT (never a key
+          // with the same bytes). The stake part is deliberately left free: it
+          // cannot authorise spending GlobalState and no reader locates GlobalState
+          // by address; it only directs the UTxO's ADA rewards / voting weight.
+          global_state_output.address.payment_credential == Script(
+            new_spend_script_hash,
+          ),
           // Anti-brick: the target's script must be producible — published as a
           // reference script in this very transaction's reference inputs. KEEP IT:
           // a migration to a hash nobody can produce is permanent (GlobalState could
@@ -3421,7 +3422,9 @@ test migrate_global_state_fails_to_a_key_with_the_same_bytes() {
   !run_spend(input_datum, migrate_redeemer(t_migrate_target), tx)
 }
 
-test migrate_global_state_fails_when_the_stake_credential_changes() {
+// Owner decision (2026-10-08): only the payment credential is pinned; the
+// stake part may change with the migration.
+test migrate_global_state_allows_a_different_stake_credential() {
   let input_datum = t_datum(False, False)
   let tx = with_output_address(
     t_migrate_tx(input_datum, t_migrate_target),
@@ -3430,7 +3433,7 @@ test migrate_global_state_fails_when_the_stake_credential_changes() {
       stake_credential: Some(Inline(VerificationKey(t_admin))),
     },
   )
-  !run_spend(input_datum, migrate_redeemer(t_migrate_target), tx)
+  run_spend(input_datum, migrate_redeemer(t_migrate_target), tx)
 }
 
 test migrate_global_state_fails_when_the_datum_changes() {
