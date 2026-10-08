@@ -16,7 +16,7 @@ use denylist/absence.{verify_denylist_absence}
 use kyc/verify.{verify_kyc_proof}
 use types/cip68.{Cip68Datum} as types_cip68
 use types/global_state.{
-  GlobalStateDatum, GlobalStateReferenced, GlobalStateSpent,
+  GlobalStateDatum, GlobalStateReferenced, GlobalStateSpent, decode_global_state,
   gs_datum_from_location,
 }
 use types/kyc_proof.{Attestation, AttestationProof}
@@ -753,7 +753,8 @@ fn verify_mint_or_burn(
   //
   // The checks themselves live in `verify_mint_destinations` below.
   let destinations_ok = if minted_amount > 0 {
-    expect gs_datum: GlobalStateDatum = gs_raw
+    // Lenient like every GlobalState reader — see `decode_global_state`.
+    let gs_datum = decode_global_state(gs_raw)
     verify_mint_destinations(
       self.outputs,
       destination_actions,
@@ -1011,7 +1012,6 @@ fn make_gs_input(requires_receiver_kyc: Bool) -> Input {
     // self-authorisation guard, which this validator never checks.
     minting_script_credential_hash: test_authority_hash,
     upgrades_locked: False,
-    extensions: builtin.constr_data(0, []),
   }
   Input {
     output_reference: test_out_ref(0),

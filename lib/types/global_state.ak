@@ -1,4 +1,5 @@
 use aiken/builtin
+use aiken/collection/list
 use cardano/address.{Address, Script}
 use cardano/assets.{from_asset, quantity_of}
 use cardano/transaction.{InlineDatum, Input, Output, OutputReference}
@@ -42,6 +43,12 @@ pub type GlobalStateLocation {
 /// branch. Reordering, inserting or removing a field silently reads or writes
 /// the wrong one — the tripwire test `gs_getters_read_correct_fields` exists to
 /// turn that into a build failure.
+///
+/// APPEND-ONLY across versions. A later GlobalState version (reached through
+/// `MigrateGlobalState`) may add fields AFTER these 14 — every reader decodes
+/// through `decode_global_state`, which ignores trailing fields, so the
+/// validators that can never be upgraded keep working. Never remove, reorder
+/// or retype one of these 14.
 pub type GlobalStateDatum {
   //If true, no transfer can be executed
   transfers_paused: Bool,
@@ -139,14 +146,6 @@ pub type GlobalStateDatum {
   // this is set, the only remaining lever over the token is
   // `DeactivateContract`. Lock only when the deployment is considered final.
   upgrades_locked: Bool,
-  // OPAQUE forward-compatibility slot. Set to `Constr 0 []` at genesis and never
-  // written by any branch of this version (each reproduces the datum except its
-  // one field). Exists because the datum's outer shape is frozen forever once
-  // deployed: the power-users and denylist validators and the minting proxy
-  // decode it strictly and cannot be upgraded, so a longer datum would break
-  // them. A future GlobalState version (reached via MigrateGlobalState) keeps
-  // any new state INSIDE this field instead of adding one.
-  extensions: Data,
 }
 
 // ============================================================================
@@ -185,8 +184,6 @@ pub const idx_network_id = 11
 pub const idx_minting_script_credential_hash = 12
 
 pub const idx_upgrades_locked = 13
-
-pub const idx_extensions = 14
 
 // Getters take the already-unconstr'd field list (`builtin.unconstr_fields`),
 // hiding the index + builtin unwrap behind a typed name. Reading several fields?
@@ -254,10 +251,6 @@ pub fn get_minting_script_credential_hash(fields: List<Data>) -> ByteArray {
   builtin.un_b_data(
     utils.safe_list_at(fields, idx_minting_script_credential_hash),
   )
-}
-
-pub fn get_extensions(fields: List<Data>) -> Data {
-  utils.safe_list_at(fields, idx_extensions)
 }
 
 pub fn get_upgrades_locked(fields: List<Data>) -> Bool {
@@ -356,13 +349,6 @@ pub fn set_requires_receiver_kyc(fields: List<Data>, value: Bool) -> Data {
   )
 }
 
-pub fn set_extensions(fields: List<Data>, value: Data) -> Data {
-  builtin.constr_data(
-    0,
-    utils.replace_data_field(fields, idx_extensions, value),
-  )
-}
-
 pub fn set_upgrades_locked(fields: List<Data>, value: Bool) -> Data {
   builtin.constr_data(
     0,
@@ -451,7 +437,32 @@ pub fn gs_datum_from_output(
       constants.global_state_asset_name,
     ) == 1
   expect InlineDatum(gs_raw) = gs_output.datum
-  expect gs: GlobalStateDatum = gs_raw
+  decode_global_state(gs_raw)
+}
+
+/// Number of `GlobalStateDatum` fields this version defines and reads.
+pub const gs_field_count = 14
+
+/// Decode a GlobalState datum, IGNORING any fields after the first
+/// `gs_field_count`. The single strict-decode choke point for every reader.
+///
+/// Why lenient: the datum's shape must be able to GROW. A later GlobalState
+/// version (reached through `MigrateGlobalState`) may append fields, and the
+/// validators that can never be upgraded — the minting proxy, the denylist and
+/// power-users lists — must keep reading such a datum. A plain
+/// `expect gs: GlobalStateDatum = raw` rejects ANY extra field (measured), so
+/// they would break for good. The rule this buys is APPEND-ONLY: never remove,
+/// reorder or retype one of these 14.
+///
+/// Nothing is lost by ignoring the tail: the datum is authenticated by the
+/// NFT and only ever written by genesis (strictly sanitised) and by GlobalState
+/// branches. The 14 known fields are still decoded strictly — a wrong type or
+/// a short datum traps, and the constructor must be 0.
+pub fn decode_global_state(raw: Data) -> GlobalStateDatum {
+  let constr = builtin.un_constr_data(raw)
+  expect builtin.fst_pair(constr) == 0
+  let known = list.take(builtin.snd_pair(constr), gs_field_count)
+  expect gs: GlobalStateDatum = builtin.constr_data(0, known)
   gs
 }
 
@@ -580,7 +591,9 @@ pub type GlobalStateSpendAction {
   /// nobody can produce (GlobalState would be unspendable forever).
   ///
   /// The datum is carried over unchanged; a new version changes state through its
-  /// own actions, keeping anything new inside `extensions`. Appended last: the
+  /// own actions — and a version that APPENDS datum fields must read the
+  /// datum as `Data` by index and default the fields a migrated-in datum does
+  /// not have yet (it arrives in the previous, shorter shape). Appended last: the
   /// constructor index is the redeemer encoding.
   MigrateGlobalState { new_spend_script_hash: ByteArray }
 }
@@ -616,7 +629,6 @@ fn test_gs_input_with(transfers_paused: Bool, deactivated: Bool) -> Input {
     network_id: 1,
     minting_script_credential_hash: #"",
     upgrades_locked: False,
-    extensions: builtin.constr_data(0, []),
   }
   Input {
     output_reference: OutputReference {
@@ -671,7 +683,6 @@ fn test_layout_datum() -> GlobalStateDatum {
     network_id: 9,
     minting_script_credential_hash: #"a8",
     upgrades_locked: True,
-    extensions: builtin.i_data(14),
   }
 }
 
@@ -698,7 +709,6 @@ test gs_getters_read_correct_fields() {
     get_network_id(fields) == d.network_id,
     get_minting_script_credential_hash(fields) == d.minting_script_credential_hash,
     get_upgrades_locked(fields) == d.upgrades_locked,
-    builtin.equals_data(get_extensions(fields), d.extensions),
   }
 }
 
@@ -757,9 +767,48 @@ test gs_setters_round_trip() {
       set_upgrades_locked(fields, False),
       GlobalStateDatum { ..d, upgrades_locked: False },
     ),
-    builtin.equals_data(
-      set_extensions(fields, builtin.i_data(7)),
-      GlobalStateDatum { ..d, extensions: builtin.i_data(7) },
-    ),
   }
+}
+
+// ── decode_global_state: append-only datum, lenient readers ──────────────────
+
+fn layout_with_tail(tail: List<Data>) -> Data {
+  let raw: Data = test_layout_datum()
+  builtin.constr_data(0, list.concat(builtin.unconstr_fields(raw), tail))
+}
+
+test decode_global_state_reads_the_exact_layout() {
+  let raw: Data = test_layout_datum()
+  decode_global_state(raw) == test_layout_datum()
+}
+
+// A future version's appended fields are ignored, and the 14 known ones read
+// exactly as before — what keeps the non-upgradeable readers alive.
+test decode_global_state_ignores_trailing_fields() {
+  decode_global_state(
+    layout_with_tail([builtin.i_data(1), builtin.b_data(#"ff")]),
+  ) == test_layout_datum()
+}
+
+test decode_global_state_rejects_a_short_datum() fail {
+  let raw: Data = test_layout_datum()
+  expect [_, ..thirteen] = list.reverse(builtin.unconstr_fields(raw))
+  decode_global_state(builtin.constr_data(0, list.reverse(thirteen))) == test_layout_datum()
+}
+
+test decode_global_state_rejects_another_constructor() fail {
+  let raw: Data = test_layout_datum()
+  decode_global_state(builtin.constr_data(1, builtin.unconstr_fields(raw))) == test_layout_datum()
+}
+
+// Leniency covers the TAIL only: a wrong type in a known field still traps
+// (here mintable_amount, index 2, as bytes).
+test decode_global_state_rejects_a_wrong_type_in_a_known_field() fail {
+  let raw: Data = test_layout_datum()
+  let fields = utils.replace_data_field(
+    builtin.unconstr_fields(raw),
+    idx_mintable_amount,
+    builtin.b_data(#"00"),
+  )
+  decode_global_state(builtin.constr_data(0, fields)) == test_layout_datum()
 }

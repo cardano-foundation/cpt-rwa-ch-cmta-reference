@@ -316,7 +316,6 @@ fn p_gs_ref_input(paused: Bool, deactivated: Bool, req_receiver: Bool) -> Input 
     network_id: 1,
     minting_script_credential_hash: #"",
     upgrades_locked: False,
-    extensions: builtin.constr_data(0, []),
   }
   Input {
     output_reference: p_out_ref(1),
@@ -826,7 +825,6 @@ fn p_gs_ref_input_with_pu_policy(pu_policy_field: ByteArray) -> Input {
     network_id: 1,
     minting_script_credential_hash: #"",
     upgrades_locked: False,
-    extensions: builtin.constr_data(0, []),
   }
   Input {
     output_reference: p_out_ref(1),
@@ -915,7 +913,6 @@ fn p_gs_ref_input_with_member_root(
     network_id: 1,
     minting_script_credential_hash: #"",
     upgrades_locked: False,
-    extensions: builtin.constr_data(0, []),
   }
   Input {
     output_reference: p_out_ref(1),

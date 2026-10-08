@@ -8,6 +8,7 @@ use cardano/transaction.{
   InlineDatum, Input, NoDatum, Output, OutputReference, Transaction,
 }
 use constants
+use tests
 use types/global_state.{
   GlobalStateDatum, GlobalStateLocation, GlobalStateReferenced, GlobalStateSpent,
   gs_datum_from_output,
@@ -159,7 +160,6 @@ fn make_gs_output(authority: ByteArray, deactivated: Bool) -> Output {
     network_id: 1,
     minting_script_credential_hash: authority,
     upgrades_locked: False,
-    extensions: builtin.constr_data(0, []),
   }
   Output {
     address: Address {
@@ -388,5 +388,17 @@ test publish_rejects_credential_deregistration() {
       refund: Never,
     },
     base_tx(),
+  )
+}
+
+// The proxy can never be upgraded, so it must keep reading a GlobalState datum
+// that a future version extended with trailing fields (see decode_global_state).
+test succeeds_when_global_state_has_trailing_fields() {
+  run_withdraw(
+    spent_redeemer(),
+    tests.with_trailing_gs_fields(
+      spent_tx(test_minting_authority_hash, Some(test_minting_authority_hash)),
+      test_gs_policy_id,
+    ),
   )
 }

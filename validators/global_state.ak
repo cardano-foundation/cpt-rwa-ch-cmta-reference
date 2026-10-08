@@ -87,10 +87,6 @@ fn sanitise_initial_datum(datum: GlobalStateDatum, self_mint: Value) -> Bool {
     datum.mintable_amount >= 0,
     bytearray.length(datum.admin_credential_hash) == 28,
     bytearray.length(datum.minting_script_credential_hash) == 28,
-    // Forward-compatibility slot starts EMPTY. No branch of this version can
-    // write it, so whatever genesis puts here is permanent until a migration —
-    // pin it rather than let a deployer smuggle in state a future version reads.
-    builtin.equals_data(datum.extensions, builtin.constr_data(0, [])),
     // Born unlocked. Locking is a single admin transaction away, so a
     // deployment that wants immutability from day one loses nothing — but a
     // token that started locked could never be corrected at all.
@@ -659,7 +655,8 @@ validator global_state_spend_validator(
             self.reference_inputs,
             fn(i) { i.output.reference_script == Some(new_spend_script_hash) },
           ),
-          // State carried over byte-for-byte; `extensions` included.
+          // State carried over byte-for-byte; the target adds any new fields
+          // through its own actions (see GlobalStateDatum: append-only).
           builtin.equals_data(input_datum_data, global_state_output_datum),
         }
       }
@@ -746,7 +743,6 @@ fn t_datum(transfers_paused: Bool, deactivated: Bool) -> GlobalStateDatum {
     network_id: 1,
     minting_script_credential_hash: t_minting_script,
     upgrades_locked: False,
-    extensions: builtin.constr_data(0, []),
   }
 }
 
@@ -1105,16 +1101,6 @@ test rotate_minting_script_fails_once_upgrades_are_locked() {
     rotate_minting_script_redeemer(t_new_minting_script),
     t_tx(input_datum, output_datum, [t_admin]),
   )
-}
-
-test sanitise_rejects_non_empty_extensions_at_genesis() {
-  // The forward-compatibility slot must start empty: no branch of this version can
-  // write it, so a non-empty genesis value would be permanent state nobody chose.
-  let datum = GlobalStateDatum {
-    ..sanitise_datum(#"", 1),
-    extensions: builtin.i_data(1),
-  }
-  !sanitise_initial_datum(datum, sanitise_mint())
 }
 
 test sanitise_rejects_genesis_that_is_born_locked() {
@@ -1495,7 +1481,6 @@ fn sanitise_datum(
     network_id,
     minting_script_credential_hash: t_minting_script,
     upgrades_locked: False,
-    extensions: builtin.constr_data(0, []),
   }
 }
 
@@ -3463,24 +3448,6 @@ test migrate_global_state_fails_when_the_datum_changes() {
   )
 }
 
-test migrate_global_state_fails_when_extensions_are_smuggled() {
-  let input_datum = t_datum(False, False)
-  let tx = t_migrate_tx(input_datum, t_migrate_target)
-  expect [gs_out, ..rest] = tx.outputs
-  let changed = GlobalStateDatum {
-    ..input_datum,
-    extensions: builtin.i_data(1),
-  }
-  !run_spend(
-    input_datum,
-    migrate_redeemer(t_migrate_target),
-    Transaction {
-      ..tx,
-      outputs: [Output { ..gs_out, datum: InlineDatum(changed) }, ..rest],
-    },
-  )
-}
-
 test migrate_global_state_fails_when_the_nft_is_dropped() {
   let input_datum = t_datum(False, False)
   !run_spend(
@@ -3573,38 +3540,5 @@ test deactivated_input_rejects_migrate_global_state() fail {
     input_datum,
     migrate_redeemer(t_migrate_target),
     t_migrate_tx(input_datum, t_migrate_target),
-  )
-}
-
-// `extensions` is written by no branch: the two branches that rewrite a field
-// on every routine use must not carry an extensions change either.
-test set_mintable_amount_cannot_smuggle_an_extensions_change() {
-  let input_datum = t_datum(False, False)
-  !run_spend(
-    input_datum,
-    set_mintable_amount_redeemer(42),
-    t_tx(
-      input_datum,
-      GlobalStateDatum {
-        ..input_datum,
-        mintable_amount: 42,
-        extensions: builtin.i_data(1),
-      },
-      [t_admin],
-    ),
-  )
-}
-
-test mint_security_cannot_smuggle_an_extensions_change() {
-  let input_datum = t_datum(False, False)
-  let output_datum = GlobalStateDatum {
-    ..input_datum,
-    mintable_amount: input_datum.mintable_amount - 100,
-    extensions: builtin.i_data(1),
-  }
-  !run_spend(
-    input_datum,
-    mintsecurity_redeemer(),
-    t_mintsecurity_tx(input_datum, output_datum, 100, [t_admin]),
   )
 }

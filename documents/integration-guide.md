@@ -236,7 +236,9 @@ continuing output to `Script(new_spend_script_hash)` with the same stake credent
 datum and the non-ADA value over unchanged. No security token may be minted, burned or spent in the
 same transaction. Off-chain code must take the GlobalState validator from the address that holds the
 NFT, never from a fixed blueprint, because that address changes with each migration. Locate
-GlobalState by its NFT as every validator does.
+GlobalState by its NFT as every validator does. The datum is append-only: decode the first 14
+fields and ignore any after them, as `decode_global_state` does on chain — a later GlobalState
+version may add fields, and a reader that insists on exactly 14 would stop working for that token.
 
 `LockUpgrades` irreversibly closes the authority-rotation, registry-upgrade and GlobalState-migration
 paths, and admin changes to the supply cap, for **later** transactions. A registry upgrade bundled into the same transaction can still read the

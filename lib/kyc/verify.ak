@@ -410,7 +410,6 @@ fn test_gs_datum_with_tel(
     network_id: test_network_id,
     minting_script_credential_hash: #"",
     upgrades_locked: False,
-    extensions: builtin.constr_data(0, []),
   }
 }
 
@@ -431,7 +430,6 @@ fn test_gs_datum_with_root(root: ByteArray) -> GlobalStateDatum {
     network_id: test_network_id,
     minting_script_credential_hash: #"",
     upgrades_locked: False,
-    extensions: builtin.constr_data(0, []),
   }
 }
 

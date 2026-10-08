@@ -13,6 +13,7 @@ use cardano/transaction.{
   InlineDatum, Input, NoDatum, Output, OutputReference, Transaction, find_input,
 }
 use constants
+use tests
 use types/denylist.{
   AddToDenylist, Deinit, Denylist, Init, MintRedeemer, RemoveFromDenylist,
   SpendRedeemer, StateTransition,
@@ -523,7 +524,6 @@ fn t_gs_datum(deactivated: Bool) -> GlobalStateDatum {
     network_id: 1,
     minting_script_credential_hash: t_admin,
     upgrades_locked: False,
-    extensions: builtin.constr_data(0, []),
   }
 }
 
@@ -766,4 +766,13 @@ test denylist_remove_rejects_a_27_byte_key() {
 /// Same guard, one byte long.
 test denylist_remove_rejects_a_29_byte_key() {
   !t_run_denylist_remove(t_key_29, t_dl_remove_tx(t_key_29))
+}
+
+// Non-upgradeable: must keep reading a GlobalState datum a future version
+// extended with trailing fields (see decode_global_state).
+test denylist_insert_accepts_a_global_state_with_trailing_fields() {
+  t_run_denylist_add(
+    t_key_28,
+    tests.with_trailing_gs_fields(t_dl_insert_tx(t_key_28), t_gs_policy),
+  )
 }

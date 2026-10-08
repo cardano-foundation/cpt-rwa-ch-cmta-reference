@@ -269,9 +269,11 @@ The GlobalState admin has three distinct upgrade paths, plus control over the su
   script nobody can produce. **The target governs every later GlobalState action, the supply cap
   included** — migrating to a permissive script hands GlobalState to anyone, which is stronger than
   a permissive minting authority. Migrate only to a reviewed build of this repository. Readers find
-  GlobalState by its NFT, never its address, so nothing else changes. The datum's outer shape is
-  fixed forever once deployed (the list validators decode it strictly); a new version keeps any new
-  state inside the opaque `extensions` field, which is empty at genesis.
+  GlobalState by its NFT, never its address, so nothing else changes. The datum is
+  **append-only**: a new version may add fields after the existing 14 — every reader, including the
+  minting proxy and the list validators that can never be upgraded, ignores trailing fields — but
+  must never remove, reorder or retype one. Because a migration carries the datum over unchanged, a
+  version that adds fields must read the datum by index and default the fields it does not have yet.
 
 `LockUpgrades` is an admin-signed, one-way GlobalState action that closes **all four** for later
 transactions — after it, `mintable_amount` moves only through mint and burn and the GlobalState
