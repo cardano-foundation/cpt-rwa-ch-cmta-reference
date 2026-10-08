@@ -21,6 +21,71 @@ Reflects technical requirements and functionalities defined by the CMTA Framewor
 The profile implements the relevant base and enforcement functionality of the CMTA Framework, covering supply and balance views (ledger-native on Cardano), transfer, mint, burn, pause/unpause and status, deactivate and status, and full-address freeze/unfreeze and status. Optional modules (snapshots, distributions, debt terms, delegated approval) are not implemented; EVM-specific machinery (allowance mechanic, gasless relaying, cross-chain, interface conformance) is not applicable on eUTxO.
 A third-party equivalency assessment of this codebase is maintained at [CMTA/CMTAT-Cardano](https://github.com/CMTA/CMTAT-Cardano).
 
+---
+
+## CMTA recognition
+
+On 6 October 2026 the Expert Committee of the [Capital Markets and Technology Association](https://cmta.ch)
+recognised this contract set as a **Recognized Smart Contract** for the purposes of the CMTA Standard for
+the Tokenization of Equity Securities (the Equity Standard) and the CMTA Tokenized Shares Certification
+Mark Regulations. The delegation determined unanimously that it includes the features required by
+Appendix 2 of the Equity Standard and the mandatory functionalities of the CMTAT Framework, that it
+contains no function contradicting the Equity Standard, and that it may accordingly be used **in lieu of
+the CMTAT reference implementation** for the purposes of CMTA's certification schemes.
+
+The signed decision is in
+[`documents/certification/`](documents/certification/2026-10-06-cmta-expert-committee-recognition-decision.pdf).
+
+**What was recognised.** Commit `36cc71b677ccc7c98fd8d83cf1f83072055baf63`, and release
+[`1.0.0`](https://github.com/cardano-foundation/cpt-rwa-ch-de-cmta-reference/releases/tag/1.0.0)
+(`af153094c1222ca2fa956676540d0e4b1a002806`), which changes only this README and therefore carries
+identical scripts. Those scripts are the `plutus.json` with SHA-256
+`3ecc70618ab360795425b42be98fdf394100b33154336a1bea0c337e69f8c48e`, built with Aiken v1.1.23
+(`8949565a9969278846ffefe30bc3b892029dd318`) for Plutus V3, with dependency versions locked in
+[`aiken.lock`](aiken.lock). The delegation reviewed that code, the third-party security audit and the
+equivalency pre-assessment, all three linked from [Review and audit](#review-and-audit) below.
+
+**Conditions on each deployment.** Recognition is granted subject to each deployment including:
+
+1. a reference to, or a hash of, the tokenization terms, recorded on chain;
+2. `decimals`, published as zero in the token's metadata;
+3. a metadata token carrying the name and ticker symbol of the token; and
+4. a record, alongside its deployment parameters, of the CIP-113 base-layer commit against which this
+   contract set's reliance on the base layer was checked.
+
+Condition 1 is a deployment duty rather than a contract feature: `security_info` is opaque to every
+validator, as described under [Technical compliance status](#technical-compliance-status). Conditions 2
+and 3 are carried by the CIP-68 metadata token, described under
+[CIP-68 metadata tokens](#cip-68-metadata-tokens). For condition 4, the base-layer commit cited by the
+audit report is `9db7e0629a1509cc9d41d069f0ef0ed251601173`.
+
+Provided those four elements are present at deployment, an issuer using this contract set for the
+tokenization of equity securities may refer to it as a smart contract "recognized by the CMTA" when
+applying for the right to use the CMTA Tokenized Shares certification mark, subject to the other
+requirements and recommendations of the Equity Standard and the Certification Mark Regulations.
+
+**What the recognition does not cover.**
+
+* The **CIP-113 base layer**
+  ([cardano-foundation/cip113-programmable-tokens](https://github.com/cardano-foundation/cip113-programmable-tokens)),
+  which was excluded from the scope of the audit and was audited separately.
+* The **CMTA Tokenized Debt** certification scheme. The recognition is for tokenized shares only.
+* Any **regulatory approval**. Issuers remain solely responsible for ensuring that their tokenized
+  shares and related processes comply with all applicable legal and regulatory requirements.
+
+The Expert Committee also recorded that the base layer's core upgrade authority is a trusted role able
+to redefine the validation logic of every programmable token, including tokens already issued, and that
+it is currently held under a limited multi-signature arrangement. The recognition is given on the basis
+of that arrangement and does not constitute an endorsement of it. Issuers should take it into account in
+their own risk assessment and disclosures.
+
+**Validity.** The recognition holds for so long as this contract set is not materially modified without
+the Expert Committee's prior approval, the base layer used by a deployment is not materially modified in
+a way that affects the functioning of this contract set, and no change in the applicable legal or
+regulatory framework renders it incompatible with the Equity Standard or the Certification Mark
+Regulations. The Expert Committee reserves the right to withdraw the recognition if any of those
+conditions ceases to be met.
+
 
 ---
 
@@ -84,10 +149,12 @@ referenced by compact identifiers or hashes.
   [`documents/pentesting/`](documents/pentesting/). The 2026-08-19/20 internal review and its
   fixes ([`documents/security/security-fixes.md`](documents/security/security-fixes.md)), the
   minting-proxy upgradability, and the `GlobalStateLocation` change all postdate both engagements,
-  so neither report covers the current code. `SetMintableAmount` (2026-10-06) and `MigrateGlobalState` (2026-10-06, a new
-  admin power over the validator that holds the supply cap) also postdate every review listed here.
-* **Formal security audit** — an official third-party audit is **planned and not yet completed**.
-  Until it has been, treat this code as unaudited.
+  so neither report covers the current code.
+* **Third-party security audit** — No Witness Labs, report version 0.1.0 dated 22 September 2026, in
+  [`documents/audit/`](documents/audit/2026-09-22-cip-113-1st-module-audit-report.pdf). It audited commit
+  `06a8059d` and verified the fixes at `f454505d`; its compiled scripts are identical to those recognised
+  by the CMTA Expert Committee. The CIP-113 base layer was **out of scope** — it was audited separately
+  ([reports of 10 August and 24 September 2026](https://github.com/cardano-foundation/cip113-programmable-tokens/tree/369e8c280609208b388c77937dc3a18e02561b0a/documentation/audit)).
 * **Internal security review** — an adversarial self-review of the compliance layer found and fixed
   a set of defects, two of them critical. Each is written up with its cause, its fix and the
   reasoning in [`documents/security/security-fixes.md`](documents/security/security-fixes.md), and
@@ -102,7 +169,9 @@ referenced by compact identifiers or hashes.
   reasoning under *Acknowledged, and deliberately not changed*. Still not a substitute for the
   third-party audit.
 * **Third-party equivalency assessment** — an independent CMTAT mapping of this codebase is
-  maintained at [CMTA/CMTAT-Cardano](https://github.com/CMTA/CMTAT-Cardano).
+  maintained at [CMTA/CMTAT-Cardano](https://github.com/CMTA/CMTAT-Cardano). Version 0.2.0 of that
+  mapping is the pre-assessment the Expert Committee reviewed; it was filled against version 0.2.0 of
+  CMTA's criteria, which have since been superseded.
 
 ---
 
