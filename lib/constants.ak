@@ -51,19 +51,6 @@ pub const max_trusted_entity_metadata_bytes = 512
 pub const max_denylist_metadata_bytes = 512
 
 // ============================================================================
-// Admin-set supply headroom ceiling
-// ============================================================================
-// Upper bound on the value `SetMintableAmount` may WRITE to `mintable_amount`:
-// 2^63 - 1, the largest quantity a single ledger mint can carry, so anything
-// larger buys nothing. Without it, an oversized integer written just before
-// `LockUpgrades` could only ever be moved again by int64-sized mint deltas.
-//
-// Deliberately NOT a field invariant, and not a datum-growth cap above: genesis
-// does not enforce it, and `MintSecurity` burns may legitimately lift the field
-// above it. Do not add an `<= max` check to `MintSecurity` or off-chain readers.
-pub const max_mintable_amount = 9_223_372_036_854_775_807
-
-// ============================================================================
 // CIP-68 protected asset-name prefix
 // ============================================================================
 // CIP-67 encodes an asset-name label as four bytes: `0x00 | label(20 bits) |
