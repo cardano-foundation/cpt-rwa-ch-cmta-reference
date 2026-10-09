@@ -1,7 +1,9 @@
+use aiken/builtin
 use aiken/collection/dict
+use aiken/collection/list
 use aiken/interval.{Finite, Interval, IntervalBound}
 use cardano/address.{Address, Credential, Script, VerificationKey}
-use cardano/assets.{from_asset, from_lovelace, merge}
+use cardano/assets.{from_asset, from_lovelace, merge, quantity_of}
 use cardano/transaction.{
   InlineDatum, Input, Output, OutputReference, Transaction,
 }
@@ -258,4 +260,41 @@ test covers_key_fails_when_target_above_link() fail {
   let next = #"50000000000000000000000000000000000000000000000000000000"
   let target = #"60000000000000000000000000000000000000000000000000000000"
   covers_key(Some(prev), Some(next), target)
+}
+
+/// Append two extra trailing fields to the datum of every input and reference
+/// input that carries the GlobalState NFT — the shape a FUTURE GlobalState
+/// version may produce. The non-upgradeable readers (minting proxy, denylist,
+/// power-users) must keep accepting it; see `decode_global_state`.
+pub fn with_trailing_gs_fields(
+  tx: Transaction,
+  gs_policy: ByteArray,
+) -> Transaction {
+  let extend = fn(input: Input) {
+    if quantity_of(
+      input.output.value,
+      gs_policy,
+      constants.global_state_asset_name,
+    ) == 1 {
+      expect InlineDatum(raw) = input.output.datum
+      let longer = builtin.constr_data(
+        0,
+        list.concat(
+          builtin.unconstr_fields(raw),
+          [builtin.i_data(42), builtin.b_data(#"cafe")],
+        ),
+      )
+      Input {
+        ..input,
+        output: Output { ..input.output, datum: InlineDatum(longer) },
+      }
+    } else {
+      input
+    }
+  }
+  Transaction {
+    ..tx,
+    inputs: list.map(tx.inputs, extend),
+    reference_inputs: list.map(tx.reference_inputs, extend),
+  }
 }

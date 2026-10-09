@@ -1,4 +1,5 @@
 use aiken/builtin
+use aiken/collection/list
 use cardano/address.{Address, Script}
 use cardano/assets.{from_asset, quantity_of}
 use cardano/transaction.{InlineDatum, Input, Output, OutputReference}
@@ -42,6 +43,12 @@ pub type GlobalStateLocation {
 /// branch. Reordering, inserting or removing a field silently reads or writes
 /// the wrong one — the tripwire test `gs_getters_read_correct_fields` exists to
 /// turn that into a build failure.
+///
+/// APPEND-ONLY across versions. A later GlobalState version (reached through
+/// `MigrateGlobalState`) may add fields AFTER these 14 — every reader decodes
+/// through `decode_global_state`, which ignores trailing fields, so the
+/// validators that can never be upgraded keep working. Never remove, reorder
+/// or retype one of these 14.
 pub type GlobalStateDatum {
   //If true, no transfer can be executed
   transfers_paused: Bool,
@@ -49,7 +56,9 @@ pub type GlobalStateDatum {
   // This flag is irreversible and can only be set to true. It is meant to be used in case of decimissioning the protocol or in case of a critical bug that requires the protocol to be deactivated.
   // Can only be set if transfers are paused. Once set to true, it cannot be reverted back to false.
   deactivated: Bool,
-  //Goes to zero when new tokens are minted, increases when tokens are burnt
+  //Remaining supply HEADROOM, not total supply. Decreases when tokens are
+  //minted, increases when tokens are burnt. The admin may also set it to
+  //an absolute value via `SetMintableAmount` until `upgrades_locked`.
   mintable_amount: Int,
   //Key-hash of the protocol administrator. Rotatable via RotateAdmin action.
   admin_credential_hash: ByteArray,
@@ -98,8 +107,8 @@ pub type GlobalStateDatum {
   // would simply deploy their own permissive authority), and it would go
   // STALE the moment `transfer_logic_script` is upgraded through
   // `UpgradeRegistryNode` — the list is fixed at compile time, while the
-  // scripts it names are not, and GlobalState cannot be redeployed to
-  // refresh it because the NFT lives at its address.
+  // scripts it names are not, and refreshing it would mean migrating
+  // GlobalState itself (`MigrateGlobalState`) for every such change.
   //
   // Verify instead at deployment and after every rotation, with a smoke test
   // that a mint lacking a power-user signature is REJECTED. The failure mode
@@ -113,22 +122,26 @@ pub type GlobalStateDatum {
   // After granting or rotating any role, assert that an operation exercising
   // it without that operator's signature is REJECTED.
   minting_script_credential_hash: ByteArray,
-  // ONE-WAY upgrade lock. While False (the genesis value) both upgrade paths
-  // are open; once set True by `LockUpgrades` it can never be cleared — no
+  // ONE-WAY upgrade lock. While False (the genesis value) all four paths
+  // below are open; once set True by `LockUpgrades` it can never be cleared — no
   // branch writes it back, and every branch reproduces the datum wholesale,
   // so there is no path that unsets it. Setting it permanently freezes:
   //
   //   * `RotateMintingScript` — the minting authority can no longer be
-  //     swapped, so the mint/burn rules in force become final; and
+  //     swapped, so the mint/burn rules in force become final;
   //   * the CIP-113 registry-node upgrade — `transfer_logic_script` and
   //     `third_party_transfer_logic_script` can no longer be re-pointed, so
-  //     the transfer rules in force become final.
+  //     the transfer rules in force become final; and
+  //   * `SetMintableAmount` — the admin can no longer reset the supply
+  //     headroom, so `mintable_amount` moves only through mint and burn; and
+  //   * `MigrateGlobalState` — the GlobalState validator itself can no longer
+  //     be replaced, so the rules of every GlobalState action become final.
   //
   // This is the on-chain form of "this token's rules can no longer change",
   // meaningful to holders and regulators precisely BECAUSE an admin key
   // compromise cannot undo it.
   //
-  // CONSEQUENCE OF IT BEING ONE FLAG RATHER THAN TWO: locking gives up the
+  // CONSEQUENCE OF IT BEING ONE FLAG: locking gives up the
   // ability to patch a buggy or compromised minting authority as well. After
   // this is set, the only remaining lever over the token is
   // `DeactivateContract`. Lock only when the deployment is considered final.
@@ -424,7 +437,32 @@ pub fn gs_datum_from_output(
       constants.global_state_asset_name,
     ) == 1
   expect InlineDatum(gs_raw) = gs_output.datum
-  expect gs: GlobalStateDatum = gs_raw
+  decode_global_state(gs_raw)
+}
+
+/// Number of `GlobalStateDatum` fields this version defines and reads.
+pub const gs_field_count = 14
+
+/// Decode a GlobalState datum, IGNORING any fields after the first
+/// `gs_field_count`. The single strict-decode choke point for every reader.
+///
+/// Why lenient: the datum's shape must be able to GROW. A later GlobalState
+/// version (reached through `MigrateGlobalState`) may append fields, and the
+/// validators that can never be upgraded — the minting proxy, the denylist and
+/// power-users lists — must keep reading such a datum. A plain
+/// `expect gs: GlobalStateDatum = raw` rejects ANY extra field (measured), so
+/// they would break for good. The rule this buys is APPEND-ONLY: never remove,
+/// reorder or retype one of these 14.
+///
+/// Nothing is lost by ignoring the tail: the datum is authenticated by the
+/// NFT and only ever written by genesis (strictly sanitised) and by GlobalState
+/// branches. The 14 known fields are still decoded strictly — a wrong type or
+/// a short datum traps, and the constructor must be 0.
+pub fn decode_global_state(raw: Data) -> GlobalStateDatum {
+  let constr = builtin.un_constr_data(raw)
+  expect builtin.fst_pair(constr) == 0
+  let known = list.take(builtin.snd_pair(constr), gs_field_count)
+  expect gs: GlobalStateDatum = builtin.constr_data(0, known)
   gs
 }
 
@@ -481,7 +519,8 @@ pub type GlobalStateSpendAction {
   /// is exactly the scenario this action needs to handle even when that
   /// script itself can no longer be trusted to co-sign.
   RotateMintingScript { new_minting_script_credential_hash: ByteArray }
-  /// ONE-WAY upgrade lock — see `upgrades_locked`. Admin-signed, and
+  /// ONE-WAY upgrade lock — see `upgrades_locked`; closes `RotateMintingScript`,
+  /// registry-node upgrades, `SetMintableAmount` and `MigrateGlobalState`. Admin-signed, and
   /// deliberately not reversible: a lock an admin can lift is not a
   /// commitment. Rejected if already locked, so the action is not a silent
   /// no-op.
@@ -522,6 +561,42 @@ pub type GlobalStateSpendAction {
   /// validator), which permanently freezes transfers (stays paused) and
   /// mint/burn (MintSecurity can no longer run).
   DeactivateContract
+  /// Sets `mintable_amount` to an ABSOLUTE value. Admin-signed only, and
+  /// closed by `LockUpgrades`. The value must lie in
+  /// `[0, constants.max_mintable_amount]` — that bound limits what this
+  /// action writes, not the field (burns may still lift it higher).
+  ///
+  /// The field is remaining headroom, not total supply: setting it below the
+  /// supply already minted is allowed and simply means "no further minting".
+  /// Absolute rather than a delta because the single GlobalState UTxO
+  /// serialises writes — a transaction built against a stale value cannot
+  /// land after a mint, since its input would already be spent. It cannot
+  /// share a transaction with `MintSecurity` (one GlobalState spend, one
+  /// redeemer), so raise-then-mint takes two transactions.
+  ///
+  /// APPENDED LAST on purpose: constructor indices are the on-chain redeemer
+  /// encoding, so inserting it earlier would renumber every action after it.
+  SetMintableAmount { new_mintable_amount: Int }
+  /// Moves the GlobalState NFT and its datum, byte-identical, to a NEW GlobalState
+  /// spend validator whose payment credential is `Script(new_spend_script_hash)`
+  /// (the stake part is not constrained).
+  /// The one branch that relocates the supply-cap host: whatever validator holds
+  /// the NFT afterwards governs every later GlobalState spend — including the cap.
+  ///
+  /// Admin-signed and closed by `LockUpgrades`, like `RotateMintingScript`, and
+  /// with the same trust: until the lock, the admin chooses the code. Migrating to a
+  /// permissive script hands control of GlobalState to anyone, which is STRONGER
+  /// than a fail-open minting authority — off-chain tooling must pin the target to
+  /// a reviewed build. On chain this only refuses BRICKING: a reference input must
+  /// carry the target script, so a migration can never land on a hash whose script
+  /// nobody can produce (GlobalState would be unspendable forever).
+  ///
+  /// The datum is carried over unchanged; a new version changes state through its
+  /// own actions — and a version that APPENDS datum fields must read the
+  /// datum as `Data` by index and default the fields a migrated-in datum does
+  /// not have yet (it arrives in the previous, shorter shape). Appended last: the
+  /// constructor index is the redeemer encoding.
+  MigrateGlobalState { new_spend_script_hash: ByteArray }
 }
 
 pub type GlobalStateSpendRedeemer {
@@ -694,4 +769,47 @@ test gs_setters_round_trip() {
       GlobalStateDatum { ..d, upgrades_locked: False },
     ),
   }
+}
+
+// ── decode_global_state: append-only datum, lenient readers ──────────────────
+
+fn layout_with_tail(tail: List<Data>) -> Data {
+  let raw: Data = test_layout_datum()
+  builtin.constr_data(0, list.concat(builtin.unconstr_fields(raw), tail))
+}
+
+test decode_global_state_reads_the_exact_layout() {
+  let raw: Data = test_layout_datum()
+  decode_global_state(raw) == test_layout_datum()
+}
+
+// A future version's appended fields are ignored, and the 14 known ones read
+// exactly as before — what keeps the non-upgradeable readers alive.
+test decode_global_state_ignores_trailing_fields() {
+  decode_global_state(
+    layout_with_tail([builtin.i_data(1), builtin.b_data(#"ff")]),
+  ) == test_layout_datum()
+}
+
+test decode_global_state_rejects_a_short_datum() fail {
+  let raw: Data = test_layout_datum()
+  expect [_, ..thirteen] = list.reverse(builtin.unconstr_fields(raw))
+  decode_global_state(builtin.constr_data(0, list.reverse(thirteen))) == test_layout_datum()
+}
+
+test decode_global_state_rejects_another_constructor() fail {
+  let raw: Data = test_layout_datum()
+  decode_global_state(builtin.constr_data(1, builtin.unconstr_fields(raw))) == test_layout_datum()
+}
+
+// Leniency covers the TAIL only: a wrong type in a known field still traps
+// (here mintable_amount, index 2, as bytes).
+test decode_global_state_rejects_a_wrong_type_in_a_known_field() fail {
+  let raw: Data = test_layout_datum()
+  let fields = utils.replace_data_field(
+    builtin.unconstr_fields(raw),
+    idx_mintable_amount,
+    builtin.b_data(#"00"),
+  )
+  decode_global_state(builtin.constr_data(0, fields)) == test_layout_datum()
 }

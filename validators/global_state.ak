@@ -5,7 +5,7 @@ use aiken/collection/pairs
 use aiken/interval.{Interval, IntervalBound, NegativeInfinity, PositiveInfinity}
 use aiken/primitive/bytearray
 use aiken_design_patterns/linked_list.{Element, Node}
-use cardano/address.{Address, Credential, Script, VerificationKey}
+use cardano/address.{Address, Credential, Inline, Script, VerificationKey}
 use cardano/assets.{
   PolicyId, Value, from_asset, from_lovelace, merge, quantity_of,
   without_lovelace, zero,
@@ -17,14 +17,14 @@ use cardano/transaction.{
 use constants
 use types/global_state.{
   AddTrustedEntity, DeactivateContract, GlobalStateDatum,
-  GlobalStateSpendRedeemer, LockUpgrades, MintSecurity, ModifySecurityInfo,
-  PauseTransfers, RemoveTrustedEntity, RotateAdmin, RotateMintingScript,
-  SetRequiresReceiverKyc, SetRequiresSenderKyc, TrustedEntityMetadata,
-  UpdateMemberRootHash, UpdateTrustedEntity, set_admin_credential_hash,
-  set_deactivated, set_member_root_hash, set_mintable_amount,
-  set_minting_script_credential_hash, set_requires_receiver_kyc,
-  set_requires_sender_kyc, set_security_info, set_transfers_paused,
-  set_trusted_entity_vkeys, set_upgrades_locked,
+  GlobalStateSpendRedeemer, LockUpgrades, MigrateGlobalState, MintSecurity,
+  ModifySecurityInfo, PauseTransfers, RemoveTrustedEntity, RotateAdmin,
+  RotateMintingScript, SetMintableAmount, SetRequiresReceiverKyc,
+  SetRequiresSenderKyc, TrustedEntityMetadata, UpdateMemberRootHash,
+  UpdateTrustedEntity, set_admin_credential_hash, set_deactivated,
+  set_member_root_hash, set_mintable_amount, set_minting_script_credential_hash,
+  set_requires_receiver_kyc, set_requires_sender_kyc, set_security_info,
+  set_transfers_paused, set_trusted_entity_vkeys, set_upgrades_locked,
 }
 use types/power_users.{PowerUser}
 use utils.{must_be_signed_by_credential, quantity_of_policy_id}
@@ -140,7 +140,8 @@ fn sanitise_initial_datum(datum: GlobalStateDatum, self_mint: Value) -> Bool {
 // - The initial datum is well-formed (basic field checks + trusted entity vkey list is sorted and has no duplicates + power user ll and denylist ll roots are minted).
 // Note: No Check of the receiver address is performed here; the NFT can be sent to any address. 
 //       It MUST be sent to the address of the global_state spend validator address, which we don't know on initialization due to circular dependency.
-//       The global_state spend validator will ensure that the NFT never leaves the script address after this initial minting step.
+//       After this initial minting step the global_state spend validator keeps the NFT at its own address,
+//       except through MigrateGlobalState, which moves it to a new GlobalState validator (admin-signed, until LockUpgrades).
 validator global_state_mint_validator(tx0: ByteArray, index0: Int) {
   mint(_redeemer: Data, policy_id: PolicyId, self: Transaction) {
     let one_time_utxo = OutputReference(tx0, index0)
@@ -183,17 +184,22 @@ validator global_state_mint_validator(tx0: ByteArray, index0: Int) {
 // Spend validator
 // ============================================================================
 // NOTE: All values in the utxo must be preserved by this validator.
-// INVARIANT: the global_state NFT must never leave this script address.
-// Every branch below preserves `global_state_output.address.payment_credential
-// == own_input.output.address.payment_credential`. If you add a new branch, you
-// MUST preserve this — it's what `minting_logic_script` relies on to prove that
-// NFT-in-output implies this spend validator ran.
+// INVARIANT: the global_state NFT leaves this script address ONLY through
+// `MigrateGlobalState`. Every other branch preserves
+// `global_state_output.address == own_input.output.address`; a new branch MUST
+// do the same. Nothing on chain locates GlobalState by address — every reader
+// (minting proxy, authority, transfer logic, lists, the CIP-113 base layer)
+// authenticates it by the NFT — so a spent GlobalState means "the validator
+// holding the NFT ran", which after a migration is the target validator. That
+// is why the target must be a reviewed build (see MigrateGlobalState).
 //
 // INVARIANT: non-Mint branches MUST reject concurrent security-token mints.
 // Together with the minting_logic_script input-branch check, this is what
-// makes `mintable_amount` a truly binding supply cap: the only way to mint a
-// security token in steady state is through MintSecurity, which decrements
-// `mintable_amount`.
+// makes `mintable_amount` a binding supply cap on operators: the only way to
+// mint a security token in steady state is through MintSecurity, which
+// decrements `mintable_amount`. The cap itself is admin-settable via
+// `SetMintableAmount` until `upgrades_locked` — that branch writes the field
+// but, like every non-Mint branch, cannot mint alongside the write.
 //
 // ADMIN: admin credential hash now lives in the input datum (field
 // `admin_credential_hash`). No compile-time owner parameter. Rotation via the
@@ -592,6 +598,65 @@ validator global_state_spend_validator(
           !input_datum.upgrades_locked,
           must_be_signed_by_credential(self, input_datum.admin_credential_hash),
           builtin.equals_data(expected_output_datum, global_state_output_datum),
+        }
+      }
+      SetMintableAmount { new_mintable_amount } -> {
+        let expected_output_datum = set_mintable_amount(
+          input_fields,
+          new_mintable_amount,
+        )
+        and {
+          // Load-bearing here, not just hygiene: without it a mint could ride
+          // along on a cap write and never be decremented from the cap.
+          no_concurrent_security_mint,
+          no_security_token_spent,
+          address_preserved,
+          nft_preserved,
+          value_preserved,
+          no_reference_script,
+          new_mintable_amount >= 0,
+          // The one-way upgrade lock makes the cap final as well.
+          !input_datum.upgrades_locked,
+          must_be_signed_by_credential(self, input_datum.admin_credential_hash),
+          builtin.equals_data(expected_output_datum, global_state_output_datum),
+        }
+      }
+      MigrateGlobalState { new_spend_script_hash } -> {
+        expect Script(own_hash) = own_input.output.address.payment_credential
+        and {
+          no_concurrent_security_mint,
+          no_security_token_spent,
+          nft_preserved,
+          value_preserved,
+          no_reference_script,
+          bytearray.length(new_spend_script_hash) == 28,
+          // Never a silent no-op.
+          new_spend_script_hash != own_hash,
+          // The one-way upgrade lock closes this path too.
+          !input_datum.upgrades_locked,
+          must_be_signed_by_credential(self, input_datum.admin_credential_hash),
+          // The one rule that differs from every other branch: the address MOVES —
+          // its payment credential must be exactly the named SCRIPT (never a key
+          // with the same bytes). The stake part is deliberately left free: it
+          // cannot authorise spending GlobalState and no reader locates GlobalState
+          // by address; it only directs the UTxO's ADA rewards / voting weight.
+          global_state_output.address.payment_credential == Script(
+            new_spend_script_hash,
+          ),
+          // Anti-brick: the target's script must be producible — published as a
+          // reference script in this very transaction's reference inputs. KEEP IT:
+          // a migration to a hash nobody can produce is permanent (GlobalState could
+          // never be spent again). The reference script goes UNUSED in this tx, which
+          // the Conway ledger accepts; aiken-java-binding 0.1.0 (uplc 1.1.13) rejects
+          // it off-chain as `RequiredRedeemersMismatch { extra }` — evaluate this tx
+          // with a ledger-faithful evaluator rather than removing the guard.
+          list.any(
+            self.reference_inputs,
+            fn(i) { i.output.reference_script == Some(new_spend_script_hash) },
+          ),
+          // State carried over byte-for-byte; the target adds any new fields
+          // through its own actions (see GlobalStateDatum: append-only).
+          builtin.equals_data(input_datum_data, global_state_output_datum),
         }
       }
       DeactivateContract -> {
@@ -2912,5 +2977,550 @@ test update_member_root_hash_rejects_when_the_security_token_is_minted_into_an_o
     with_security_token_minted_into_an_output(
       t_tx(input_datum, output_datum, [t_admin]),
     ),
+  )
+}
+
+// ── SetMintableAmount — admin-only, bounded, closed by LockUpgrades ──────────
+//
+// Every negative below is a one-change copy of a passing positive: the output
+// datum always equals the input with `mintable_amount` set to the redeemer's
+// value, so only the guard under test can be what rejects it.
+
+fn set_mintable_amount_redeemer(
+  new_mintable_amount: Int,
+) -> GlobalStateSpendRedeemer {
+  GlobalStateSpendRedeemer {
+    global_state_output_index: 0,
+    action: SetMintableAmount { new_mintable_amount },
+  }
+}
+
+/// Input `input_datum`, output identical except `mintable_amount = value`,
+/// redeemer naming the same `value`.
+fn t_set_mintable_tx(
+  input_datum: GlobalStateDatum,
+  value: Int,
+  signatories: List<ByteArray>,
+) -> Transaction {
+  t_tx(
+    input_datum,
+    GlobalStateDatum { ..input_datum, mintable_amount: value },
+    signatories,
+  )
+}
+
+test set_mintable_amount_succeeds_when_admin_signs_raise() {
+  let input_datum = t_datum(False, False)
+  let value = input_datum.mintable_amount + 5_000_000
+  run_spend(
+    input_datum,
+    set_mintable_amount_redeemer(value),
+    t_set_mintable_tx(input_datum, value, [t_admin]),
+  )
+}
+
+test set_mintable_amount_succeeds_when_admin_signs_lower() {
+  let input_datum = t_datum(False, False)
+  let value = input_datum.mintable_amount - 1
+  run_spend(
+    input_datum,
+    set_mintable_amount_redeemer(value),
+    t_set_mintable_tx(input_datum, value, [t_admin]),
+  )
+}
+
+test set_mintable_amount_succeeds_to_zero() {
+  let input_datum = t_datum(False, False)
+  run_spend(
+    input_datum,
+    set_mintable_amount_redeemer(0),
+    t_set_mintable_tx(input_datum, 0, [t_admin]),
+  )
+}
+
+test set_mintable_amount_rejects_negative() {
+  let input_datum = t_datum(False, False)
+  !run_spend(
+    input_datum,
+    set_mintable_amount_redeemer(-1),
+    t_set_mintable_tx(input_datum, -1, [t_admin]),
+  )
+}
+
+test set_mintable_amount_fails_without_admin_signature() {
+  let input_datum = t_datum(False, False)
+  !run_spend(
+    input_datum,
+    set_mintable_amount_redeemer(42),
+    t_set_mintable_tx(input_datum, 42, []),
+  )
+}
+
+test set_mintable_amount_fails_with_non_admin_signature() {
+  let input_datum = t_datum(False, False)
+  !run_spend(
+    input_datum,
+    set_mintable_amount_redeemer(42),
+    t_set_mintable_tx(input_datum, 42, [t_new_admin]),
+  )
+}
+
+// Positive control for the locked negative: identical except the lock.
+test set_mintable_amount_succeeds_when_upgrades_unlocked() {
+  let input_datum = GlobalStateDatum {
+    ..t_datum_locked(),
+    upgrades_locked: False,
+  }
+  run_spend(
+    input_datum,
+    set_mintable_amount_redeemer(42),
+    t_set_mintable_tx(input_datum, 42, [t_admin]),
+  )
+}
+
+test set_mintable_amount_fails_once_upgrades_are_locked() {
+  // LockUpgrades makes the cap final, like the mint/transfer rules.
+  let input_datum = t_datum_locked()
+  !run_spend(
+    input_datum,
+    set_mintable_amount_redeemer(42),
+    t_set_mintable_tx(input_datum, 42, [t_admin]),
+  )
+}
+
+test set_mintable_amount_output_must_match_redeemer() {
+  let input_datum = t_datum(False, False)
+  !run_spend(
+    input_datum,
+    set_mintable_amount_redeemer(42),
+    t_set_mintable_tx(input_datum, 43, [t_admin]),
+  )
+}
+
+test set_mintable_amount_cannot_smuggle_another_field_change() {
+  let input_datum = t_datum(False, False)
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    mintable_amount: 42,
+    transfers_paused: True,
+  }
+  !run_spend(
+    input_datum,
+    set_mintable_amount_redeemer(42),
+    t_tx(input_datum, output_datum, [t_admin]),
+  )
+}
+
+test set_mintable_amount_succeeds_when_security_token_absent_from_tx() {
+  // Positive control paired with the three security-token negatives below.
+  let input_datum = t_datum(False, False)
+  run_spend(
+    input_datum,
+    set_mintable_amount_redeemer(42),
+    t_set_mintable_tx(input_datum, 42, [t_admin]),
+  )
+}
+
+test set_mintable_amount_rejects_concurrent_security_mint() {
+  // Load-bearing here: without it a mint could ride along on a cap write
+  // without being decremented from the cap.
+  let input_datum = t_datum(False, False)
+  !run_spend(
+    input_datum,
+    set_mintable_amount_redeemer(42),
+    with_security_token_minted_into_an_output(
+      t_set_mintable_tx(input_datum, 42, [t_admin]),
+    ),
+  )
+}
+
+test set_mintable_amount_rejects_concurrent_security_burn() {
+  // Mint field only (no token input), so `no_concurrent_security_mint` is the
+  // sole guard that can reject it.
+  let input_datum = t_datum(False, False)
+  let tx = t_set_mintable_tx(input_datum, 42, [t_admin])
+  !run_spend(
+    input_datum,
+    set_mintable_amount_redeemer(42),
+    Transaction { ..tx, mint: from_asset(t_issuance_policy, t_sec_name, -1) },
+  )
+}
+
+test set_mintable_amount_rejects_security_token_spent() {
+  let input_datum = t_datum(False, False)
+  !run_spend(
+    input_datum,
+    set_mintable_amount_redeemer(42),
+    with_security_token_input(t_set_mintable_tx(input_datum, 42, [t_admin])),
+  )
+}
+
+test set_mintable_amount_rejects_a_foreign_asset_added_to_the_continuing_output() {
+  let input_datum = t_datum(False, False)
+  !run_spend(
+    input_datum,
+    set_mintable_amount_redeemer(42),
+    with_gs_output_value(
+      t_set_mintable_tx(input_datum, 42, [t_admin]),
+      fn(v) { merge(v, from_asset(t_foreign_policy, "X", 1)) },
+    ),
+  )
+}
+
+test set_mintable_amount_rejects_changed_output_address() {
+  let input_datum = t_datum(False, False)
+  let tx = t_set_mintable_tx(input_datum, 42, [t_admin])
+  expect [gs_out, ..rest] = tx.outputs
+  let moved = Output {
+    ..gs_out,
+    address: Address {
+      payment_credential: Script(t_new_minting_script),
+      stake_credential: None,
+    },
+  }
+  !run_spend(
+    input_datum,
+    set_mintable_amount_redeemer(42),
+    Transaction { ..tx, outputs: [moved, ..rest] },
+  )
+}
+
+test set_mintable_amount_rejects_reference_script_on_output() {
+  let input_datum = t_datum(False, False)
+  let output_datum = GlobalStateDatum { ..input_datum, mintable_amount: 42 }
+  !run_spend(
+    input_datum,
+    set_mintable_amount_redeemer(42),
+    Transaction {
+      ..t_tx(input_datum, output_datum, [t_admin]),
+      outputs: [t_output_with_reference_script(output_datum)],
+    },
+  )
+}
+
+test deactivated_input_rejects_set_mintable_amount() fail {
+  // Terminal `expect !deactivated` traps before dispatch.
+  let input_datum = t_datum(True, True)
+  run_spend(
+    input_datum,
+    set_mintable_amount_redeemer(42),
+    t_set_mintable_tx(input_datum, 42, [t_admin]),
+  )
+}
+
+// ── Burns after SetMintableAmount — headroom semantics ───────────────────────
+//
+// The GlobalState validator never sees circulating supply, only headroom: a
+// MintSecurity spend writes `mintable_amount - minted`, and a burn mints a
+// NEGATIVE quantity. So a cap of 0, or one set below what is already in
+// circulation (indistinguishable on chain), never blocks a burn — and every
+// burn hands its quantity back as headroom that can be minted again.
+
+test burn_succeeds_when_mintable_amount_is_zero() {
+  let input_datum = GlobalStateDatum {
+    ..t_datum(False, False),
+    mintable_amount: 0,
+  }
+  let output_datum = GlobalStateDatum { ..input_datum, mintable_amount: 100 }
+  run_spend(
+    input_datum,
+    mintsecurity_redeemer(),
+    t_mintsecurity_tx(input_datum, output_datum, -100, [t_admin]),
+  )
+}
+
+test mint_rejected_when_mintable_amount_is_zero() {
+  let input_datum = GlobalStateDatum {
+    ..t_datum(False, False),
+    mintable_amount: 0,
+  }
+  let output_datum = GlobalStateDatum { ..input_datum, mintable_amount: -1 }
+  !run_spend(
+    input_datum,
+    mintsecurity_redeemer(),
+    t_mintsecurity_tx(input_datum, output_datum, 1, [t_admin]),
+  )
+}
+
+// After a burn of 100 at a zero cap, exactly the burned 100 may be re-minted…
+test mint_up_to_burned_headroom_succeeds_after_zero_cap() {
+  let input_datum = GlobalStateDatum {
+    ..t_datum(False, False),
+    mintable_amount: 100,
+  }
+  let output_datum = GlobalStateDatum { ..input_datum, mintable_amount: 0 }
+  run_spend(
+    input_datum,
+    mintsecurity_redeemer(),
+    t_mintsecurity_tx(input_datum, output_datum, 100, [t_admin]),
+  )
+}
+
+// …and not one unit more.
+test mint_beyond_burned_headroom_rejected_after_zero_cap() {
+  let input_datum = GlobalStateDatum {
+    ..t_datum(False, False),
+    mintable_amount: 100,
+  }
+  let output_datum = GlobalStateDatum { ..input_datum, mintable_amount: -1 }
+  !run_spend(
+    input_datum,
+    mintsecurity_redeemer(),
+    t_mintsecurity_tx(input_datum, output_datum, 101, [t_admin]),
+  )
+}
+
+// ── MigrateGlobalState — move the NFT + datum to a new GlobalState validator ─
+//
+// Every negative below is a one-change copy of `t_migrate_tx`, which builds a
+// migration that passes: output at Script(t_migrate_target) with the same stake
+// credential, datum byte-identical, NFT and value preserved, and a reference
+// input carrying the target script (the anti-brick guard).
+
+const t_migrate_target: ByteArray =
+  #"2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b"
+
+fn migrate_redeemer(
+  new_spend_script_hash: ByteArray,
+) -> GlobalStateSpendRedeemer {
+  GlobalStateSpendRedeemer {
+    global_state_output_index: 0,
+    action: MigrateGlobalState { new_spend_script_hash },
+  }
+}
+
+fn t_ref_script_input(script_hash: ByteArray) -> Input {
+  Input {
+    output_reference: t_out_ref(7),
+    output: Output {
+      address: Address {
+        payment_credential: VerificationKey(t_admin),
+        stake_credential: None,
+      },
+      value: from_lovelace(20_000_000),
+      datum: NoDatum,
+      reference_script: Some(script_hash),
+    },
+  }
+}
+
+fn with_output_address(tx: Transaction, address: Address) -> Transaction {
+  expect [gs_out, ..rest] = tx.outputs
+  Transaction { ..tx, outputs: [Output { ..gs_out, address }, ..rest] }
+}
+
+fn t_migrate_tx(input_datum: GlobalStateDatum, target: ByteArray) -> Transaction {
+  let tx = with_output_address(
+    t_tx(input_datum, input_datum, [t_admin]),
+    Address { payment_credential: Script(target), stake_credential: None },
+  )
+  Transaction { ..tx, reference_inputs: [t_ref_script_input(target)] }
+}
+
+test migrate_global_state_succeeds_when_admin_signs() {
+  let input_datum = t_datum(False, False)
+  run_spend(
+    input_datum,
+    migrate_redeemer(t_migrate_target),
+    t_migrate_tx(input_datum, t_migrate_target),
+  )
+}
+
+test migrate_global_state_fails_without_admin_signature() {
+  let input_datum = t_datum(False, False)
+  let tx = t_migrate_tx(input_datum, t_migrate_target)
+  !run_spend(
+    input_datum,
+    migrate_redeemer(t_migrate_target),
+    Transaction { ..tx, extra_signatories: [t_new_admin] },
+  )
+}
+
+test migrate_global_state_fails_once_upgrades_are_locked() {
+  let input_datum = t_datum_locked()
+  !run_spend(
+    input_datum,
+    migrate_redeemer(t_migrate_target),
+    t_migrate_tx(input_datum, t_migrate_target),
+  )
+}
+
+test migrate_global_state_fails_to_its_own_hash() {
+  // Never a silent no-op.
+  let input_datum = t_datum(False, False)
+  !run_spend(
+    input_datum,
+    migrate_redeemer(t_gs_script_hash),
+    t_migrate_tx(input_datum, t_gs_script_hash),
+  )
+}
+
+test migrate_global_state_fails_on_a_short_hash() {
+  let input_datum = t_datum(False, False)
+  !run_spend(
+    input_datum,
+    migrate_redeemer(#"2b2b"),
+    t_migrate_tx(input_datum, #"2b2b"),
+  )
+}
+
+test migrate_global_state_fails_when_the_output_stays_put() {
+  let input_datum = t_datum(False, False)
+  let tx = with_output_address(
+    t_migrate_tx(input_datum, t_migrate_target),
+    Address {
+      payment_credential: Script(t_gs_script_hash),
+      stake_credential: None,
+    },
+  )
+  !run_spend(input_datum, migrate_redeemer(t_migrate_target), tx)
+}
+
+test migrate_global_state_fails_to_a_script_other_than_named() {
+  let input_datum = t_datum(False, False)
+  let tx = with_output_address(
+    t_migrate_tx(input_datum, t_migrate_target),
+    Address {
+      payment_credential: Script(t_new_minting_script),
+      stake_credential: None,
+    },
+  )
+  !run_spend(input_datum, migrate_redeemer(t_migrate_target), tx)
+}
+
+test migrate_global_state_fails_to_a_key_with_the_same_bytes() {
+  // A mutant comparing only hash bytes would accept a key-controlled address.
+  let input_datum = t_datum(False, False)
+  let tx = with_output_address(
+    t_migrate_tx(input_datum, t_migrate_target),
+    Address {
+      payment_credential: VerificationKey(t_migrate_target),
+      stake_credential: None,
+    },
+  )
+  !run_spend(input_datum, migrate_redeemer(t_migrate_target), tx)
+}
+
+// Owner decision (2026-10-08): only the payment credential is pinned; the
+// stake part may change with the migration.
+test migrate_global_state_allows_a_different_stake_credential() {
+  let input_datum = t_datum(False, False)
+  let tx = with_output_address(
+    t_migrate_tx(input_datum, t_migrate_target),
+    Address {
+      payment_credential: Script(t_migrate_target),
+      stake_credential: Some(Inline(VerificationKey(t_admin))),
+    },
+  )
+  run_spend(input_datum, migrate_redeemer(t_migrate_target), tx)
+}
+
+test migrate_global_state_fails_when_the_datum_changes() {
+  let input_datum = t_datum(False, False)
+  let tx = t_migrate_tx(input_datum, t_migrate_target)
+  expect [gs_out, ..rest] = tx.outputs
+  let changed = GlobalStateDatum { ..input_datum, mintable_amount: 42 }
+  !run_spend(
+    input_datum,
+    migrate_redeemer(t_migrate_target),
+    Transaction {
+      ..tx,
+      outputs: [Output { ..gs_out, datum: InlineDatum(changed) }, ..rest],
+    },
+  )
+}
+
+test migrate_global_state_fails_when_the_nft_is_dropped() {
+  let input_datum = t_datum(False, False)
+  !run_spend(
+    input_datum,
+    migrate_redeemer(t_migrate_target),
+    with_gs_output_value(
+      t_migrate_tx(input_datum, t_migrate_target),
+      fn(_v) { from_lovelace(2_000_000) },
+    ),
+  )
+}
+
+test migrate_global_state_fails_with_a_foreign_asset_added() {
+  let input_datum = t_datum(False, False)
+  !run_spend(
+    input_datum,
+    migrate_redeemer(t_migrate_target),
+    with_gs_output_value(
+      t_migrate_tx(input_datum, t_migrate_target),
+      fn(v) { merge(v, from_asset(t_foreign_policy, "X", 1)) },
+    ),
+  )
+}
+
+test migrate_global_state_fails_with_a_reference_script_on_the_output() {
+  let input_datum = t_datum(False, False)
+  let tx = t_migrate_tx(input_datum, t_migrate_target)
+  expect [gs_out, ..rest] = tx.outputs
+  !run_spend(
+    input_datum,
+    migrate_redeemer(t_migrate_target),
+    Transaction {
+      ..tx,
+      outputs: [
+        Output { ..gs_out, reference_script: Some(t_reference_script) },
+        ..rest
+      ],
+    },
+  )
+}
+
+test migrate_global_state_fails_with_a_concurrent_security_mint() {
+  let input_datum = t_datum(False, False)
+  !run_spend(
+    input_datum,
+    migrate_redeemer(t_migrate_target),
+    with_security_token_minted_into_an_output(
+      t_migrate_tx(input_datum, t_migrate_target),
+    ),
+  )
+}
+
+test migrate_global_state_fails_when_the_security_token_is_spent() {
+  let input_datum = t_datum(False, False)
+  !run_spend(
+    input_datum,
+    migrate_redeemer(t_migrate_target),
+    with_security_token_input(t_migrate_tx(input_datum, t_migrate_target)),
+  )
+}
+
+test migrate_global_state_fails_without_the_target_script_referenced() {
+  // Anti-brick: a target whose script nobody can produce would leave GlobalState
+  // unspendable forever — unlike a bad RotateMintingScript, never undoable.
+  let input_datum = t_datum(False, False)
+  let tx = t_migrate_tx(input_datum, t_migrate_target)
+  !run_spend(
+    input_datum,
+    migrate_redeemer(t_migrate_target),
+    Transaction { ..tx, reference_inputs: [] },
+  )
+}
+
+test migrate_global_state_fails_when_the_reference_carries_another_script() {
+  let input_datum = t_datum(False, False)
+  let tx = t_migrate_tx(input_datum, t_migrate_target)
+  !run_spend(
+    input_datum,
+    migrate_redeemer(t_migrate_target),
+    Transaction {
+      ..tx,
+      reference_inputs: [t_ref_script_input(t_new_minting_script)],
+    },
+  )
+}
+
+test deactivated_input_rejects_migrate_global_state() fail {
+  let input_datum = t_datum(True, True)
+  run_spend(
+    input_datum,
+    migrate_redeemer(t_migrate_target),
+    t_migrate_tx(input_datum, t_migrate_target),
   )
 }

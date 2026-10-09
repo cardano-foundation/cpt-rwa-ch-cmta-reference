@@ -219,8 +219,30 @@ pins the node to this issuance policy, retains this deployment's GlobalState and
 unfracking setting, and checks `upgrades_locked == False`. Register replacement logic stake
 credentials before their first use. This transaction cannot change the token supply.
 
-`LockUpgrades` irreversibly closes both the authority-rotation and registry-upgrade paths for
-**later** transactions. A registry upgrade bundled into the same transaction can still read the
+To adjust the supply cap, spend GlobalState with `GlobalStateSpendRedeemer {
+global_state_output_index, action: SetMintableAmount { new_mintable_amount } }` (constructor
+index 13), signed by the admin. The continuing output must equal the input datum with only
+`mintable_amount` replaced by `new_mintable_amount`, which must lie in `[0, 2^63 − 1]`. The value
+is absolute remaining headroom, not a delta and not total supply. The transaction must not mint,
+burn or spend the security token, so a raise followed by a mint takes two transactions. Adding
+this action changed the GlobalState spend validator's hash, and therefore its address; every
+branch pins the continuing output to the current address, so a deployment made before it cannot
+gain the action. It requires a fresh deployment.
+
+To replace the GlobalState validator, first publish the new validator as a reference script, then
+spend GlobalState with `MigrateGlobalState { new_spend_script_hash }` (constructor index 14), signed
+by the admin. Include the published reference script among the reference inputs, send the
+continuing output to an address whose payment credential is `Script(new_spend_script_hash)` (any
+stake part), and carry the
+datum and the non-ADA value over unchanged. No security token may be minted, burned or spent in the
+same transaction. Off-chain code must take the GlobalState validator from the address that holds the
+NFT, never from a fixed blueprint, because that address changes with each migration. Locate
+GlobalState by its NFT as every validator does. The datum is append-only: decode the first 14
+fields and ignore any after them, as `decode_global_state` does on chain — a later GlobalState
+version may add fields, and a reader that insists on exactly 14 would stop working for that token.
+
+`LockUpgrades` irreversibly closes the authority-rotation, registry-upgrade and GlobalState-migration
+paths, and admin changes to the supply cap, for **later** transactions. A registry upgrade bundled into the same transaction can still read the
 unlocked input state and succeed; inspect all redeemers in the locking transaction. Admin-only
 GlobalState actions similarly expose their pre-state to a bundled registry operation. Record the
 active script hashes, operator credentials, base-layer version and lock transaction as deployment

@@ -16,7 +16,7 @@ use denylist/absence.{verify_denylist_absence}
 use kyc/verify.{verify_kyc_proof}
 use types/cip68.{Cip68Datum} as types_cip68
 use types/global_state.{
-  GlobalStateDatum, GlobalStateReferenced, GlobalStateSpent,
+  GlobalStateDatum, GlobalStateReferenced, GlobalStateSpent, decode_global_state,
   gs_datum_from_location,
 }
 use types/kyc_proof.{Attestation, AttestationProof}
@@ -55,7 +55,9 @@ use utils.{must_be_signed_by_credential}
 ///      `third_party_transfer_logic_script` at permissive scripts,
 ///      permanently destroying transfer-side compliance. IRREVERSIBLE.
 ///   2. GLOBALSTATE MUST BE SPENT for any supply change, so its
-///      `MintSecurity` branch runs and decrements `mintable_amount`. Merely
+///      `MintSecurity` branch runs and decrements `mintable_amount`. "Its"
+///      means whichever validator holds the GlobalState NFT — after a
+///      `MigrateGlobalState`, the target; that target must keep this branch. Merely
 ///      referencing it leaves the supply cap — a core CMTAT/BaFin invariant
 ///      — entirely unenforced. IRREVERSIBLE (tokens already exist).
 ///   3. ONLY `security_asset_name` may be minted under the issuance policy.
@@ -751,7 +753,8 @@ fn verify_mint_or_burn(
   //
   // The checks themselves live in `verify_mint_destinations` below.
   let destinations_ok = if minted_amount > 0 {
-    expect gs_datum: GlobalStateDatum = gs_raw
+    // Lenient like every GlobalState reader — see `decode_global_state`.
+    let gs_datum = decode_global_state(gs_raw)
     verify_mint_destinations(
       self.outputs,
       destination_actions,

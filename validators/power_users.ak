@@ -14,6 +14,7 @@ use cardano/transaction.{
   InlineDatum, Input, NoDatum, Output, OutputReference, Transaction, find_input,
 }
 use constants
+use tests
 use types/global_state.{
   GlobalStateDatum, active_admin_from_ref_input, gs_datum_from_ref_input,
 }
@@ -920,5 +921,14 @@ test power_users_deinit_rejects_a_missing_admin_signature() {
       reference_inputs: [t_gs_utxo(0, t_gs_datum(True))],
       mint: from_asset(t_pu_policy, constants.linked_list_root_key, -1),
     },
+  )
+}
+
+// Non-upgradeable: must keep reading a GlobalState datum a future version
+// extended with trailing fields (see decode_global_state).
+test power_users_insert_accepts_a_global_state_with_trailing_fields() {
+  t_run_pu_add(
+    t_key_28,
+    tests.with_trailing_gs_fields(t_pu_insert_tx(t_key_28), t_gs_policy),
   )
 }
