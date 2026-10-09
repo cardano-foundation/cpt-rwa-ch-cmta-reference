@@ -17,7 +17,6 @@ use cardano/transaction.{
 use cip68
 use compliance
 use constants
-use kyc/cose
 use kyc/verify.{membership_leaf_key, membership_leaf_value}
 use types/cip68.{Cip68Datum} as types_cip68
 use types/global_state.{
@@ -334,16 +333,39 @@ const t_dest_kyc_payload: ByteArray =
 const t_dest_kyc_signature: ByteArray =
   #"cd6a9d7957c6c9ddd3c10e99fea92d55e2ba7a391037783b19c19045c627532827cf6b7b9e668039a5d60231cc23d077ab37d58d3297299a67d8c6a0ef9b4409"
 
-// Genuine COSE_Sign1 and COSE_Key from scripts/cip30-test-vectors.mjs.
-// These sign the same 67-byte sender/receiver claims as the raw fixtures above.
-const t_cip30_key: ByteArray =
-  #"a401010327200621582003a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8"
+// Genuine CIP-30 parts from scripts/cip30-test-vectors.mjs (sign the same
+// 67-byte sender/receiver claims as the raw fixtures above). The hashed
+// (Ledger-style) receiver proof is byte-identical to what Emurgo's
+// cardano-message-signing produces (scripts/cip30-emurgo-fixture.cjs).
+fn t_sender_cip30() -> Cip30AttestationProof {
+  Cip30AttestationProof {
+    protected_header: #"a201276761646472657373581d6027e38d0e19e3434e33fbd001d3fe04b5b76763f88acd625e0d770b43",
+    payload: #"0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a010000000005f5e100eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee0100",
+    hashed: False,
+    signature: #"f3be430bf286c18ea284134558c3caab3f01d121041063c286b245ccf3c4adcef5da4d4c6ec7e8f6543978dd90cdc57b84668fdb4345a6e26ac42839d61a1700",
+    issuer_vkey: t_kyc_issuer_vkey,
+  }
+}
 
-const t_sender_cip30_sign1: ByteArray =
-  #"84582aa201276761646472657373581d6027e38d0e19e3434e33fbd001d3fe04b5b76763f88acd625e0d770b43a166686173686564f458430a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a010000000005f5e100eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee01005840f3be430bf286c18ea284134558c3caab3f01d121041063c286b245ccf3c4adcef5da4d4c6ec7e8f6543978dd90cdc57b84668fdb4345a6e26ac42839d61a1700"
+fn t_dest_cip30() -> Cip30AttestationProof {
+  Cip30AttestationProof {
+    protected_header: #"a201276761646472657373581d6027e38d0e19e3434e33fbd001d3fe04b5b76763f88acd625e0d770b43",
+    payload: #"0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b010000000005f5e100eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee0100",
+    hashed: False,
+    signature: #"088eb18a610edf95c77503162ae1b0c182f13aa53fd4fe228eef83d80cb356a37e6f0e87e159b8e54f9ba5f514311ab1a6f4e762316d748ede075fec4ed69503",
+    issuer_vkey: t_kyc_issuer_vkey,
+  }
+}
 
-const t_dest_cip30_sign1: ByteArray =
-  #"84582aa201276761646472657373581d6027e38d0e19e3434e33fbd001d3fe04b5b76763f88acd625e0d770b43a166686173686564f458430b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b010000000005f5e100eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee01005840088eb18a610edf95c77503162ae1b0c182f13aa53fd4fe228eef83d80cb356a37e6f0e87e159b8e54f9ba5f514311ab1a6f4e762316d748ede075fec4ed69503"
+fn t_dest_cip30_hashed() -> Cip30AttestationProof {
+  Cip30AttestationProof {
+    protected_header: #"a201276761646472657373581d6027e38d0e19e3434e33fbd001d3fe04b5b76763f88acd625e0d770b43",
+    payload: #"0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b010000000005f5e100eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee0100",
+    hashed: True,
+    signature: #"5d58da53a2e9124361f505582c475514a4ea1f83b2378137dda2280869a1eb356cfcc35019a6546894758ed1448b746760c678da75e179e36315f5a1ef6d8a03",
+    issuer_vkey: t_kyc_issuer_vkey,
+  }
+}
 
 type TRegNode {
   key: ByteArray,
@@ -645,22 +667,8 @@ fn t_genuine_proof(payload: ByteArray, signature: ByteArray) -> KycProof {
   }
 }
 
-fn t_cip30_proof(sign1: ByteArray) -> KycProof {
-  Cip30Attestation {
-    cip30_proof: Cip30AttestationProof {
-      cose_sign1: sign1,
-      cose_key: t_cip30_key,
-    },
-  }
-}
-
-test transfer_cip30_fixture_authenticates_issuer_signature() {
-  cose.verify(
-    t_sender_cip30_sign1,
-    t_cip30_key,
-    t_tel_with(t_kyc_issuer_vkey),
-    1,
-  ) == Some(t_sender_kyc_payload)
+fn t_cip30_proof(proof: Cip30AttestationProof) -> KycProof {
+  Cip30Attestation { cip30_proof: proof }
 }
 
 fn t_source_action_with_proof(proof: KycProof) -> TransferLogicScriptAction {
@@ -910,7 +918,7 @@ test transfer_succeeds_when_receiver_kyc_required_and_proof_is_genuine() {
 
 test transfer_succeeds_with_cip30_sender_proof() {
   let source_action = t_source_action_with_proof(
-    t_cip30_proof(t_sender_cip30_sign1),
+    t_cip30_proof(t_sender_cip30()),
   )
   run_transfer(
     t_redeemer_with(source_action, t_dest_action()),
@@ -919,7 +927,17 @@ test transfer_succeeds_with_cip30_sender_proof() {
 }
 
 test transfer_succeeds_with_cip30_receiver_proof() {
-  let dest_action = t_dest_action_with_proof(t_cip30_proof(t_dest_cip30_sign1))
+  let dest_action = t_dest_action_with_proof(t_cip30_proof(t_dest_cip30()))
+  run_transfer(
+    t_redeemer_with(t_source_action(), dest_action),
+    t_transfer_tx_with_tel(False, True, t_tel_with(t_kyc_issuer_vkey)),
+  )
+}
+
+test transfer_succeeds_with_hashed_cip30_receiver_proof() {
+  let dest_action = t_dest_action_with_proof(
+    t_cip30_proof(t_dest_cip30_hashed()),
+  )
   run_transfer(
     t_redeemer_with(t_source_action(), dest_action),
     t_transfer_tx_with_tel(False, True, t_tel_with(t_kyc_issuer_vkey)),
@@ -928,7 +946,7 @@ test transfer_succeeds_with_cip30_receiver_proof() {
 
 test transfer_rejects_cip30_proof_from_untrusted_issuer() {
   let source_action = t_source_action_with_proof(
-    t_cip30_proof(t_sender_cip30_sign1),
+    t_cip30_proof(t_sender_cip30()),
   )
   !run_transfer(
     t_redeemer_with(source_action, t_dest_action()),
@@ -937,9 +955,7 @@ test transfer_rejects_cip30_proof_from_untrusted_issuer() {
 }
 
 test transfer_rejects_swapped_cip30_holder_claims() {
-  let source_action = t_source_action_with_proof(
-    t_cip30_proof(t_dest_cip30_sign1),
-  )
+  let source_action = t_source_action_with_proof(t_cip30_proof(t_dest_cip30()))
   !run_transfer(
     t_redeemer_with(source_action, t_dest_action()),
     t_transfer_tx_with_tel(True, False, t_tel_with(t_kyc_issuer_vkey)),

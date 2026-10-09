@@ -153,94 +153,68 @@ an independently issued attestation before that attestation expires.
 
 ### Construct a CIP-30 wallet attestation
 
-`Cip30Attestation` lets an **already trusted issuer** sign the same 67-byte
-claim with a CIP-30 wallet. The issuer's 32-byte public key must still be in
-GlobalState's `trusted_entity_vkeys`. A holder signing their own claim does not
-grant KYC status. The public transaction builder never needs the issuer's
-private key.
+`Cip30Attestation` lets an **already trusted issuer** sign the same 67-byte claim with any CIP-30
+wallet, hardware wallets included. The issuer's 32-byte public key must be in GlobalState's
+`trusted_entity_vkeys`; a holder signing their own claim grants nothing. The transaction builder
+never needs the issuer's private key.
 
-Build the payload exactly as for `Attestation` above, then ask the issuer's
-wallet to sign it. CIP-30 addresses and payloads are hex-encoded bytes, while
-the result consists of hex-encoded CBOR `COSE_Sign1` and `COSE_Key` objects:
+**Keep issuer keys dedicated to issuance.** The validator does not look at the COSE headers
+(address, algorithm, kid): the trusted key *is* the authorisation, and the claim binds holder,
+policy, network and expiry. So *any* `signData` by a trusted key over a valid claim — or, in
+hashed mode, over the BLAKE2b-224 of one — counts as an attestation. Never connect an issuer
+wallet to other dApps, and treat the tool that builds the claim as trusted: in hashed mode a
+Ledger shows only the hash, so the device cannot confirm what is being attested.
+
+Build the claim exactly as for `Attestation` above, then ask the issuer's wallet to sign it:
 
 ```js
 const api = await window.cardano[walletName].enable();
-const addressHex = (await api.getChangeAddress()); // issuer's payment-key address
-const bytes = h => Uint8Array.from(h.match(/../g), x => parseInt(x, 16));
-const hex = b => [...b].map(x => x.toString(16).padStart(2, "0")).join("");
-function buildKycPayload({ credentialHash, tier, validUntilMs,
-                           issuancePolicyId, kycNetworkId, credentialType }) {
-  const expiry = new Uint8Array(8);
-  let value = BigInt(validUntilMs);
-  for (let i = 7; i >= 0; i--) {
-    expiry[i] = Number(value & 255n);
-    value >>= 8n;
-  }
-  if (value !== 0n || tier < 1 || tier > 255 ||
-      kycNetworkId < 0 || kycNetworkId > 3 ||
-      ![0, 1].includes(credentialType) ||
-      credentialHash.length !== 56 || issuancePolicyId.length !== 56) {
-    throw new Error("invalid KYC claim fields");
-  }
-  return hex(new Uint8Array([
-    ...bytes(credentialHash), tier, ...expiry, ...bytes(issuancePolicyId),
-    kycNetworkId, credentialType,
-  ]));
-}
-const payloadHex = buildKycPayload({
-  credentialHash, tier, validUntilMs, issuancePolicyId,
-  kycNetworkId, credentialType,
-}); // 67 bytes, layout above
-const { signature, key } = await api.signData(addressHex, payloadHex);
-// Hex-decode both strings before placing them in the Plutus redeemer:
-const proof = {
-  cose_sign1: bytes(signature),
-  cose_key: bytes(key),
-};
+// The address whose payment key (or stake key, for a reward address) IS the vkey registered in
+// trusted_entity_vkeys. Do not rely on getChangeAddress(): multi-address/HD wallets derive a
+// different key per address, and a change address can rotate — every proof would then fail as
+// "untrusted issuer".
+const addressHex = issuerAddressHex;
+const claimHex = buildKycPayload({ /* as for Attestation */ });   // 67 bytes
+const { signature, key } = await api.signData(addressHex, claimHex);
 ```
 
-Use an issuer **base, enterprise, or pointer address with a payment key**, or a
-**reward address with a stake key**. The verifier hashes the COSE public key
-and checks the corresponding payment or stake credential in the signed address
-header. It accepts base address types 0 and 2, enterprise type 6, pointer type
-4, and reward type 14. Use `getRewardAddresses()` and select one of those for
-stake-key signing; `getChangeAddress()` normally selects a payment key. The
-address must belong to the issuer wallet and match the key enrolled in the
-trusted list.
+`signature` is a hex CBOR `COSE_Sign1`, `key` a hex CBOR `COSE_Key`. Extract four parts **off
+chain** (any CBOR library):
 
-Put the decoded bytes in the Aiken redeemer as:
+| Redeemer field | Where it comes from |
+|---|---|
+| `protected_header` | `COSE_Sign1[0]` — the bytes *inside* the protected bstr, verbatim, never re-encoded |
+| `hashed` | the unprotected map (`COSE_Sign1[1]`) entry `"hashed"`; absent means `False` |
+| `signature` | `COSE_Sign1[3]` (64 bytes) |
+| `issuer_vkey` | `COSE_Key` label `-2` (32 bytes) |
+| `payload` | **always your own 67-byte claim** — not `COSE_Sign1[2]` |
+
+`COSE_Sign1` may be wrapped in CBOR tag 18. In hashed mode (`hashed: true`, which Ledger
+requires) `COSE_Sign1[2]` holds `blake2b_224(claim)`, not the claim; check off chain that it equals
+the hash of the claim you asked to be signed, and put the claim itself in `payload`. If the wallet
+returns a detached (`nil`) payload, treat it the same way.
+
+Before submitting, check off chain that `issuer_vkey` is in `trusted_entity_vkeys`; a key mismatch
+otherwise surfaces only as a rejected transaction. None of this extraction is trusted. The validator rebuilds the COSE `Sig_structure`
+`["Signature1", protected_header, h'', claim or blake2b_224(claim)]` and verifies the issuer's
+Ed25519 signature over it, so a wrong extraction can only make the proof fail. Bounds: the protected
+header must be 1–255 bytes (wallets produce ≈ 40–60).
 
 ```aiken
 Cip30Attestation {
-  cip30_proof: Cip30AttestationProof { cose_sign1, cose_key },
+  cip30_proof: Cip30AttestationProof {
+    protected_header, payload, hashed, signature, issuer_vkey,
+  },
 }
 ```
 
-At the Plutus Data boundary, this is `Constr(2, [Constr(0, [B(cose_sign1),
-B(cose_key)])])`: constructor 2 was appended after the existing `Attestation`
-and `Membership` constructors. Encode this Data with the transaction builder's
-normal Plutus Data serializer, and use it wherever a `KycProof` is required.
-[`scripts/cip30-test-vectors.mjs`](../scripts/cip30-test-vectors.mjs) reproducibly
-generates genuine Ed25519 COSE signatures with a fixed **test-only** seed; its
-`sender_valid` and `receiver_valid` entries are the on-chain test fixtures.
-
-The address's Cardano network nibble uses `0` for testnets and `1` for
-mainnet. This is distinct from the signed KYC payload's configured network
-value: KYC `0` preview, `1` preprod and `3` yaci map to address nibble `0`,
-while KYC `2` mainnet maps to nibble `1`. The signed payload must still equal
-the configured KYC value, so a preview claim cannot be reused on preprod.
-The wallet's `getNetworkId()` alone does not distinguish those testnets.
-
-The on-chain decoder accepts a bounded CIP-30 profile: definite CBOR with
-shortest-form lengths, at most six entries per map, a COSE_Sign1 of at most
-1024 bytes, a COSE_Key and protected map of at most 256 bytes each, an address
-of at most 64 bytes, and an optional `kid` of at most 128 bytes. It accepts
-the standard COSE_Sign1 tag 18 or an untagged array, map entries in any order,
-optional `kid` (either absent from both objects or equal in both), optional unprotected
-`"hashed": false`, and optional unprotected `"version": 1`. Other headers,
-indefinite forms, detached payloads, and non-minimal pointer coordinates are
-rejected. Check the wallet's returned COSE against this profile before
-submitting a transaction; rejection cannot grant KYC status.
+At the Plutus Data boundary this is `Constr(2, [Constr(0, [B(protected_header), B(payload),
+Bool(hashed), B(signature), B(issuer_vkey)])])` (`Bool` is `Constr 0 []` / `Constr 1 []`).
+[`scripts/cip30-test-vectors.mjs`](../scripts/cip30-test-vectors.mjs) reproducibly generates genuine
+vectors with a fixed **test-only** seed, unhashed and hashed.
+[`scripts/cip30-emurgo-fixture.cjs`](../scripts/cip30-emurgo-fixture.cjs) rebuilds the hashed
+vectors with Emurgo's `cardano-message-signing` 1.1.0 (`hash_payload()`) and yields byte-identical
+signatures — an independent check of the CIP-8 hashing and of the `Sig_structure` encoding.
 
 ## Mint, burn and forced transfer
 
