@@ -615,8 +615,6 @@ validator global_state_spend_validator(
           value_preserved,
           no_reference_script,
           new_mintable_amount >= 0,
-          // Bounds what this action WRITES, not the field — see the constant.
-          new_mintable_amount <= constants.max_mintable_amount,
           // The one-way upgrade lock makes the cap final as well.
           !input_datum.upgrades_locked,
           must_be_signed_by_credential(self, input_datum.admin_credential_hash),
@@ -3040,31 +3038,12 @@ test set_mintable_amount_succeeds_to_zero() {
   )
 }
 
-test set_mintable_amount_succeeds_at_max() {
-  let input_datum = t_datum(False, False)
-  run_spend(
-    input_datum,
-    set_mintable_amount_redeemer(constants.max_mintable_amount),
-    t_set_mintable_tx(input_datum, constants.max_mintable_amount, [t_admin]),
-  )
-}
-
 test set_mintable_amount_rejects_negative() {
   let input_datum = t_datum(False, False)
   !run_spend(
     input_datum,
     set_mintable_amount_redeemer(-1),
     t_set_mintable_tx(input_datum, -1, [t_admin]),
-  )
-}
-
-test set_mintable_amount_rejects_above_max() {
-  let input_datum = t_datum(False, False)
-  let value = constants.max_mintable_amount + 1
-  !run_spend(
-    input_datum,
-    set_mintable_amount_redeemer(value),
-    t_set_mintable_tx(input_datum, value, [t_admin]),
   )
 }
 
