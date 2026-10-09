@@ -151,6 +151,71 @@ The alternative `Membership` proof uses an MPF leaf with key
 and publish its tree root through `UpdateMemberRootHash`. Revoking a tree leaf does not invalidate
 an independently issued attestation before that attestation expires.
 
+### Construct a CIP-30 wallet attestation
+
+`Cip30Attestation` lets an **already trusted issuer** sign the same 67-byte claim with any CIP-30
+wallet, hardware wallets included. The issuer's 32-byte public key must be in GlobalState's
+`trusted_entity_vkeys`; a holder signing their own claim grants nothing. The transaction builder
+never needs the issuer's private key.
+
+**Keep issuer keys dedicated to issuance.** The validator does not look at the COSE headers
+(address, algorithm, kid): the trusted key *is* the authorisation, and the claim binds holder,
+policy, network and expiry. So *any* `signData` by a trusted key over a valid claim — or, in
+hashed mode, over the BLAKE2b-224 of one — counts as an attestation. Never connect an issuer
+wallet to other dApps, and treat the tool that builds the claim as trusted: in hashed mode a
+Ledger shows only the hash, so the device cannot confirm what is being attested.
+
+Build the claim exactly as for `Attestation` above, then ask the issuer's wallet to sign it:
+
+```js
+const api = await window.cardano[walletName].enable();
+// The address whose payment key (or stake key, for a reward address) IS the vkey registered in
+// trusted_entity_vkeys. Do not rely on getChangeAddress(): multi-address/HD wallets derive a
+// different key per address, and a change address can rotate — every proof would then fail as
+// "untrusted issuer".
+const addressHex = issuerAddressHex;
+const claimHex = buildKycPayload({ /* as for Attestation */ });   // 67 bytes
+const { signature, key } = await api.signData(addressHex, claimHex);
+```
+
+`signature` is a hex CBOR `COSE_Sign1`, `key` a hex CBOR `COSE_Key`. Extract four parts **off
+chain** (any CBOR library):
+
+| Redeemer field | Where it comes from |
+|---|---|
+| `protected_header` | `COSE_Sign1[0]` — the bytes *inside* the protected bstr, verbatim, never re-encoded |
+| `hashed` | the unprotected map (`COSE_Sign1[1]`) entry `"hashed"`; absent means `False` |
+| `signature` | `COSE_Sign1[3]` (64 bytes) |
+| `issuer_vkey` | `COSE_Key` label `-2` (32 bytes) |
+| `payload` | **always your own 67-byte claim** — not `COSE_Sign1[2]` |
+
+`COSE_Sign1` may be wrapped in CBOR tag 18. In hashed mode (`hashed: true`, which Ledger
+requires) `COSE_Sign1[2]` holds `blake2b_224(claim)`, not the claim; check off chain that it equals
+the hash of the claim you asked to be signed, and put the claim itself in `payload`. If the wallet
+returns a detached (`nil`) payload, treat it the same way.
+
+Before submitting, check off chain that `issuer_vkey` is in `trusted_entity_vkeys`; a key mismatch
+otherwise surfaces only as a rejected transaction. None of this extraction is trusted. The validator rebuilds the COSE `Sig_structure`
+`["Signature1", protected_header, h'', claim or blake2b_224(claim)]` and verifies the issuer's
+Ed25519 signature over it, so a wrong extraction can only make the proof fail. Bounds: the protected
+header must be 1–255 bytes (wallets produce ≈ 40–60).
+
+```aiken
+Cip30Attestation {
+  cip30_proof: Cip30AttestationProof {
+    protected_header, payload, hashed, signature, issuer_vkey,
+  },
+}
+```
+
+At the Plutus Data boundary this is `Constr(2, [Constr(0, [B(protected_header), B(payload),
+Bool(hashed), B(signature), B(issuer_vkey)])])` (`Bool` is `Constr 0 []` / `Constr 1 []`).
+[`scripts/cip30-test-vectors.mjs`](../scripts/cip30-test-vectors.mjs) reproducibly generates genuine
+vectors with a fixed **test-only** seed, unhashed and hashed.
+[`scripts/cip30-emurgo-fixture.cjs`](../scripts/cip30-emurgo-fixture.cjs) rebuilds the hashed
+vectors with Emurgo's `cardano-message-signing` 1.1.0 (`hash_payload()`) and yields byte-identical
+signatures — an independent check of the CIP-8 hashing and of the `Sig_structure` encoding.
+
 ## Mint, burn and forced transfer
 
 For a later mint, spend the GlobalState UTxO and continue it at the same script address, with its

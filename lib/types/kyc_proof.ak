@@ -42,9 +42,31 @@ pub type MembershipProof {
   mpf_proof: Proof,
 }
 
+/// A trusted issuer's CIP-30 `signData` result, with its parts extracted OFF
+/// chain (see the integration guide). Nothing here is trusted: the verifier
+/// rebuilds the COSE `Sig_structure` from these parts and checks the issuer's
+/// Ed25519 signature over it, so a wrong extraction can only fail closed.
+pub type Cip30AttestationProof {
+  /// The COSE_Sign1 protected header, the exact bytes inside its bstr. Not
+  /// parsed on chain — the signature covers it.
+  protected_header: ByteArray,
+  /// The 67-byte KYC claim — ALWAYS the claim, also when `hashed`.
+  payload: ByteArray,
+  /// CIP-8 `hashed` (unprotected header; e.g. Ledger): the wallet signed
+  /// `blake2b_224(payload)` instead of the claim itself.
+  hashed: Bool,
+  signature: ByteArray,
+  /// 32-byte issuer key; must be in GlobalState's `trusted_entity_vkeys`.
+  issuer_vkey: ByteArray,
+}
+
+/// Upper bound on `protected_header` (real wallets produce ~40–60 bytes).
+pub const max_protected_header_length: Int = 255
+
 pub type KycProof {
   Attestation { kyc_proof: AttestationProof }
   Membership { membership_proof: MembershipProof }
+  Cip30Attestation { cip30_proof: Cip30AttestationProof }
 }
 
 pub const payload_length: Int = 67
