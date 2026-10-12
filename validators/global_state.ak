@@ -15,14 +15,16 @@ use cardano/transaction.{
   find_input,
 }
 use constants
+use tests
 use types/global_state.{
   AddTrustedEntity, DeactivateContract, GlobalStateDatum,
   GlobalStateSpendRedeemer, LockUpgrades, MigrateGlobalState, MintSecurity,
   ModifySecurityInfo, PauseTransfers, RemoveTrustedEntity, RotateAdmin,
   RotateMintingScript, SetMintableAmount, SetRequiresReceiverKyc,
   SetRequiresSenderKyc, TrustedEntityMetadata, UpdateMemberRootHash,
-  UpdateTrustedEntity, set_admin_credential_hash, set_deactivated,
-  set_member_root_hash, set_mintable_amount, set_minting_script_credential_hash,
+  UpdateTrustedEntity, decode_global_state, decode_global_state_prefix,
+  set_admin_credential_hash, set_deactivated, set_member_root_hash,
+  set_mintable_amount, set_minting_script_credential_hash,
   set_requires_receiver_kyc, set_requires_sender_kyc, set_security_info,
   set_transfers_paused, set_trusted_entity_vkeys, set_upgrades_locked,
 }
@@ -109,9 +111,10 @@ fn sanitise_initial_datum(datum: GlobalStateDatum, self_mint: Value) -> Bool {
     // The two lists must not be the same list. If the ids were equal,
     // every power-user node would double as a denylist node — and since a
     // power-user node's link is unconstrained by the denylist's ordering, the
-    // sanctions list would be satisfiable from day one and never bind. Both
-    // fields are IMMUTABLE after genesis (every spend branch reproduces the
-    // datum wholesale), so this is the only chance to catch it.
+    // sanctions list would be satisfiable from day one and never bind. No v1
+    // spend branch writes either field (each rewrites exactly one other field),
+    // and a later version's conversion is obliged to carry both unchanged, so
+    // this is the only chance to catch it.
     //
     // The length checks are the same defence one step earlier: a malformed id
     // can never name a real minting policy, so the corresponding list would be
@@ -160,7 +163,9 @@ validator global_state_mint_validator(tx0: ByteArray, index0: Int) {
     )
 
     expect InlineDatum(output_datum_raw) = output_parameters.datum
-    expect output_datum: GlobalStateDatum = output_datum_raw
+    // Strict, and genesis is always THIS version: `decode_global_state` requires
+    // `schema_version == gs_schema_version`.
+    let output_datum = decode_global_state(output_datum_raw)
 
     and {
       // No other asset names under this policy are minted alongside the NFT.
@@ -218,12 +223,12 @@ validator global_state_spend_validator(
   power_user_list_script_hash: ByteArray,
 ) {
   spend(
-    datum_opt: Option<GlobalStateDatum>,
+    datum_opt: Option<Data>,
     redeemer: GlobalStateSpendRedeemer,
     input_out_ref: OutputReference,
     self: Transaction,
   ) {
-    expect Some(input_datum) = datum_opt
+    expect Some(input_datum_data) = datum_opt
     expect Some(own_input) = find_input(self.inputs, input_out_ref)
 
     // TERMINAL GUARD (irreversibility): once `deactivated` is set, the
@@ -240,20 +245,20 @@ validator global_state_spend_validator(
     // does NOT require supply to be zero at deactivation, so the operator may
     // burn down beforehand or immobilise as-is. It only guarantees the state is
     // final afterwards.
-    expect !input_datum.deactivated
+    //
+    // Prefix field 1, read on its own and strictly typed, so the guard holds on
+    // a datum of ANY version (a malformed Bool traps; it never reads as False).
+    // The Migrate arm decodes the rest of the prefix, the other arm the full
+    // datum — each only what it needs.
+    expect [_, deactivated_raw, ..] = builtin.unconstr_fields(input_datum_data)
+    expect deactivated: Bool = deactivated_raw
+    expect !deactivated
 
     let global_state_output = utils.safe_list_at(
       self.outputs,
       redeemer.global_state_output_index,
     )
     expect InlineDatum(global_state_output_datum) = global_state_output.datum
-
-    // Raw Data field list of the (already validated) input datum. Each branch
-    // proves the output datum equals this with exactly one field replaced,
-    // sharing every unchanged field as opaque Data — no unwrap/rewrap, and no
-    // full-datum re-validation of the output.
-    let input_datum_data: Data = input_datum
-    let input_fields = builtin.unconstr_fields(input_datum_data)
 
     // All branches share these address/NFT preservation invariants.
     let address_preserved = global_state_output.address == own_input.output.address
@@ -307,321 +312,13 @@ validator global_state_spend_validator(
     )
 
     when redeemer.action is {
-      MintSecurity { issuance_policy_redeemer_index } -> {
-        //issuance_logic.mint validator must be called
-        let issuance_policy_redeemer = utils.safe_list_at(
-          self.redeemers,
-          issuance_policy_redeemer_index,
-        )
-        expect issuance_policy_redeemer.1st == Mint(issuance_policy_id)
-        let minted_amount = quantity_of(
-          self.mint,
-          issuance_policy_id,
-          security_asset_name,
-        )
-        let remaining_amount = input_datum.mintable_amount - minted_amount
-        let expected_output_datum = set_mintable_amount(
-          input_fields,
-          remaining_amount,
-        )
-        and {
-          //Remaining amount must NOT be negative
-          remaining_amount >= 0,
-          address_preserved,
-          nft_preserved,
-          value_preserved,
-          no_reference_script,
-          builtin.equals_data(expected_output_datum, global_state_output_datum),
-        }
-      }
-      PauseTransfers { transfers_paused, power_user_node_ref_input_index } -> {
-        let power_user_node_ref_input = utils.safe_list_at(
-          self.reference_inputs,
-          power_user_node_ref_input_index,
-        )
-
-        let (power_user_credential_hash, power_user_data) = utils.authenticated_power_user(
-          power_user_node_ref_input.output,
-          input_datum.power_user_linked_list_policy_id,
-          power_user_list_script_hash,
-        )
-
-        let expected_output_datum = set_transfers_paused(
-          input_fields,
-          transfers_paused,
-        )
-        and {
-          no_concurrent_security_mint,
-          no_security_token_spent,
-          address_preserved,
-          nft_preserved,
-          value_preserved,
-          no_reference_script,
-          //Must have permission to pause/unpause transfers
-          power_user_data.can_pause,
-          //Must be signed by the power user
-          must_be_signed_by_credential(self, power_user_credential_hash),
-          builtin.equals_data(expected_output_datum, global_state_output_datum),
-        }
-      }
-      ModifySecurityInfo { new_security_info } -> {
-        let expected_output_datum = set_security_info(
-          input_fields,
-          new_security_info,
-        )
-        and {
-          no_concurrent_security_mint,
-          no_security_token_spent,
-          address_preserved,
-          nft_preserved,
-          value_preserved,
-          no_reference_script,
-          // Datum growth cap — see `constants.max_security_info_bytes`.
-          bytearray.length(builtin.serialise_data(new_security_info)) <= constants.max_security_info_bytes,
-          //Must be signed by the current admin (from input datum)
-          must_be_signed_by_credential(self, input_datum.admin_credential_hash),
-          builtin.equals_data(expected_output_datum, global_state_output_datum),
-        }
-      }
-      AddTrustedEntity { vkey, metadata } -> {
-        // Reject duplicate entry, insert in sorted order
-        let has_key = pairs.has_key(input_datum.trusted_entity_vkeys, vkey)
-        let updated_entities = pairs.insert_by_ascending_key(
-          input_datum.trusted_entity_vkeys,
-          vkey,
-          metadata,
-          bytearray.compare,
-        )
-        let expected_output_datum = set_trusted_entity_vkeys(
-          input_fields,
-          updated_entities,
-        )
-        and {
-          no_concurrent_security_mint,
-          no_security_token_spent,
-          address_preserved,
-          nft_preserved,
-          value_preserved,
-          no_reference_script,
-          must_be_signed_by_credential(self, input_datum.admin_credential_hash),
-          bytearray.length(vkey) == 32,
-          !has_key,
-          // Datum growth caps — see `constants.max_trusted_entities` /
-          // `constants.max_trusted_entity_metadata_bytes`.
-          list.length(updated_entities) <= constants.max_trusted_entities,
-          bytearray.length(builtin.serialise_data(metadata)) <= constants.max_trusted_entity_metadata_bytes,
-          builtin.equals_data(expected_output_datum, global_state_output_datum),
-        }
-      }
-      RemoveTrustedEntity { vkey } -> {
-        let has_key = pairs.has_key(input_datum.trusted_entity_vkeys, vkey)
-        let updated_entities = list.filter(
-          input_datum.trusted_entity_vkeys,
-          fn(p) { p.1st != vkey },
-        )
-        let expected_output_datum = set_trusted_entity_vkeys(
-          input_fields,
-          updated_entities,
-        )
-        and {
-          no_concurrent_security_mint,
-          no_security_token_spent,
-          address_preserved,
-          nft_preserved,
-          value_preserved,
-          no_reference_script,
-          has_key,
-          must_be_signed_by_credential(self, input_datum.admin_credential_hash),
-          builtin.equals_data(expected_output_datum, global_state_output_datum),
-        }
-      }
-      UpdateTrustedEntity { old_vkey, new_vkey, new_metadata } -> {
-        let old_exists = pairs.has_key(
-          input_datum.trusted_entity_vkeys,
-          old_vkey,
-        )
-        // If renaming (old_vkey != new_vkey), new_vkey must not exist yet.
-        // If just updating metadata (old_vkey == new_vkey), this constraint
-        // trivially passes — `new_exists_check` becomes True.
-        let new_clash_ok = if old_vkey == new_vkey {
-          True
-        } else {
-          !pairs.has_key(input_datum.trusted_entity_vkeys, new_vkey)
-        }
-        let without_old = list.filter(
-          input_datum.trusted_entity_vkeys,
-          fn(p) { p.1st != old_vkey },
-        )
-        let updated_entities = pairs.insert_by_ascending_key(
-          without_old,
-          new_vkey,
-          new_metadata,
-          bytearray.compare,
-        )
-        let expected_output_datum = set_trusted_entity_vkeys(
-          input_fields,
-          updated_entities,
-        )
-        and {
-          no_concurrent_security_mint,
-          no_security_token_spent,
-          address_preserved,
-          nft_preserved,
-          value_preserved,
-          no_reference_script,
-          old_exists,
-          new_clash_ok,
-          bytearray.length(new_vkey) == 32,
-          // Datum growth cap — see `constants.max_trusted_entity_metadata_bytes`.
-          bytearray.length(builtin.serialise_data(new_metadata)) <= constants.max_trusted_entity_metadata_bytes,
-          must_be_signed_by_credential(self, input_datum.admin_credential_hash),
-          builtin.equals_data(expected_output_datum, global_state_output_datum),
-        }
-      }
-      SetRequiresSenderKyc { enabled } -> {
-        let expected_output_datum = set_requires_sender_kyc(
-          input_fields,
-          enabled,
-        )
-        and {
-          no_concurrent_security_mint,
-          no_security_token_spent,
-          address_preserved,
-          nft_preserved,
-          value_preserved,
-          no_reference_script,
-          must_be_signed_by_credential(self, input_datum.admin_credential_hash),
-          builtin.equals_data(expected_output_datum, global_state_output_datum),
-        }
-      }
-      SetRequiresReceiverKyc { enabled } -> {
-        let expected_output_datum = set_requires_receiver_kyc(
-          input_fields,
-          enabled,
-        )
-        and {
-          no_concurrent_security_mint,
-          no_security_token_spent,
-          address_preserved,
-          nft_preserved,
-          value_preserved,
-          no_reference_script,
-          must_be_signed_by_credential(self, input_datum.admin_credential_hash),
-          builtin.equals_data(expected_output_datum, global_state_output_datum),
-        }
-      }
-      UpdateMemberRootHash { new_member_root_hash } -> {
-        let expected_output_datum = set_member_root_hash(
-          input_fields,
-          new_member_root_hash,
-        )
-        let new_root_len = bytearray.length(new_member_root_hash)
-        and {
-          no_concurrent_security_mint,
-          no_security_token_spent,
-          address_preserved,
-          nft_preserved,
-          value_preserved,
-          no_reference_script,
-          // Keep the membership root well-formed: empty or a 32-byte digest;
-          // any other length makes `mpf.from_root` trap on every transfer.
-          or {
-            new_root_len == 0,
-            new_root_len == 32,
-          },
-          must_be_signed_by_credential(self, input_datum.admin_credential_hash),
-          builtin.equals_data(expected_output_datum, global_state_output_datum),
-        }
-      }
-      RotateAdmin { new_admin_credential_hash } -> {
-        let expected_output_datum = set_admin_credential_hash(
-          input_fields,
-          new_admin_credential_hash,
-        )
-        and {
-          no_concurrent_security_mint,
-          no_security_token_spent,
-          address_preserved,
-          nft_preserved,
-          value_preserved,
-          no_reference_script,
-          bytearray.length(new_admin_credential_hash) == 28,
-          //Dual-sig: both old (from input datum) and new admins must sign.
-          //Prevents silent takeover; prevents lost-key soft-brick by
-          //forcing continuity.
-          must_be_signed_by_credential(self, input_datum.admin_credential_hash),
-          must_be_signed_by_credential(self, new_admin_credential_hash),
-          builtin.equals_data(expected_output_datum, global_state_output_datum),
-        }
-      }
-      RotateMintingScript { new_minting_script_credential_hash } -> {
-        let expected_output_datum = set_minting_script_credential_hash(
-          input_fields,
-          new_minting_script_credential_hash,
-        )
-        and {
-          no_concurrent_security_mint,
-          no_security_token_spent,
-          address_preserved,
-          nft_preserved,
-          value_preserved,
-          no_reference_script,
-          bytearray.length(new_minting_script_credential_hash) == 28,
-          // The one-way upgrade lock closes this path permanently. See
-          // `upgrades_locked` on GlobalStateDatum.
-          !input_datum.upgrades_locked,
-          // Admin-only, single-signature — see the doc comment on
-          // RotateMintingScript: unlike RotateAdmin, the OUTGOING authority's
-          // consent is deliberately not required, since replacing a buggy or
-          // compromised authority is exactly the case this must still work
-          // for. minting_logic_script.ak independently refuses to ever
-          // delegate to itself (own-hash self-authorisation guard), so this
-          // action does not need to defend against that specific value here.
-          must_be_signed_by_credential(self, input_datum.admin_credential_hash),
-          builtin.equals_data(expected_output_datum, global_state_output_datum),
-        }
-      }
-      LockUpgrades -> {
-        let expected_output_datum = set_upgrades_locked(input_fields, True)
-        and {
-          no_concurrent_security_mint,
-          no_security_token_spent,
-          address_preserved,
-          nft_preserved,
-          value_preserved,
-          no_reference_script,
-          // One-way: refuse to re-lock, so the action is never a silent
-          // no-op and the transition True->True cannot be used to churn the
-          // UTxO. Nothing anywhere sets this field back to False — every
-          // branch reproduces the datum wholesale and only this branch
-          // touches it — so False is reachable exactly once, at genesis.
-          !input_datum.upgrades_locked,
-          must_be_signed_by_credential(self, input_datum.admin_credential_hash),
-          builtin.equals_data(expected_output_datum, global_state_output_datum),
-        }
-      }
-      SetMintableAmount { new_mintable_amount } -> {
-        let expected_output_datum = set_mintable_amount(
-          input_fields,
-          new_mintable_amount,
-        )
-        and {
-          // Load-bearing here, not just hygiene: without it a mint could ride
-          // along on a cap write and never be decremented from the cap.
-          no_concurrent_security_mint,
-          no_security_token_spent,
-          address_preserved,
-          nft_preserved,
-          value_preserved,
-          no_reference_script,
-          new_mintable_amount >= 0,
-          // The one-way upgrade lock makes the cap final as well.
-          !input_datum.upgrades_locked,
-          must_be_signed_by_credential(self, input_datum.admin_credential_hash),
-          builtin.equals_data(expected_output_datum, global_state_output_datum),
-        }
-      }
+      // Dispatched on the PREFIX alone, with no version check — in every
+      // GlobalState version. So whatever shape the datum has, the NFT can
+      // always be passed on: a faulty later version, or a migration to a
+      // validator that cannot convert the datum, is recoverable by migrating
+      // again instead of stranding GlobalState for good.
       MigrateGlobalState { new_spend_script_hash } -> {
+        let prefix = decode_global_state_prefix(input_datum_data)
         expect Script(own_hash) = own_input.output.address.payment_credential
         and {
           no_concurrent_security_mint,
@@ -633,8 +330,8 @@ validator global_state_spend_validator(
           // Never a silent no-op.
           new_spend_script_hash != own_hash,
           // The one-way upgrade lock closes this path too.
-          !input_datum.upgrades_locked,
-          must_be_signed_by_credential(self, input_datum.admin_credential_hash),
+          !prefix.upgrades_locked,
+          must_be_signed_by_credential(self, prefix.admin_credential_hash),
           // The one rule that differs from every other branch: the address MOVES —
           // its payment credential must be exactly the named SCRIPT (never a key
           // with the same bytes). The stake part is deliberately left free: it
@@ -654,27 +351,433 @@ validator global_state_spend_validator(
             self.reference_inputs,
             fn(i) { i.output.reference_script == Some(new_spend_script_hash) },
           ),
-          // State carried over byte-for-byte; the target adds any new fields
-          // through its own actions (see GlobalStateDatum: append-only).
+          // State carried over byte-for-byte, whatever its version; the target
+          // reshapes it, if at all, through its own conversion action.
           builtin.equals_data(input_datum_data, global_state_output_datum),
         }
       }
-      DeactivateContract -> {
-        let expected_output_datum = set_deactivated(input_fields, True)
-        and {
-          no_concurrent_security_mint,
-          no_security_token_spent,
-          address_preserved,
-          nft_preserved,
-          value_preserved,
-          no_reference_script,
-          //Can only deactivate from a paused state (mirrors CMTAT
-          //`deactivateContract`, which requires the contract be paused first).
-          input_datum.transfers_paused,
-          //Admin must authorise the (irreversible) decommissioning.
-          must_be_signed_by_credential(self, input_datum.admin_credential_hash),
-          //Output flips exactly one field: deactivated -> True.
-          builtin.equals_data(expected_output_datum, global_state_output_datum),
+      _ -> {
+        // Every other branch acts on THIS version's datum: strict decode,
+        // `schema_version == gs_schema_version`. Bound here, inside the
+        // non-Migrate arm, so it can never block a migration.
+        let input_datum = decode_global_state(input_datum_data)
+        // Raw Data field list of the (now validated) input datum. Each branch
+        // proves the output datum equals this with exactly one field
+        // replaced, sharing every unchanged field as opaque Data — no
+        // unwrap/rewrap, and no full-datum re-validation of the output.
+        let input_fields = builtin.unconstr_fields(input_datum_data)
+        when redeemer.action is {
+          MintSecurity { issuance_policy_redeemer_index } -> {
+            //issuance_logic.mint validator must be called
+            let issuance_policy_redeemer = utils.safe_list_at(
+              self.redeemers,
+              issuance_policy_redeemer_index,
+            )
+            expect issuance_policy_redeemer.1st == Mint(issuance_policy_id)
+            let minted_amount = quantity_of(
+              self.mint,
+              issuance_policy_id,
+              security_asset_name,
+            )
+            let remaining_amount = input_datum.mintable_amount - minted_amount
+            let expected_output_datum = set_mintable_amount(
+              input_fields,
+              remaining_amount,
+            )
+            and {
+              //Remaining amount must NOT be negative
+              remaining_amount >= 0,
+              address_preserved,
+              nft_preserved,
+              value_preserved,
+              no_reference_script,
+              builtin.equals_data(
+                expected_output_datum,
+                global_state_output_datum,
+              ),
+            }
+          }
+          PauseTransfers { transfers_paused, power_user_node_ref_input_index } -> {
+            let power_user_node_ref_input = utils.safe_list_at(
+              self.reference_inputs,
+              power_user_node_ref_input_index,
+            )
+
+            let (power_user_credential_hash, power_user_data) = utils.authenticated_power_user(
+              power_user_node_ref_input.output,
+              input_datum.power_user_linked_list_policy_id,
+              power_user_list_script_hash,
+            )
+
+            let expected_output_datum = set_transfers_paused(
+              input_fields,
+              transfers_paused,
+            )
+            and {
+              no_concurrent_security_mint,
+              no_security_token_spent,
+              address_preserved,
+              nft_preserved,
+              value_preserved,
+              no_reference_script,
+              //Must have permission to pause/unpause transfers
+              power_user_data.can_pause,
+              //Must be signed by the power user
+              must_be_signed_by_credential(self, power_user_credential_hash),
+              builtin.equals_data(
+                expected_output_datum,
+                global_state_output_datum,
+              ),
+            }
+          }
+          ModifySecurityInfo { new_security_info } -> {
+            let expected_output_datum = set_security_info(
+              input_fields,
+              new_security_info,
+            )
+            and {
+              no_concurrent_security_mint,
+              no_security_token_spent,
+              address_preserved,
+              nft_preserved,
+              value_preserved,
+              no_reference_script,
+              // Datum growth cap — see `constants.max_security_info_bytes`.
+              bytearray.length(builtin.serialise_data(new_security_info)) <= constants.max_security_info_bytes,
+              //Must be signed by the current admin (from input datum)
+              must_be_signed_by_credential(
+                self,
+                input_datum.admin_credential_hash,
+              ),
+              builtin.equals_data(
+                expected_output_datum,
+                global_state_output_datum,
+              ),
+            }
+          }
+          AddTrustedEntity { vkey, metadata } -> {
+            // Reject duplicate entry, insert in sorted order
+            let has_key = pairs.has_key(input_datum.trusted_entity_vkeys, vkey)
+            let updated_entities = pairs.insert_by_ascending_key(
+              input_datum.trusted_entity_vkeys,
+              vkey,
+              metadata,
+              bytearray.compare,
+            )
+            let expected_output_datum = set_trusted_entity_vkeys(
+              input_fields,
+              updated_entities,
+            )
+            and {
+              no_concurrent_security_mint,
+              no_security_token_spent,
+              address_preserved,
+              nft_preserved,
+              value_preserved,
+              no_reference_script,
+              must_be_signed_by_credential(
+                self,
+                input_datum.admin_credential_hash,
+              ),
+              bytearray.length(vkey) == 32,
+              !has_key,
+              // Datum growth caps — see `constants.max_trusted_entities` /
+              // `constants.max_trusted_entity_metadata_bytes`.
+              list.length(updated_entities) <= constants.max_trusted_entities,
+              bytearray.length(builtin.serialise_data(metadata)) <= constants.max_trusted_entity_metadata_bytes,
+              builtin.equals_data(
+                expected_output_datum,
+                global_state_output_datum,
+              ),
+            }
+          }
+          RemoveTrustedEntity { vkey } -> {
+            let has_key = pairs.has_key(input_datum.trusted_entity_vkeys, vkey)
+            let updated_entities = list.filter(
+              input_datum.trusted_entity_vkeys,
+              fn(p) { p.1st != vkey },
+            )
+            let expected_output_datum = set_trusted_entity_vkeys(
+              input_fields,
+              updated_entities,
+            )
+            and {
+              no_concurrent_security_mint,
+              no_security_token_spent,
+              address_preserved,
+              nft_preserved,
+              value_preserved,
+              no_reference_script,
+              has_key,
+              must_be_signed_by_credential(
+                self,
+                input_datum.admin_credential_hash,
+              ),
+              builtin.equals_data(
+                expected_output_datum,
+                global_state_output_datum,
+              ),
+            }
+          }
+          UpdateTrustedEntity { old_vkey, new_vkey, new_metadata } -> {
+            let old_exists = pairs.has_key(
+              input_datum.trusted_entity_vkeys,
+              old_vkey,
+            )
+            // If renaming (old_vkey != new_vkey), new_vkey must not exist yet.
+            // If just updating metadata (old_vkey == new_vkey), this constraint
+            // trivially passes — `new_exists_check` becomes True.
+            let new_clash_ok = if old_vkey == new_vkey {
+              True
+            } else {
+              !pairs.has_key(input_datum.trusted_entity_vkeys, new_vkey)
+            }
+            let without_old = list.filter(
+              input_datum.trusted_entity_vkeys,
+              fn(p) { p.1st != old_vkey },
+            )
+            let updated_entities = pairs.insert_by_ascending_key(
+              without_old,
+              new_vkey,
+              new_metadata,
+              bytearray.compare,
+            )
+            let expected_output_datum = set_trusted_entity_vkeys(
+              input_fields,
+              updated_entities,
+            )
+            and {
+              no_concurrent_security_mint,
+              no_security_token_spent,
+              address_preserved,
+              nft_preserved,
+              value_preserved,
+              no_reference_script,
+              old_exists,
+              new_clash_ok,
+              bytearray.length(new_vkey) == 32,
+              // Datum growth cap — see `constants.max_trusted_entity_metadata_bytes`.
+              bytearray.length(builtin.serialise_data(new_metadata)) <= constants.max_trusted_entity_metadata_bytes,
+              must_be_signed_by_credential(
+                self,
+                input_datum.admin_credential_hash,
+              ),
+              builtin.equals_data(
+                expected_output_datum,
+                global_state_output_datum,
+              ),
+            }
+          }
+          SetRequiresSenderKyc { enabled } -> {
+            let expected_output_datum = set_requires_sender_kyc(
+              input_fields,
+              enabled,
+            )
+            and {
+              no_concurrent_security_mint,
+              no_security_token_spent,
+              address_preserved,
+              nft_preserved,
+              value_preserved,
+              no_reference_script,
+              must_be_signed_by_credential(
+                self,
+                input_datum.admin_credential_hash,
+              ),
+              builtin.equals_data(
+                expected_output_datum,
+                global_state_output_datum,
+              ),
+            }
+          }
+          SetRequiresReceiverKyc { enabled } -> {
+            let expected_output_datum = set_requires_receiver_kyc(
+              input_fields,
+              enabled,
+            )
+            and {
+              no_concurrent_security_mint,
+              no_security_token_spent,
+              address_preserved,
+              nft_preserved,
+              value_preserved,
+              no_reference_script,
+              must_be_signed_by_credential(
+                self,
+                input_datum.admin_credential_hash,
+              ),
+              builtin.equals_data(
+                expected_output_datum,
+                global_state_output_datum,
+              ),
+            }
+          }
+          UpdateMemberRootHash { new_member_root_hash } -> {
+            let expected_output_datum = set_member_root_hash(
+              input_fields,
+              new_member_root_hash,
+            )
+            let new_root_len = bytearray.length(new_member_root_hash)
+            and {
+              no_concurrent_security_mint,
+              no_security_token_spent,
+              address_preserved,
+              nft_preserved,
+              value_preserved,
+              no_reference_script,
+              // Keep the membership root well-formed: empty or a 32-byte digest;
+              // any other length makes `mpf.from_root` trap on every transfer.
+              or {
+                new_root_len == 0,
+                new_root_len == 32,
+              },
+              must_be_signed_by_credential(
+                self,
+                input_datum.admin_credential_hash,
+              ),
+              builtin.equals_data(
+                expected_output_datum,
+                global_state_output_datum,
+              ),
+            }
+          }
+          RotateAdmin { new_admin_credential_hash } -> {
+            let expected_output_datum = set_admin_credential_hash(
+              input_fields,
+              new_admin_credential_hash,
+            )
+            and {
+              no_concurrent_security_mint,
+              no_security_token_spent,
+              address_preserved,
+              nft_preserved,
+              value_preserved,
+              no_reference_script,
+              bytearray.length(new_admin_credential_hash) == 28,
+              //Dual-sig: both old (from input datum) and new admins must sign.
+              //Prevents silent takeover; prevents lost-key soft-brick by
+              //forcing continuity.
+              must_be_signed_by_credential(
+                self,
+                input_datum.admin_credential_hash,
+              ),
+              must_be_signed_by_credential(self, new_admin_credential_hash),
+              builtin.equals_data(
+                expected_output_datum,
+                global_state_output_datum,
+              ),
+            }
+          }
+          RotateMintingScript { new_minting_script_credential_hash } -> {
+            let expected_output_datum = set_minting_script_credential_hash(
+              input_fields,
+              new_minting_script_credential_hash,
+            )
+            and {
+              no_concurrent_security_mint,
+              no_security_token_spent,
+              address_preserved,
+              nft_preserved,
+              value_preserved,
+              no_reference_script,
+              bytearray.length(new_minting_script_credential_hash) == 28,
+              // The one-way upgrade lock closes this path permanently. See
+              // `upgrades_locked` on GlobalStateDatum.
+              !input_datum.upgrades_locked,
+              // Admin-only, single-signature — see the doc comment on
+              // RotateMintingScript: unlike RotateAdmin, the OUTGOING authority's
+              // consent is deliberately not required, since replacing a buggy or
+              // compromised authority is exactly the case this must still work
+              // for. minting_logic_script.ak independently refuses to ever
+              // delegate to itself (own-hash self-authorisation guard), so this
+              // action does not need to defend against that specific value here.
+              must_be_signed_by_credential(
+                self,
+                input_datum.admin_credential_hash,
+              ),
+              builtin.equals_data(
+                expected_output_datum,
+                global_state_output_datum,
+              ),
+            }
+          }
+          LockUpgrades -> {
+            let expected_output_datum = set_upgrades_locked(input_fields, True)
+            and {
+              no_concurrent_security_mint,
+              no_security_token_spent,
+              address_preserved,
+              nft_preserved,
+              value_preserved,
+              no_reference_script,
+              // One-way: refuse to re-lock, so the action is never a silent
+              // no-op and the transition True->True cannot be used to churn the
+              // UTxO. Nothing anywhere sets this field back to False — every
+              // branch reproduces the datum wholesale and only this branch
+              // touches it — so False is reachable exactly once, at genesis.
+              !input_datum.upgrades_locked,
+              must_be_signed_by_credential(
+                self,
+                input_datum.admin_credential_hash,
+              ),
+              builtin.equals_data(
+                expected_output_datum,
+                global_state_output_datum,
+              ),
+            }
+          }
+          SetMintableAmount { new_mintable_amount } -> {
+            let expected_output_datum = set_mintable_amount(
+              input_fields,
+              new_mintable_amount,
+            )
+            and {
+              // Load-bearing here, not just hygiene: without it a mint could ride
+              // along on a cap write and never be decremented from the cap.
+              no_concurrent_security_mint,
+              no_security_token_spent,
+              address_preserved,
+              nft_preserved,
+              value_preserved,
+              no_reference_script,
+              new_mintable_amount >= 0,
+              // The one-way upgrade lock makes the cap final as well.
+              !input_datum.upgrades_locked,
+              must_be_signed_by_credential(
+                self,
+                input_datum.admin_credential_hash,
+              ),
+              builtin.equals_data(
+                expected_output_datum,
+                global_state_output_datum,
+              ),
+            }
+          }
+          DeactivateContract -> {
+            let expected_output_datum = set_deactivated(input_fields, True)
+            and {
+              no_concurrent_security_mint,
+              no_security_token_spent,
+              address_preserved,
+              nft_preserved,
+              value_preserved,
+              no_reference_script,
+              //Can only deactivate from a paused state (mirrors CMTAT
+              //`deactivateContract`, which requires the contract be paused first).
+              input_datum.transfers_paused,
+              //Admin must authorise the (irreversible) decommissioning.
+              must_be_signed_by_credential(
+                self,
+                input_datum.admin_credential_hash,
+              ),
+              //Output flips exactly one field: deactivated -> True.
+              builtin.equals_data(
+                expected_output_datum,
+                global_state_output_datum,
+              ),
+            }
+          }
+          MigrateGlobalState { .. } -> fail
         }
       }
     }
@@ -728,6 +831,7 @@ fn t_out_ref(ix: Int) -> OutputReference {
 
 fn t_datum(transfers_paused: Bool, deactivated: Bool) -> GlobalStateDatum {
   GlobalStateDatum {
+    schema_version: 1,
     transfers_paused,
     deactivated,
     mintable_amount: 1_000_000,
@@ -826,6 +930,15 @@ fn deactivate_redeemer() -> GlobalStateSpendRedeemer {
 
 fn run_spend(
   input_datum: GlobalStateDatum,
+  redeemer: GlobalStateSpendRedeemer,
+  tx: Transaction,
+) -> Bool {
+  run_spend_raw(input_datum, redeemer, tx)
+}
+
+/// `run_spend` on an arbitrary input datum — for datums of another version.
+fn run_spend_raw(
+  input_datum: Data,
   redeemer: GlobalStateSpendRedeemer,
   tx: Transaction,
 ) -> Bool {
@@ -1466,6 +1579,7 @@ fn sanitise_datum(
   network_id: Int,
 ) -> GlobalStateDatum {
   GlobalStateDatum {
+    schema_version: 1,
     transfers_paused: False,
     deactivated: False,
     mintable_amount: 1_000,
@@ -2000,7 +2114,7 @@ test pause_rejects_a_foreign_asset_added_to_the_continuing_output() {
 /// One list must not double as the other. `sanitise_mint()` mints both
 /// roots under distinct policies, so with the datum ids made equal the mint
 /// check still passes and the new inequality assertion is what rejects it.
-/// Both fields are immutable after genesis, so this is the only chance.
+/// No spend branch writes either field, so this is the only chance.
 test sanitise_rejects_identical_list_policies() {
   let d = sanitise_datum(#"", 1)
   !sanitise_initial_datum(
@@ -3522,5 +3636,155 @@ test deactivated_input_rejects_migrate_global_state() fail {
     input_datum,
     migrate_redeemer(t_migrate_target),
     t_migrate_tx(input_datum, t_migrate_target),
+  )
+}
+
+// ── Schema versions: Migrate on any version, everything else on version 1 ───
+//
+// `as_version_2` / `as_foreign_version` rewrite every GlobalState datum in a
+// transaction (inputs, reference inputs AND the continuing output), so each
+// test below is a one-change copy of the named passing control: the datum is
+// identical except for its version (and, for the foreign shape, its tail).
+
+fn with_gs_outputs_rewritten(
+  tx: Transaction,
+  rewrite: fn(Data) -> Data,
+) -> Transaction {
+  Transaction {
+    ..tx,
+    outputs: list.map(
+      tx.outputs,
+      fn(o) {
+        if quantity_of(o.value, t_gs_policy, constants.global_state_asset_name) == 1 {
+          expect InlineDatum(raw) = o.datum
+          Output { ..o, datum: InlineDatum(rewrite(raw)) }
+        } else {
+          o
+        }
+      },
+    ),
+  }
+}
+
+fn as_version_2(tx: Transaction) -> Transaction {
+  with_gs_outputs_rewritten(
+    tests.with_gs_version(tx, t_gs_policy, 2),
+    fn(raw) { tests.gs_with_version(raw, 2) },
+  )
+}
+
+fn as_foreign_version(tx: Transaction) -> Transaction {
+  with_gs_outputs_rewritten(
+    tests.with_foreign_gs_version(tx, t_gs_policy),
+    tests.foreign_gs_version,
+  )
+}
+
+fn version_2(datum: GlobalStateDatum) -> Data {
+  tests.gs_with_version(datum, 2)
+}
+
+// MigrateGlobalState reads only the PREFIX, in every version: the NFT can always
+// be passed on, whatever the datum's shape. Without this a faulty later version
+// could strand GlobalState for good. Control:
+// `migrate_global_state_succeeds_when_admin_signs`.
+test migrate_global_state_succeeds_on_a_later_version() {
+  let input_datum = t_datum(False, False)
+  run_spend_raw(
+    tests.foreign_gs_version(input_datum),
+    migrate_redeemer(t_migrate_target),
+    as_foreign_version(t_migrate_tx(input_datum, t_migrate_target)),
+  )
+}
+
+// …and its prefix guards still bind on such a datum: the one-way lock…
+test migrate_global_state_fails_on_a_later_version_when_locked() {
+  let input_datum = t_datum_locked()
+  !run_spend_raw(
+    tests.foreign_gs_version(input_datum),
+    migrate_redeemer(t_migrate_target),
+    as_foreign_version(t_migrate_tx(input_datum, t_migrate_target)),
+  )
+}
+
+// …the admin signature…
+test migrate_global_state_fails_on_a_later_version_without_admin() {
+  let input_datum = t_datum(False, False)
+  let tx = t_migrate_tx(input_datum, t_migrate_target)
+  !run_spend_raw(
+    tests.foreign_gs_version(input_datum),
+    migrate_redeemer(t_migrate_target),
+    as_foreign_version(Transaction { ..tx, extra_signatories: [t_new_admin] }),
+  )
+}
+
+// …and the terminal deactivation guard, read from the prefix before dispatch.
+test migrate_global_state_fails_on_a_deactivated_later_version() fail {
+  let input_datum = t_datum(True, True)
+  run_spend_raw(
+    tests.foreign_gs_version(input_datum),
+    migrate_redeemer(t_migrate_target),
+    as_foreign_version(t_migrate_tx(input_datum, t_migrate_target)),
+  )
+}
+
+// Every other branch acts on a version-1 datum only. One per redeemer group;
+// each copies the named control with the datum set to version 2.
+
+// Control: `burn_succeeds_when_mintable_amount_is_zero`.
+test mint_security_fails_on_another_version() fail {
+  let input_datum = GlobalStateDatum {
+    ..t_datum(False, False),
+    mintable_amount: 0,
+  }
+  let output_datum = GlobalStateDatum { ..input_datum, mintable_amount: 100 }
+  run_spend_raw(
+    version_2(input_datum),
+    mintsecurity_redeemer(),
+    as_version_2(t_mintsecurity_tx(input_datum, output_datum, -100, [t_admin])),
+  )
+}
+
+// Control: `pause_succeeds_for_a_can_pause_power_user_in_the_list`.
+test pause_fails_on_another_version() fail {
+  run_spend_raw(
+    version_2(t_pause_datum(False)),
+    t_pause_redeemer(),
+    as_version_2(t_pause_tx(t_pu_node_at(Script(t_pu_script_hash)))),
+  )
+}
+
+// Control: `lock_upgrades_succeeds_when_admin_signs`.
+test lock_upgrades_fails_on_another_version() fail {
+  let input_datum = t_datum(False, False)
+  run_spend_raw(
+    version_2(input_datum),
+    lock_upgrades_redeemer(),
+    as_version_2(t_tx(input_datum, t_datum_locked(), [t_admin])),
+  )
+}
+
+// Control: `deactivate_succeeds_when_paused_and_admin_signs`.
+test deactivate_fails_on_another_version() fail {
+  let input_datum = t_datum(True, False)
+  let output_datum = GlobalStateDatum { ..input_datum, deactivated: True }
+  run_spend_raw(
+    version_2(input_datum),
+    deactivate_redeemer(),
+    as_version_2(t_tx(input_datum, output_datum, [t_admin])),
+  )
+}
+
+// Genesis mints only a version-1 GlobalState. Control:
+// `global_state_mint_succeeds_with_nonce_and_sanitised_datum`.
+test global_state_mint_rejects_another_version() fail {
+  let datum = sanitise_datum(#"", 1)
+  let mint = merge(
+    from_asset(t_gs_policy, constants.global_state_asset_name, 1),
+    sanitise_mint(),
+  )
+  run_mint(
+    t_gs_policy,
+    as_version_2(t_mint_tx([t_nonce_input()], [t_mint_output(datum)], mint)),
   )
 }

@@ -14,6 +14,7 @@ use cip68
 use constants
 use denylist/absence.{verify_denylist_absence}
 use kyc/verify.{verify_kyc_proof}
+use tests
 use types/cip68.{Cip68Datum} as types_cip68
 use types/global_state.{
   GlobalStateDatum, GlobalStateReferenced, GlobalStateSpent, decode_global_state,
@@ -85,6 +86,13 @@ use utils.{must_be_signed_by_credential}
 ///      forbids duplicate keys, no second node naming this proxy can ever be
 ///      inserted. Weaken this and registration becomes a stealthy, repeatable
 ///      vehicle for hijacking transfer compliance. IRREVERSIBLE.
+///   6. READ ONLY THE GLOBALSTATE VERSION YOU WERE BUILT FOR. Check
+///      `schema_version` before any other read of the datum — every index
+///      read included — and fail closed on any other version. During a
+///      reshaping upgrade GlobalState is converted before this authority is
+///      rotated out, and an index read without the check would then name a
+///      different field. See "Upgrading GlobalState's shape" in
+///      `documents/integration-guide.md`.
 /// ============================================================================
 validator minting_authority_validator(
   security_asset_name: ByteArray,
@@ -177,6 +185,13 @@ validator minting_authority_validator(
           ) == 1
         expect InlineDatum(gs_raw) = gs_input.output.datum
         let fields = builtin.unconstr_fields(gs_raw)
+        // FIRST, before any other index read: these indices are this version's
+        // layout. On a GlobalState of another version they would name other
+        // fields, so fail closed instead. Load-bearing for a burn and a
+        // zero-supply registration, which never reach the strict decode in
+        // `verify_mint_or_burn`.
+        expect
+          global_state.get_schema_version(fields) == global_state.gs_schema_version
         expect !global_state.get_deactivated(fields)
         expect
           power_users_linked_list_policy_id == global_state.get_power_user_linked_list_policy_id(
@@ -242,6 +257,13 @@ validator minting_authority_validator(
           ) == 1
         expect InlineDatum(gs_raw) = gs_input.output.datum
         let fields = builtin.unconstr_fields(gs_raw)
+        // FIRST, before any other index read: these indices are this version's
+        // layout. On a GlobalState of another version they would name other
+        // fields, so fail closed instead. Load-bearing for a burn and a
+        // zero-supply registration, which never reach the strict decode in
+        // `verify_mint_or_burn`.
+        expect
+          global_state.get_schema_version(fields) == global_state.gs_schema_version
         expect !global_state.get_deactivated(fields)
         expect
           power_users_linked_list_policy_id == global_state.get_power_user_linked_list_policy_id(
@@ -753,7 +775,7 @@ fn verify_mint_or_burn(
   //
   // The checks themselves live in `verify_mint_destinations` below.
   let destinations_ok = if minted_amount > 0 {
-    // Lenient like every GlobalState reader — see `decode_global_state`.
+    // Strict, this GlobalState version only — see `decode_global_state`.
     let gs_datum = decode_global_state(gs_raw)
     verify_mint_destinations(
       self.outputs,
@@ -996,6 +1018,7 @@ fn test_out_ref(ix: Int) -> OutputReference {
 
 fn make_gs_input(requires_receiver_kyc: Bool) -> Input {
   let gs_datum = GlobalStateDatum {
+    schema_version: 1,
     transfers_paused: False,
     deactivated: False,
     mintable_amount: 1_000_000,
@@ -2898,5 +2921,83 @@ test registration_rejects_a_protected_security_asset_name() fail {
   run_withdraw_with_protected_security_name(
     register_structural_redeemer(),
     make_register_structural_tx(zero, [test_admin_hash]),
+  )
+}
+
+// ── GlobalState of another schema version: every path fails closed ───────────
+//
+// Each test is a one-change copy of a passing positive test: the GlobalState
+// datum is identical except `schema_version = 2`. This authority is built for
+// version 1, so on a converted GlobalState it must refuse rather than read a
+// field that may have moved.
+
+// MintBurn as a BURN: `verify_mint_or_burn` decodes strictly only when
+// `minted_amount > 0`, so this is the test that pins the explicit version check
+// ahead of the index reads. Control: `burn_succeeds_without_destination_checks`.
+test burn_fails_on_another_global_state_version() fail {
+  let amount = -1_000
+  let redeemer = MintBurn {
+    global_state_input_index: 0,
+    power_user_node_ref_input_index: 0,
+    minted_amount: amount,
+    destination_actions: [],
+  }
+  run_withdraw(
+    redeemer,
+    tests.with_gs_version(
+      make_withdraw_tx(
+        amount,
+        False,
+        True,
+        False,
+        make_denylist_root_ref_input(),
+        [],
+        [test_pu_credential_hash],
+      ),
+      test_gs_policy_id,
+      2,
+    ),
+  )
+}
+
+// RegisterMint with zero supply: likewise never reaches the strict decode.
+// Control: `register_mint_reference_only_succeeds_with_mint_only_operator`.
+test register_mint_reference_only_fails_on_another_global_state_version() fail {
+  run_withdraw(
+    register_mint_redeemer(0),
+    tests.with_gs_version(
+      make_register_mint_reference_only_tx(True, False),
+      test_gs_policy_id,
+      2,
+    ),
+  )
+}
+
+// The `gs_datum_from_location` paths. Controls:
+// `upgrade_succeeds_when_global_state_is_spent` and
+// `register_structural_succeeds_when_admin_signs`.
+test upgrade_fails_on_another_global_state_version() fail {
+  run_withdraw(
+    UpgradeRegistryNode {
+      registry_node_input_index: 0,
+      registry_node_output_index: 0,
+      global_state_location: GlobalStateSpent { global_state_input_index: 1 },
+    },
+    tests.with_gs_version(
+      make_upgrade_tx_gs_spent(upgraded_node()),
+      test_gs_policy_id,
+      2,
+    ),
+  )
+}
+
+test register_structural_fails_on_another_global_state_version() fail {
+  run_withdraw(
+    register_structural_redeemer(),
+    tests.with_gs_version(
+      make_register_structural_tx(zero, [test_admin_hash]),
+      test_gs_policy_id,
+      2,
+    ),
   )
 }

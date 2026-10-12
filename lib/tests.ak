@@ -262,31 +262,23 @@ test covers_key_fails_when_target_above_link() fail {
   covers_key(Some(prev), Some(next), target)
 }
 
-/// Append two extra trailing fields to the datum of every input and reference
-/// input that carries the GlobalState NFT — the shape a FUTURE GlobalState
-/// version may produce. The non-upgradeable readers (minting proxy, denylist,
-/// power-users) must keep accepting it; see `decode_global_state`.
-pub fn with_trailing_gs_fields(
+/// Rewrite the datum of every input and reference input that carries the
+/// GlobalState NFT with `rewrite`.
+fn with_gs_datum_rewritten(
   tx: Transaction,
   gs_policy: ByteArray,
+  rewrite: fn(Data) -> Data,
 ) -> Transaction {
-  let extend = fn(input: Input) {
+  let apply = fn(input: Input) {
     if quantity_of(
       input.output.value,
       gs_policy,
       constants.global_state_asset_name,
     ) == 1 {
       expect InlineDatum(raw) = input.output.datum
-      let longer = builtin.constr_data(
-        0,
-        list.concat(
-          builtin.unconstr_fields(raw),
-          [builtin.i_data(42), builtin.b_data(#"cafe")],
-        ),
-      )
       Input {
         ..input,
-        output: Output { ..input.output, datum: InlineDatum(longer) },
+        output: Output { ..input.output, datum: InlineDatum(rewrite(raw)) },
       }
     } else {
       input
@@ -294,7 +286,51 @@ pub fn with_trailing_gs_fields(
   }
   Transaction {
     ..tx,
-    inputs: list.map(tx.inputs, extend),
-    reference_inputs: list.map(tx.reference_inputs, extend),
+    inputs: list.map(tx.inputs, apply),
+    reference_inputs: list.map(tx.reference_inputs, apply),
   }
+}
+
+/// The GlobalState datum of a hypothetical LATER version: the same five-field
+/// prefix, `schema_version = 2`, and a tail of a completely different shape
+/// (fewer fields, other types). The validators that can never be replaced
+/// (minting proxy, power-users, denylist) and `MigrateGlobalState` must keep
+/// accepting it; see `GlobalStatePrefix`.
+pub fn foreign_gs_version(raw: Data) -> Data {
+  expect [_, ..prefix_rest] = list.take(builtin.unconstr_fields(raw), 5)
+  builtin.constr_data(
+    0,
+    list.concat(
+      [builtin.i_data(2), ..prefix_rest],
+      [builtin.b_data(#"cafe"), builtin.list_data([builtin.i_data(7)])],
+    ),
+  )
+}
+
+/// `foreign_gs_version` applied to the GlobalState in `tx`.
+pub fn with_foreign_gs_version(
+  tx: Transaction,
+  gs_policy: ByteArray,
+) -> Transaction {
+  with_gs_datum_rewritten(tx, gs_policy, foreign_gs_version)
+}
+
+/// The GlobalState datum unchanged except `schema_version` (field 0) set to
+/// `version`. Every UPGRADEABLE reader must reject any version but its own.
+pub fn gs_with_version(raw: Data, version: Int) -> Data {
+  expect [_, ..rest] = builtin.unconstr_fields(raw)
+  builtin.constr_data(0, [builtin.i_data(version), ..rest])
+}
+
+/// `gs_with_version` applied to the GlobalState in `tx`.
+pub fn with_gs_version(
+  tx: Transaction,
+  gs_policy: ByteArray,
+  version: Int,
+) -> Transaction {
+  with_gs_datum_rewritten(
+    tx,
+    gs_policy,
+    fn(raw) { gs_with_version(raw, version) },
+  )
 }

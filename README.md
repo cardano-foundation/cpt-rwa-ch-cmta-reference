@@ -270,11 +270,20 @@ The GlobalState admin has three distinct upgrade paths, plus control over the su
   script nobody can produce. **The target governs every later GlobalState action, the supply cap
   included** — migrating to a permissive script hands GlobalState to anyone, which is stronger than
   a permissive minting authority. Migrate only to a reviewed build of this repository. Readers find
-  GlobalState by its NFT, never its address, so nothing else changes. The datum is
-  **append-only**: a new version may add fields after the existing 14 — every reader, including the
-  minting proxy and the list validators that can never be upgraded, ignores trailing fields — but
-  must never remove, reorder or retype one. Because a migration carries the datum over unchanged, a
-  version that adds fields must read the datum by index and default the fields it does not have yet.
+  GlobalState by its NFT, never its address, so nothing else changes. Migration reads only the
+  datum's permanent **prefix** and checks no version, in every version, so the NFT can always be
+  moved on — including away from a faulty version.
+
+**The GlobalState datum is versioned.** Its first five fields — `schema_version`, `deactivated`,
+`upgrades_locked`, `admin_credential_hash`, `minting_script_credential_hash` — are a permanent
+prefix: the only fields the validators that can never be replaced (the minting proxy, the
+power-users and denylist lists) read, and they read them without checking the version. Everything
+after the prefix belongs to `schema_version`. Every upgradeable reader (the GlobalState branches,
+the minting authority, the transfer and third-party logic) requires the version it was built for
+and fails closed on any other. So a later version can restructure the tail freely, with no dead
+fields left behind, at the price of rotating every upgradeable script together; see
+[Upgrading GlobalState's shape](documents/integration-guide.md#upgrading-globalstates-shape).
+
 
 `LockUpgrades` is an admin-signed, one-way GlobalState action that closes **all four** for later
 transactions — after it, `mintable_amount` moves only through mint and burn and the GlobalState
@@ -336,7 +345,7 @@ exact order the blueprint (`plutus.json`) declares them; apply top to bottom.
 | 1 | `global_state.global_state_mint_validator` (mint) | `tx0`, `index0` | The genesis UTxO you choose to spend. |
 | 2 | `power_users.mint` | `global_state_policy_id`, `init_input_out_ref` | Row 1; a genesis UTxO reserved for this list. |
 | 3 | `power_users.power_users_validator` (spend) | `global_state_policy_id`, `power_users_linked_list_policy_id` | Row 1; the hash of `power_users.mint` (row 2) — this is the **power-users policy ID**. |
-| 4 | `denylist.mint` | `global_state_policy_id`, `init_input_out_ref`, `power_user_list_script_hash` | Row 1; a genesis UTxO reserved for this list; the hash of `power_users_validator` (row 3, **spend** — not row 2's policy id). |
+| 4 | `denylist.mint` | `global_state_policy_id`, `init_input_out_ref`, `power_user_list_script_hash`, `power_users_linked_list_policy_id` | Row 1; a genesis UTxO reserved for this list; the hash of `power_users_validator` (row 3, **spend** — not row 2's policy id); row 2's hash (the power-users **policy id**; `Init` refuses unless the genesis GlobalState datum names this same `power_user_linked_list_policy_id` and names this mint as its denylist). |
 | 5 | `denylist.denylist_validator` (spend) | `denylist_linked_list_policy_id` | The hash of `denylist.mint` (row 4) — this is the **denylist policy ID**. |
 | 6 | `minting_logic_script.minting_logic_validator` | `global_state_policy_id` | Row 1. Its only parameter. |
 | 7 | `global_state.global_state_spend_validator` (spend) | `security_asset_name`, `issuance_policy_id`, `global_state_policy_id`, `power_user_list_script_hash` | Operator choice; the hash of `minting_logic_validator` (row 6) — the **issuance policy ID**, i.e. the security token's policy ID; row 1; the hash of `power_users_validator` (row 3). |

@@ -18,6 +18,7 @@ use cip68
 use compliance
 use constants
 use kyc/verify.{membership_leaf_key, membership_leaf_value}
+use tests
 use types/global_state.{
   GlobalStateDatum, GlobalStateLocation, GlobalStateReferenced, GlobalStateSpent,
   gs_datum_from_location,
@@ -302,6 +303,7 @@ fn p_out_ref(ix: Int) -> OutputReference {
 
 fn p_gs_ref_input(paused: Bool, deactivated: Bool, req_receiver: Bool) -> Input {
   let datum = GlobalStateDatum {
+    schema_version: 1,
     transfers_paused: paused,
     deactivated,
     mintable_amount: 1_000_000,
@@ -811,6 +813,7 @@ test force_transfer_rejected_when_not_signed() {
 /// `power_user_linked_list_policy_id`, for the cross-check tests below.
 fn p_gs_ref_input_with_pu_policy(pu_policy_field: ByteArray) -> Input {
   let datum = GlobalStateDatum {
+    schema_version: 1,
     transfers_paused: False,
     deactivated: False,
     mintable_amount: 1_000_000,
@@ -899,6 +902,7 @@ fn p_gs_ref_input_with_member_root(
   member_root_hash: ByteArray,
 ) -> Input {
   let datum = GlobalStateDatum {
+    schema_version: 1,
     transfers_paused: False,
     deactivated: False,
     mintable_amount: 1_000_000,
@@ -1172,4 +1176,17 @@ test seizure_succeeds_when_no_protected_token_is_spent() {
     outputs: [p_token_utxo(p_dest_stake, 1_000)],
   }
   run_third_party(p_redeemer(), tx)
+}
+
+// Seizure likewise fails closed on another GlobalState version (identical but
+// `schema_version = 2`). Control: `force_transfer_succeeds_when_clean`.
+test force_transfer_fails_on_another_global_state_version() fail {
+  run_third_party(
+    p_redeemer(),
+    tests.with_gs_version(
+      p_tx(False, False, False, True, [p_seized_input()], [p_pu_cred]),
+      p_gs_policy,
+      2,
+    ),
+  )
 }

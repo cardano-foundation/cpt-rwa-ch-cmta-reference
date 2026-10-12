@@ -17,7 +17,8 @@ Aiken-shaped sketches, not a ready-to-submit SDK or CLI implementation.
    one for the denylist root. The list mint validators' `init_input_out_ref` values and the
    GlobalState mint validator's `tx0`/`index0` must match the inputs actually spent at genesis.
 3. Choose the admin credential, initial minting authority script hash, cap, network ID and KYC
-   settings. The initial datum must have `transfers_paused = False`, `deactivated = False`,
+   settings. The initial datum must have `schema_version = 1`, `transfers_paused = False`,
+   `deactivated = False`,
    `upgrades_locked = False`, a non-negative `mintable_amount`, a 28-byte admin hash, a 28-byte
    authority hash, a network ID from 0 to 255 and an empty or 32-byte `member_root_hash`.
    Trusted-entity vkeys are 32 bytes, sorted and unique. See
@@ -47,7 +48,13 @@ Output the GlobalState NFT with an inline `GlobalStateDatum` at
 `global_state.global_state_spend_validator`. Output each root at its corresponding list spend
 validator address. The three mint validators cannot verify those destination addresses at
 genesis, so compare the applied hashes and output addresses **before signing**. Also assert that
-the two list policy IDs are distinct and equal the compiled list mint hashes. The datum's
+the two list policy IDs are distinct and equal the compiled list mint hashes. The denylist `Init`
+enforces one binding on chain: the GlobalState minted in the same transaction must name the
+`power_users_linked_list_policy_id` compiled into `denylist.mint`, and must name that mint as its
+denylist. So the denylist root can only be created in the genesis transaction, alongside
+GlobalState. Recompute the denylist policy id from the same value you write into the datum before
+signing anyway: a mismatch is refused, but only after you have built and submitted the
+transaction. The datum's
 `minting_script_credential_hash` must identify the intended current minting authority, not the
 permanent proxy.
 
@@ -237,9 +244,10 @@ stake part), and carry the
 datum and the non-ADA value over unchanged. No security token may be minted, burned or spent in the
 same transaction. Off-chain code must take the GlobalState validator from the address that holds the
 NFT, never from a fixed blueprint, because that address changes with each migration. Locate
-GlobalState by its NFT as every validator does. The datum is append-only: decode the first 14
-fields and ignore any after them, as `decode_global_state` does on chain — a later GlobalState
-version may add fields, and a reader that insists on exactly 14 would stop working for that token.
+GlobalState by its NFT as every validator does. Read `schema_version` (field 0) before anything
+else and decode the rest only with the layout of that version — see
+[Upgrading GlobalState's shape](#upgrading-globalstates-shape). A migration alone never changes the
+datum.
 
 `LockUpgrades` irreversibly closes the authority-rotation, registry-upgrade and GlobalState-migration
 paths, and admin changes to the supply cap, for **later** transactions. A registry upgrade bundled into the same transaction can still read the
@@ -248,3 +256,73 @@ GlobalState actions similarly expose their pre-state to a bundled registry opera
 active script hashes, operator credentials, base-layer version and lock transaction as deployment
 artifacts. For final retirement, follow the ordered
 [decommissioning runbook](security/security-fixes.md#the-decommissioning-runbook-in-order).
+
+## Upgrading GlobalState's shape
+
+The GlobalState datum is versioned (see [`GlobalStateDatum`](../lib/types/global_state.ak)):
+
+| Fields | Contents | Who reads them |
+|---|---|---|
+| 0–4, the **prefix** | `schema_version`, `deactivated`, `upgrades_locked`, `admin_credential_hash`, `minting_script_credential_hash` | Everyone. The minting proxy and the power-users and denylist validators, which can never be replaced, read **only** these, and never check the version. So does `MigrateGlobalState`. |
+| 5 onward, the **tail** | Whatever `schema_version` says | Only upgradeable readers built for that exact version: the GlobalState branches, the minting authority, transfer and third-party logic. |
+
+A version-1 build of any upgradeable script fails closed on a datum of any other version, instead
+of reading a field that has moved. Off-chain readers must do the same: dispatch on field 0.
+
+### Obligations on every later version
+
+1. **The prefix is permanent.** Fields 0–4 keep their order, type and meaning, and the datum keeps
+   constructor 0. `deactivated` and `upgrades_locked` only ever go from False to True. The admin and
+   the minting-script hash change only through dedicated admin-signed actions, never as a side
+   effect. Anything that must stop the proxy or the lists has to go through `deactivated`, or
+   through rotating the minting script, because those validators cannot see the tail.
+2. **The new GlobalState spend validator:**
+   * takes its datum as `Data` and implements `MigrateGlobalState` on the prefix alone, with no
+     version check, exactly as version 1 does, so the NFT can always be moved on;
+   * accepts the previous version's datum **only** in a one-shot conversion action. `MintSecurity`
+     and every other branch reject any version other than their own (`MigrateGlobalState`
+     excepted);
+   * makes that conversion assert, on chain, that output fields 1–4 are byte-identical to the
+     input's and that field 0 is the new version;
+   * gives the conversion the full guard set of every non-mint branch: no security token minted,
+     burned or spent; NFT, value and address preserved; no reference script; admin signature;
+   * carries over the tail's one-way and fixed meanings: never re-enable `SetMintableAmount` after
+     a lock, never change `network_id` (every issued KYC proof is bound to it) or the two list
+     policy ids, and never reset the `mintable_amount` headroom.
+3. **Every other upgradeable reader checks the exact version it was built for.**
+
+`schema_version` is not a security boundary against a malicious admin. Until `LockUpgrades`, the
+admin chooses the code (see `MigrateGlobalState`). It protects against misreads between correct
+builds.
+
+### Runbook for a reshaping upgrade
+
+0. **Pre-flight.**
+   * Build v2 of the GlobalState spend validator, the minting authority, and the transfer and
+     third-party logic.
+   * Publish each as a reference script.
+   * Register the new withdraw-0 stake credentials.
+   * Evaluate the conversion transaction against the live datum with a ledger-faithful evaluator
+     **before** migrating.
+1. Pause transfers (`PauseTransfers`).
+2. `MigrateGlobalState` to the v2 spend validator. The datum is carried over byte-identical.
+   Scripts that only *reference* GlobalState keep reading it: the v1 transfer and third-party
+   logic, the proxy, and the lists. But every action that *spends* GlobalState now runs v2, which
+   accepts a version-1 datum only in its conversion action. So mint, burn and every admin action
+   wait for step 3.
+3. Run v2's conversion action (version 1 → 2).
+4. `RotateMintingScript` to the v2 authority, through v2's action.
+5. `UpgradeRegistryNode` to the v2 transfer and third-party logic, authorised by the v2 authority.
+6. Unpause, through v2's `PauseTransfers`.
+
+**From step 3 until step 5,** transfers and **seizure** fail closed. The pause does not stop
+seizure, but the version check does. **Until step 4,** mint, burn, `RegisterMint` and registry
+upgrades also fail closed, because the v1 authority is still named. Keep that window short. The
+proxy and the lists keep working throughout.
+
+**Out-of-order steps** also fail closed rather than misread, for example a v2 authority named before
+the conversion.
+
+**Recovery.** `MigrateGlobalState` works on every version, so GlobalState can always be moved to a
+fixed build. A v1 validator can only operate on a version-1 datum, though: once the conversion has
+run, recovery means moving **forward** to a build that accepts the current version, not back to v1.

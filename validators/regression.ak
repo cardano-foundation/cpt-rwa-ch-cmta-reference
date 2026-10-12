@@ -50,6 +50,7 @@ use denylist as v_denylist
 use denylist/absence.{verify_denylist_absence}
 use minting_authority as v_minting_authority
 use power_users as v_power_users
+use tests
 use transfer_logic_script as v_transfer
 use types/denylist.{
   AddToDenylist, Deinit as DenylistDeinit, Denylist, Init as DenylistInit,
@@ -230,6 +231,7 @@ fn gs_datum(
   req_receiver: Bool,
 ) -> GlobalStateDatum {
   GlobalStateDatum {
+    schema_version: 1,
     transfers_paused: paused,
     deactivated,
     mintable_amount: 1_000_000_000,
@@ -970,6 +972,7 @@ fn run_denylist_remove(anchor_ix: Int, tx: Transaction) -> Bool {
     gs_policy,
     oref(99),
     pu_script_hash,
+    pu_policy,
     RemoveFromDenylist {
       user_pkh: dl_frozen_key,
       anchor_node_input_index: anchor_ix,
@@ -1002,6 +1005,7 @@ test denylist_remove_is_bound_to_the_declared_key() fail {
     gs_policy,
     oref(99),
     pu_script_hash,
+    pu_policy,
     RemoveFromDenylist {
       user_pkh: dl_sanctioned_key,
       anchor_node_input_index: 0,
@@ -1028,13 +1032,64 @@ test denylist_remove_rejects_a_non_admin_power_user() {
   )
 }
 
-/// `Init` — genesis. The nonce UTxO must be spent and no list element may
-/// exist yet.
-test denylist_init_succeeds_on_the_nonce_utxo() {
+/// The GlobalState output minted in the same genesis transaction.
+fn genesis_gs_output() -> Output {
+  gs_utxo(0, 2_000_000, gs_datum(False, False, False, False)).output
+}
+
+/// `Init` with a genesis GlobalState of the given datum.
+fn run_denylist_init_with_gs(datum: GlobalStateDatum) -> Bool {
   v_denylist.mint.mint(
     gs_policy,
     oref(50),
     pu_script_hash,
+    pu_policy,
+    DenylistInit { root_output_index: 0 },
+    denylist_policy,
+    Transaction {
+      ..base_tx(),
+      inputs: [nonce_input(50)],
+      mint: from_asset(denylist_policy, constants.linked_list_root_key, 1),
+      outputs: [dl_root_output(None), gs_utxo(0, 2_000_000, datum).output],
+    },
+  )
+}
+
+/// GENESIS BINDING (D1). The power-users policy compiled into this mint must be
+/// the one GlobalState names — a mismatch would lock sanctions administration
+/// for good. One-change copy of the passing Init test below; returns False.
+test denylist_init_rejects_a_global_state_naming_another_power_users_list() {
+  !run_denylist_init_with_gs(
+    GlobalStateDatum {
+      ..gs_datum(False, False, False, False),
+      power_user_linked_list_policy_id: #"77777777777777777777777777777777777777777777777777777777",
+    },
+  )
+}
+
+/// …and GlobalState must name THIS list as its denylist.
+test denylist_init_rejects_a_global_state_naming_another_denylist() {
+  !run_denylist_init_with_gs(
+    GlobalStateDatum {
+      ..gs_datum(False, False, False, False),
+      denylist_linked_list_policy_id: #"88888888888888888888888888888888888888888888888888888888",
+    },
+  )
+}
+
+/// Control for the two above, through the same helper.
+test denylist_init_accepts_a_global_state_naming_both_lists() {
+  run_denylist_init_with_gs(gs_datum(False, False, False, False))
+}
+
+/// Without the GlobalState being created in the same transaction, `Init`
+/// cannot bind the parameter, so it refuses (traps on the missing NFT output).
+test denylist_init_rejects_without_a_genesis_global_state() fail {
+  v_denylist.mint.mint(
+    gs_policy,
+    oref(50),
+    pu_script_hash,
+    pu_policy,
     DenylistInit { root_output_index: 0 },
     denylist_policy,
     Transaction {
@@ -1042,6 +1097,25 @@ test denylist_init_succeeds_on_the_nonce_utxo() {
       inputs: [nonce_input(50)],
       mint: from_asset(denylist_policy, constants.linked_list_root_key, 1),
       outputs: [dl_root_output(None)],
+    },
+  )
+}
+
+/// `Init` — genesis. The nonce UTxO must be spent and no list element may
+/// exist yet.
+test denylist_init_succeeds_on_the_nonce_utxo() {
+  v_denylist.mint.mint(
+    gs_policy,
+    oref(50),
+    pu_script_hash,
+    pu_policy,
+    DenylistInit { root_output_index: 0 },
+    denylist_policy,
+    Transaction {
+      ..base_tx(),
+      inputs: [nonce_input(50)],
+      mint: from_asset(denylist_policy, constants.linked_list_root_key, 1),
+      outputs: [dl_root_output(None), genesis_gs_output()],
     },
   )
 }
@@ -1054,13 +1128,14 @@ test denylist_init_rejects_a_missing_nonce() fail {
     gs_policy,
     oref(50),
     pu_script_hash,
+    pu_policy,
     DenylistInit { root_output_index: 0 },
     denylist_policy,
     Transaction {
       ..base_tx(),
       inputs: [],
       mint: from_asset(denylist_policy, constants.linked_list_root_key, 1),
-      outputs: [dl_root_output(None)],
+      outputs: [dl_root_output(None), genesis_gs_output()],
     },
   )
 }
@@ -1078,7 +1153,7 @@ test denylist_init_rejects_a_missing_nonce() fail {
 // freeze the register with the token still reporting itself active.
 //
 // THE GUARD. `gs.deactivated?` is now the first conjunct of the branch, read
-// via `gs_datum_from_ref_input` (`active_admin_from_ref_input` traps on exactly
+// via `gs_prefix_from_ref_input` (`active_admin_from_ref_input` traps on exactly
 // the state the branch now requires). Retire the token first, then dismantle
 // its lists.
 
@@ -1089,6 +1164,7 @@ test denylist_deinit_succeeds_for_the_admin_after_deactivation() {
     gs_policy,
     oref(99),
     pu_script_hash,
+    pu_policy,
     DenylistDeinit { global_state_ref_input_index: 0 },
     denylist_policy,
     Transaction {
@@ -1103,6 +1179,32 @@ test denylist_deinit_succeeds_for_the_admin_after_deactivation() {
   )
 }
 
+// The denylist Deinit read site keeps working on the GlobalState of a LATER
+// version (same prefix, `schema_version = 2`, a tail of another shape). Control:
+// the test above, on the v1 datum.
+test denylist_deinit_accepts_a_later_global_state_version() {
+  v_denylist.mint.mint(
+    gs_policy,
+    oref(99),
+    pu_script_hash,
+    pu_policy,
+    DenylistDeinit { global_state_ref_input_index: 0 },
+    denylist_policy,
+    tests.with_foreign_gs_version(
+      Transaction {
+        ..base_tx(),
+        inputs: [dl_root_input(0)],
+        reference_inputs: [
+          gs_utxo(0, 2_000_000, gs_datum(False, True, False, False)),
+        ],
+        mint: from_asset(denylist_policy, constants.linked_list_root_key, -1),
+        extra_signatories: [admin],
+      },
+      gs_policy,
+    ),
+  )
+}
+
 /// THE ATTACK, and the reason for the guard: the same admin-signed `Deinit`
 /// against a LIVE protocol. Accepting it would leave every holder unable to
 /// prove denylist absence — no transfer, no seizure, no mint destination —
@@ -1113,6 +1215,7 @@ test denylist_deinit_rejects_a_live_protocol() {
     gs_policy,
     oref(99),
     pu_script_hash,
+    pu_policy,
     DenylistDeinit { global_state_ref_input_index: 0 },
     denylist_policy,
     Transaction {
@@ -1134,6 +1237,7 @@ test denylist_deinit_rejects_a_missing_admin_signature() {
     gs_policy,
     oref(99),
     pu_script_hash,
+    pu_policy,
     DenylistDeinit { global_state_ref_input_index: 0 },
     denylist_policy,
     Transaction {
@@ -1204,6 +1308,7 @@ fn run_denylist_add(tx: Transaction) -> Bool {
     gs_policy,
     oref(99),
     pu_script_hash,
+    pu_policy,
     AddToDenylist {
       user_pkh: dl_frozen_key,
       anchor_node_output_index: 0,

@@ -396,6 +396,7 @@ fn test_gs_datum_with_tel(
   trusted_keys: Pairs<ByteArray, Data>,
 ) -> GlobalStateDatum {
   GlobalStateDatum {
+    schema_version: 1,
     transfers_paused: False,
     deactivated: False,
     mintable_amount: 0,
@@ -416,6 +417,7 @@ fn test_gs_datum_with_tel(
 /// GlobalStateDatum with an empty TEL and the given MPF root hash.
 fn test_gs_datum_with_root(root: ByteArray) -> GlobalStateDatum {
   GlobalStateDatum {
+    schema_version: 1,
     transfers_paused: False,
     deactivated: False,
     mintable_amount: 0,

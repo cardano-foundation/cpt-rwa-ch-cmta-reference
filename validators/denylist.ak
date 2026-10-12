@@ -8,7 +8,9 @@ use aiken_design_patterns/linked_list.{
   run_root_with, spend_for_adding_or_removing_an_element,
 }
 use cardano/address.{Address, Script}
-use cardano/assets.{PolicyId, from_asset, from_lovelace, merge, tokens, zero}
+use cardano/assets.{
+  PolicyId, from_asset, from_lovelace, merge, quantity_of, tokens, zero,
+}
 use cardano/transaction.{
   InlineDatum, Input, NoDatum, Output, OutputReference, Transaction, find_input,
 }
@@ -18,13 +20,16 @@ use types/denylist.{
   AddToDenylist, Deinit, Denylist, Init, MintRedeemer, RemoveFromDenylist,
   SpendRedeemer, StateTransition,
 }
-use types/global_state.{GlobalStateDatum, gs_datum_from_ref_input}
+use types/global_state.{
+  GlobalStateDatum, gs_datum_from_output, gs_prefix_from_ref_input,
+}
 use types/power_users.{PowerUser}
 use utils.{must_be_signed_by_credential, quantity_of_policy_id}
 
-/// Resolves the GS reference input (for the power-user linked-list policy id)
-/// and the power-user node reference input at `power_user_node_ref_input_index`,
-/// authenticating the node against that list. Returns the node's credential hash
+/// Checks the protocol is live (GlobalState PREFIX, so any GlobalState version)
+/// and resolves the power-user node reference input at
+/// `power_user_node_ref_input_index`, authenticating the node against the
+/// power-users list named by this validator's compile-time parameter. Returns the node's credential hash
 /// and parsed `PowerUser` data. Callers gate sanctions on `is_admin` + the
 /// returned credential's signature.
 fn power_user_from_refs(
@@ -33,8 +38,9 @@ fn power_user_from_refs(
   global_state_policy_id: ByteArray,
   power_user_node_ref_input_index: Int,
   power_user_list_script_hash: ByteArray,
+  power_users_linked_list_policy_id: ByteArray,
 ) -> (ByteArray, PowerUser) {
-  let gs = gs_datum_from_ref_input(
+  let gs = gs_prefix_from_ref_input(
     self.reference_inputs,
     global_state_ref_input_index,
     global_state_policy_id,
@@ -47,7 +53,7 @@ fn power_user_from_refs(
   )
   utils.authenticated_power_user(
     power_user_node_ref_input.output,
-    gs.power_user_linked_list_policy_id,
+    power_users_linked_list_policy_id,
     power_user_list_script_hash,
   )
 }
@@ -91,6 +97,30 @@ validator denylist_validator(denylist_linked_list_policy_id: ByteArray) {
   }
 }
 
+/// The GlobalState being created in this genesis transaction, decoded strictly.
+///
+/// The ONE versioned read in this frozen module, and safe as such: `Init` is
+/// nonce-gated to the genesis transaction, which must mint GlobalState
+/// alongside this root (`sanitise_initial_datum` requires the root), and
+/// genesis only ever writes a version-1 datum. No later GlobalState version is
+/// ever read here. `tests/check-gs-imports.sh` exempts exactly this function.
+fn genesis_global_state(
+  outputs: List<Output>,
+  global_state_policy_id: ByteArray,
+) -> GlobalStateDatum {
+  expect Some(gs_output) = list.find(
+    outputs,
+    fn(output) {
+      quantity_of(
+        output.value,
+        global_state_policy_id,
+        constants.global_state_asset_name,
+      ) == 1
+    },
+  )
+  gs_datum_from_output(gs_output, global_state_policy_id)
+}
+
 validator mint(
   global_state_policy_id: ByteArray,
   init_input_out_ref: OutputReference,
@@ -98,6 +128,16 @@ validator mint(
   /// power-users validators depend on the GlobalState mint hash, never on the
   /// denylist policy id.
   power_user_list_script_hash: ByteArray,
+  /// The POWER-USERS LIST POLICY ID — the list whose `is_admin` holders may
+  /// sanction. A compile-time parameter rather than a read of GlobalState, so
+  /// this validator (which can never be replaced) depends only on the
+  /// permanent GlobalState prefix: no later GlobalState version can repoint
+  /// who administers sanctions. Not circular: the power-users policy depends
+  /// only on the GlobalState mint hash and a nonce, and
+  /// `power_user_list_script_hash` is itself compiled from this id. Must equal
+  /// GlobalState's `power_user_linked_list_policy_id` (checked off-chain at
+  /// deployment, like the list hashes at genesis).
+  power_users_linked_list_policy_id: ByteArray,
 ) {
   mint(redeemer: MintRedeemer, policy_id: PolicyId, self: Transaction) {
     when redeemer is {
@@ -109,7 +149,15 @@ validator mint(
           fn(input) { input.output_reference == init_input_out_ref },
         )
         let root_output = utils.safe_list_at(self.outputs, root_output_index)
+        let gs = genesis_global_state(self.outputs, global_state_policy_id)
         and {
+          // Genesis binding for the compile-time power-users policy: it must be
+          // the list GlobalState names, and GlobalState must name THIS list. A
+          // mismatch would lock sanctions administration for good — this mint
+          // can never be redeployed — so it is refused here, the one moment
+          // both values are on chain together.
+          (gs.power_user_linked_list_policy_id == power_users_linked_list_policy_id)?,
+          (gs.denylist_linked_list_policy_id == policy_id)?,
           dict.size(tokens(self.mint, policy_id)) == 1,
           // Genesis: no list node exists yet, so none may be spent.
           (utils.count_inputs_with_policy(self.inputs, policy_id) == 0)?,
@@ -137,9 +185,10 @@ validator mint(
         //
         // Burning the root is irreversible in both directions: `Init` is gated
         // on a one-shot UTxO consumed at genesis, so a root can never be
-        // re-created, and `denylist_linked_list_policy_id` is immutable in the
-        // GlobalState datum — no spend branch writes it — so GlobalState can
-        // never be pointed at a replacement list either.
+        // re-created, and no v1 GlobalState branch writes
+        // `denylist_linked_list_policy_id`, so GlobalState cannot be pointed at a
+        // replacement list either (a later version's conversion is obliged to
+        // carry it unchanged — see the integration guide).
         //
         // What that costs while the protocol is LIVE: every movement of the
         // security token needs a covering node of THIS list as a reference
@@ -155,12 +204,12 @@ validator mint(
         // lists — and makes this branch what its name suggests: cleanup, not a
         // kill switch.
         //
-        // Read with `gs_datum_from_ref_input`, NOT `active_admin_from_ref_input`:
+        // Read with `gs_prefix_from_ref_input`, NOT `active_admin_from_ref_input`:
         // the latter traps on a deactivated protocol, which is exactly the
         // state this branch now requires. The GlobalState UTxO can no longer be
         // spent once deactivated, but it is still readable as a reference
         // input, so the admin credential remains available here.
-        let gs = gs_datum_from_ref_input(
+        let gs = gs_prefix_from_ref_input(
           self.reference_inputs,
           global_state_ref_input_index,
           global_state_policy_id,
@@ -192,6 +241,7 @@ validator mint(
           global_state_policy_id,
           power_user_node_ref_input_index,
           power_user_list_script_hash,
+          power_users_linked_list_policy_id,
         )
         let anchor_output = utils.safe_list_at(
           self.outputs,
@@ -268,6 +318,7 @@ validator mint(
           global_state_policy_id,
           power_user_node_ref_input_index,
           power_user_list_script_hash,
+          power_users_linked_list_policy_id,
         )
         // `remove` finds both spent elements itself; the index only says
         // WHICH of the two is the anchor.
@@ -510,6 +561,7 @@ fn t_dl_stray_input(ix: Int) -> Input {
 
 fn t_gs_datum(deactivated: Bool) -> GlobalStateDatum {
   GlobalStateDatum {
+    schema_version: 1,
     transfers_paused: False,
     deactivated,
     mintable_amount: 1_000_000_000,
@@ -654,6 +706,7 @@ fn t_run_denylist_add(key: ByteArray, tx: Transaction) -> Bool {
     t_gs_policy,
     t_oref(99),
     t_pu_script_hash,
+    t_pu_policy,
     AddToDenylist {
       user_pkh: key,
       anchor_node_output_index: 0,
@@ -739,6 +792,7 @@ fn t_run_denylist_remove(key: ByteArray, tx: Transaction) -> Bool {
     t_gs_policy,
     t_oref(99),
     t_pu_script_hash,
+    t_pu_policy,
     RemoveFromDenylist {
       user_pkh: key,
       anchor_node_input_index: 0,
@@ -768,11 +822,14 @@ test denylist_remove_rejects_a_29_byte_key() {
   !t_run_denylist_remove(t_key_29, t_dl_remove_tx(t_key_29))
 }
 
-// Non-upgradeable: must keep reading a GlobalState datum a future version
-// extended with trailing fields (see decode_global_state).
-test denylist_insert_accepts_a_global_state_with_trailing_fields() {
+// Non-upgradeable: must keep reading the GlobalState of a LATER version — same
+// prefix, `schema_version = 2`, a tail of another shape (see GlobalStatePrefix).
+// Covers `power_user_from_refs`, shared by Add and Remove. It also pins D1: the
+// power-users policy comes from the parameter, since the foreign tail no longer
+// holds it.
+test denylist_insert_accepts_a_later_global_state_version() {
   t_run_denylist_add(
     t_key_28,
-    tests.with_trailing_gs_fields(t_dl_insert_tx(t_key_28), t_gs_policy),
+    tests.with_foreign_gs_version(t_dl_insert_tx(t_key_28), t_gs_policy),
   )
 }
