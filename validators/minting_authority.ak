@@ -14,7 +14,6 @@ use cip68
 use constants
 use denylist/absence.{verify_denylist_absence}
 use kyc/verify.{verify_kyc_proof}
-use tests
 use types/cip68.{Cip68Datum} as types_cip68
 use types/global_state.{
   GlobalStateDatum, GlobalStateReferenced, GlobalStateSpent, decode_global_state,
@@ -57,8 +56,9 @@ use utils.{must_be_signed_by_credential}
 ///      permanently destroying transfer-side compliance. IRREVERSIBLE.
 ///   2. GLOBALSTATE MUST BE SPENT for any supply change, so its
 ///      `MintSecurity` branch runs and decrements `mintable_amount`. "Its"
-///      means whichever validator holds the GlobalState NFT — after a
-///      `MigrateGlobalState`, the target; that target must keep this branch. Merely
+///      means whichever logic GlobalState datum field 0 names (the proxy
+///      requires its withdraw-0) — after a `RotateGlobalStateScript`, the new
+///      logic; every logic must keep this branch. Merely
 ///      referencing it leaves the supply cap — a core CMTAT/BaFin invariant
 ///      — entirely unenforced. IRREVERSIBLE (tokens already exist).
 ///   3. ONLY `security_asset_name` may be minted under the issuance policy.
@@ -86,13 +86,6 @@ use utils.{must_be_signed_by_credential}
 ///      forbids duplicate keys, no second node naming this proxy can ever be
 ///      inserted. Weaken this and registration becomes a stealthy, repeatable
 ///      vehicle for hijacking transfer compliance. IRREVERSIBLE.
-///   6. READ ONLY THE GLOBALSTATE VERSION YOU WERE BUILT FOR. Check
-///      `schema_version` before any other read of the datum — every index
-///      read included — and fail closed on any other version. During a
-///      reshaping upgrade GlobalState is converted before this authority is
-///      rotated out, and an index read without the check would then name a
-///      different field. See "Upgrading GlobalState's shape" in
-///      `documents/integration-guide.md`.
 /// ============================================================================
 validator minting_authority_validator(
   security_asset_name: ByteArray,
@@ -185,13 +178,6 @@ validator minting_authority_validator(
           ) == 1
         expect InlineDatum(gs_raw) = gs_input.output.datum
         let fields = builtin.unconstr_fields(gs_raw)
-        // FIRST, before any other index read: these indices are this version's
-        // layout. On a GlobalState of another version they would name other
-        // fields, so fail closed instead. Load-bearing for a burn and a
-        // zero-supply registration, which never reach the strict decode in
-        // `verify_mint_or_burn`.
-        expect
-          global_state.get_schema_version(fields) == global_state.gs_schema_version
         expect !global_state.get_deactivated(fields)
         expect
           power_users_linked_list_policy_id == global_state.get_power_user_linked_list_policy_id(
@@ -257,13 +243,6 @@ validator minting_authority_validator(
           ) == 1
         expect InlineDatum(gs_raw) = gs_input.output.datum
         let fields = builtin.unconstr_fields(gs_raw)
-        // FIRST, before any other index read: these indices are this version's
-        // layout. On a GlobalState of another version they would name other
-        // fields, so fail closed instead. Load-bearing for a burn and a
-        // zero-supply registration, which never reach the strict decode in
-        // `verify_mint_or_burn`.
-        expect
-          global_state.get_schema_version(fields) == global_state.gs_schema_version
         expect !global_state.get_deactivated(fields)
         expect
           power_users_linked_list_policy_id == global_state.get_power_user_linked_list_policy_id(
@@ -775,7 +754,7 @@ fn verify_mint_or_burn(
   //
   // The checks themselves live in `verify_mint_destinations` below.
   let destinations_ok = if minted_amount > 0 {
-    // Strict, this GlobalState version only — see `decode_global_state`.
+    // Lenient like every GlobalState reader — see `decode_global_state`.
     let gs_datum = decode_global_state(gs_raw)
     verify_mint_destinations(
       self.outputs,
@@ -795,6 +774,13 @@ fn verify_mint_or_burn(
   and {
     //Redeemer contains the amount just for easy reference for eventual other contracts
     (minted_amount == expected_minted_amount)?,
+    // Never the GlobalState logic named in field 0: a supply change spends
+    // GlobalState, so that logic's withdrawal is in this transaction and
+    // would sign for the operator. Checked here, at use, rather than when the
+    // role is granted, so a later logic rotation cannot reopen it.
+    (power_user_node_key != global_state.get_global_state_script_credential_hash(
+      builtin.unconstr_fields(gs_raw),
+    ))?,
     //A power user must have signed the transaction
     must_be_signed_by_credential(self, power_user_node_key)?,
     // A zero-amount mint — e.g. a `RegisterMint` that mints only the CIP-68
@@ -1018,7 +1004,7 @@ fn test_out_ref(ix: Int) -> OutputReference {
 
 fn make_gs_input(requires_receiver_kyc: Bool) -> Input {
   let gs_datum = GlobalStateDatum {
-    schema_version: 1,
+    global_state_script_credential_hash: #"9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a",
     transfers_paused: False,
     deactivated: False,
     mintable_amount: 1_000_000,
@@ -2924,80 +2910,50 @@ test registration_rejects_a_protected_security_asset_name() fail {
   )
 }
 
-// ── GlobalState of another schema version: every path fails closed ───────────
+// ── the GlobalState logic can never stand in for the operator ────────────────
 //
-// Each test is a one-change copy of a passing positive test: the GlobalState
-// datum is identical except `schema_version = 2`. This authority is built for
-// version 1, so on a converted GlobalState it must refuse rather than read a
-// field that may have moved.
-
-// MintBurn as a BURN: `verify_mint_or_burn` decodes strictly only when
-// `minted_amount > 0`, so this is the test that pins the explicit version check
-// ahead of the index reads. Control: `burn_succeeds_without_destination_checks`.
-test burn_fails_on_another_global_state_version() fail {
-  let amount = -1_000
-  let redeemer = MintBurn {
-    global_state_input_index: 0,
-    power_user_node_ref_input_index: 0,
-    minted_amount: amount,
-    destination_actions: [],
-  }
-  run_withdraw(
-    redeemer,
-    tests.with_gs_version(
-      make_withdraw_tx(
-        amount,
-        False,
-        True,
-        False,
-        make_denylist_root_ref_input(),
-        [],
-        [test_pu_credential_hash],
+// A supply change spends GlobalState, so the logic named in its field 0 runs as
+// a withdrawal — and `must_be_signed_by_credential` accepts a withdrawal as a
+// signature. A `can_burn` operator whose credential IS that logic hash would be
+// satisfied by anyone. Here the operator does not sign; only the logic's
+// withdrawal is present.
+fn gs_input_with_logic(logic: ByteArray) -> Input {
+  let input = make_gs_input(False)
+  expect InlineDatum(raw) = input.output.datum
+  expect gs: GlobalStateDatum = raw
+  Input {
+    ..input,
+    output: Output {
+      ..input.output,
+      datum: InlineDatum(
+        GlobalStateDatum { ..gs, global_state_script_credential_hash: logic },
       ),
-      test_gs_policy_id,
-      2,
-    ),
-  )
-}
-
-// RegisterMint with zero supply: likewise never reaches the strict decode.
-// Control: `register_mint_reference_only_succeeds_with_mint_only_operator`.
-test register_mint_reference_only_fails_on_another_global_state_version() fail {
-  run_withdraw(
-    register_mint_redeemer(0),
-    tests.with_gs_version(
-      make_register_mint_reference_only_tx(True, False),
-      test_gs_policy_id,
-      2,
-    ),
-  )
-}
-
-// The `gs_datum_from_location` paths. Controls:
-// `upgrade_succeeds_when_global_state_is_spent` and
-// `register_structural_succeeds_when_admin_signs`.
-test upgrade_fails_on_another_global_state_version() fail {
-  run_withdraw(
-    UpgradeRegistryNode {
-      registry_node_input_index: 0,
-      registry_node_output_index: 0,
-      global_state_location: GlobalStateSpent { global_state_input_index: 1 },
     },
-    tests.with_gs_version(
-      make_upgrade_tx_gs_spent(upgraded_node()),
-      test_gs_policy_id,
-      2,
-    ),
-  )
+  }
 }
 
-test register_structural_fails_on_another_global_state_version() fail {
-  run_withdraw(
-    register_structural_redeemer(),
-    tests.with_gs_version(
-      make_register_structural_tx(zero, [test_admin_hash]),
-      test_gs_policy_id,
-      2,
-    ),
+test burn_rejects_an_operator_that_is_the_global_state_logic() {
+  let amount = -1_000
+  let tx = make_withdraw_tx(
+    amount,
+    False,
+    True,
+    False,
+    make_denylist_root_ref_input(),
+    [],
+    [],
+  )
+  !run_withdraw(
+    MintBurn {
+      global_state_input_index: 0,
+      power_user_node_ref_input_index: 0,
+      minted_amount: amount,
+      destination_actions: [],
+    },
+    Transaction {
+      ..tx,
+      inputs: [gs_input_with_logic(test_pu_credential_hash)],
+      withdrawals: [Pair(Script(test_pu_credential_hash), 0)],
+    },
   )
 }

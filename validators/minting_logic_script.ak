@@ -10,8 +10,8 @@ use cardano/transaction.{
 use constants
 use tests
 use types/global_state.{
-  GlobalStateDatum, GlobalStateLocation, GlobalStatePrefix,
-  GlobalStateReferenced, GlobalStateSpent, gs_prefix_from_output,
+  GlobalStateDatum, GlobalStateLocation, GlobalStateReferenced, GlobalStateSpent,
+  gs_datum_from_output,
 }
 use utils.{must_run_script_withdrawal}
 
@@ -52,18 +52,17 @@ validator minting_logic_validator(global_state_policy_id: ByteArray) {
   ) {
     expect Script(own_hash) = credential
 
-    // This one file may not change its compiled bytes once deployed. Its hash is
-    // frozen into every registry node the deployment ever inserts, and the
-    // token's issuance policy id is derived from it — so a different hash is a
-    // different token, and every already-issued one becomes unreachable. That
-    // covers everything it compiles in, including `gs_prefix_from_output` and
-    // `GlobalStatePrefix` (marked FROZEN in types/global_state.ak): any edit
-    // there moves this hash too. The location is resolved inline; a shared
-    // helper is the same logic but was measured to compile differently.
+    // Resolved INLINE rather than through `gs_datum_from_location`, which is
+    // the same logic and is what every other validator here calls.
     //
-    // It reads only the PREFIX of the GlobalState datum and never checks its
-    // `schema_version`, so it keeps working on every later GlobalState version
-    // — it could never be redeployed to follow one.
+    // This one file may not change its compiled bytes. Its hash is frozen into
+    // every registry node this deployment has ever inserted, and the token's
+    // issuance policy id is derived from it — so a different hash is a
+    // different token, and every already-issued one becomes unreachable. Going
+    // through the shared helper was measured to move the hash
+    // (6defc595… -> b6e4e07a…): same behaviour, different UPLC. The redeemer
+    // TYPE is shared, because a type name is not compiled; the resolution is
+    // not. Do not "tidy" this into the helper without re-checking the hash.
     let gs_output: Output = when redeemer is {
       GlobalStateSpent { global_state_input_index } ->
         utils.safe_list_at(self.inputs, global_state_input_index).output
@@ -72,20 +71,20 @@ validator minting_logic_validator(global_state_policy_id: ByteArray) {
     }
     // NFT presence is what makes this the real GlobalState rather than a
     // datum an attacker fabricated to name an authority they control.
-    let gs: GlobalStatePrefix = gs_prefix_from_output(
+    let gs_datum: GlobalStateDatum = gs_datum_from_output(
       gs_output,
       global_state_policy_id,
     )
 
     and {
       // Decline if the protocol is deactivated
-      (gs.deactivated == False)?,
+      (gs_datum.deactivated == False)?,
       // Self-authorisation footgun: this withdraw-0 is, by construction,
       // always present while this code is running, so an authority hash
       // equal to `own_hash` would be trivially self-satisfying. No
       // circularity concern — `own_hash` is a runtime value from
       // `credential`, not a compile-time parameter.
-      (gs.minting_script_credential_hash != own_hash)?,
+      (gs_datum.minting_script_credential_hash != own_hash)?,
       // Deliberately `must_run_script_withdrawal`, NOT
       // `must_be_signed_by_credential`: the latter also accepts a bare key
       // signature, which would satisfy this gate without the authority
@@ -93,7 +92,7 @@ validator minting_logic_validator(global_state_policy_id: ByteArray) {
       // all, that would be a total bypass of every rule the token has. Only
       // a genuine withdraw-0 proves the authority's own logic ran and
       // approved this specific transaction.
-      must_run_script_withdrawal(self, gs.minting_script_credential_hash)?,
+      must_run_script_withdrawal(self, gs_datum.minting_script_credential_hash)?,
     }
   }
 
@@ -147,7 +146,7 @@ fn test_out_ref(ix: Int) -> OutputReference {
 
 fn make_gs_output(authority: ByteArray, deactivated: Bool) -> Output {
   let gs_datum = GlobalStateDatum {
-    schema_version: 1,
+    global_state_script_credential_hash: #"9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a",
     transfers_paused: False,
     deactivated,
     mintable_amount: 1_000_000,
@@ -393,13 +392,12 @@ test publish_rejects_credential_deregistration() {
   )
 }
 
-// The proxy can never be upgraded, so it must keep reading the GlobalState of
-// a LATER version — same prefix, `schema_version = 2`, a tail of another shape
-// (see GlobalStatePrefix). Control: the v1 success tests above.
-test succeeds_on_a_later_global_state_version() {
+// The proxy can never be upgraded, so it must keep reading a GlobalState datum
+// that a future version extended with trailing fields (see decode_global_state).
+test succeeds_when_global_state_has_trailing_fields() {
   run_withdraw(
     spent_redeemer(),
-    tests.with_foreign_gs_version(
+    tests.with_trailing_gs_fields(
       spent_tx(test_minting_authority_hash, Some(test_minting_authority_hash)),
       test_gs_policy_id,
     ),

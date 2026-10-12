@@ -10,26 +10,31 @@ use cardano/assets.{
   PolicyId, Value, from_asset, from_lovelace, merge, quantity_of,
   without_lovelace, zero,
 }
+use cardano/certificate.{Certificate, RegisterCredential, UnregisterCredential}
 use cardano/transaction.{
   InlineDatum, Input, Mint, NoDatum, Output, OutputReference, Transaction,
   find_input,
 }
 use constants
-use tests
 use types/global_state.{
   AddTrustedEntity, DeactivateContract, GlobalStateDatum,
-  GlobalStateSpendRedeemer, LockUpgrades, MigrateGlobalState, MintSecurity,
-  ModifySecurityInfo, PauseTransfers, RemoveTrustedEntity, RotateAdmin,
+  GlobalStateSpendRedeemer, LockUpgrades, MintSecurity, ModifySecurityInfo,
+  PauseTransfers, RemoveTrustedEntity, RotateAdmin, RotateGlobalStateScript,
   RotateMintingScript, SetMintableAmount, SetRequiresReceiverKyc,
   SetRequiresSenderKyc, TrustedEntityMetadata, UpdateMemberRootHash,
-  UpdateTrustedEntity, decode_global_state, decode_global_state_prefix,
-  set_admin_credential_hash, set_deactivated, set_member_root_hash,
+  UpdateTrustedEntity, decode_global_state, idx_admin_credential_hash,
+  idx_deactivated, idx_mintable_amount, idx_minting_script_credential_hash,
+  idx_power_user_linked_list_policy_id, set_admin_credential_hash,
+  set_deactivated, set_global_state_script_credential_hash, set_member_root_hash,
   set_mintable_amount, set_minting_script_credential_hash,
   set_requires_receiver_kyc, set_requires_sender_kyc, set_security_info,
   set_transfers_paused, set_trusted_entity_vkeys, set_upgrades_locked,
 }
 use types/power_users.{PowerUser}
-use utils.{must_be_signed_by_credential, quantity_of_policy_id}
+use utils.{
+  must_be_signed_by_credential, must_run_script_withdrawal,
+  quantity_of_policy_id,
+}
 
 // ============================================================================
 // Sanitisation helpers (used by mint validator at genesis)
@@ -89,6 +94,13 @@ fn sanitise_initial_datum(datum: GlobalStateDatum, self_mint: Value) -> Bool {
     datum.mintable_amount >= 0,
     bytearray.length(datum.admin_credential_hash) == 28,
     bytearray.length(datum.minting_script_credential_hash) == 28,
+    // The GlobalState logic (field 0) is a delegate credential like the
+    // minting authority: well-formed, and never doubling as the authority or
+    // the admin — its withdrawal is in every GlobalState transaction and
+    // `must_be_signed_by_credential` would accept it for either.
+    bytearray.length(datum.global_state_script_credential_hash) == 28,
+    datum.global_state_script_credential_hash != datum.minting_script_credential_hash,
+    datum.global_state_script_credential_hash != datum.admin_credential_hash,
     // Born unlocked. Locking is a single admin transaction away, so a
     // deployment that wants immutability from day one loses nothing — but a
     // token that started locked could never be corrected at all.
@@ -112,9 +124,9 @@ fn sanitise_initial_datum(datum: GlobalStateDatum, self_mint: Value) -> Bool {
     // every power-user node would double as a denylist node — and since a
     // power-user node's link is unconstrained by the denylist's ordering, the
     // sanctions list would be satisfiable from day one and never bind. No v1
-    // spend branch writes either field (each rewrites exactly one other field),
-    // and a later version's conversion is obliged to carry both unchanged, so
-    // this is the only chance to catch it.
+    // action changes either field (the power-users id is also pinned across
+    // logic rotations; the denylist id is the new logic's to keep), so this is
+    // the only chance to catch it.
     //
     // The length checks are the same defence one step earlier: a malformed id
     // can never name a real minting policy, so the corresponding list would be
@@ -137,15 +149,21 @@ fn sanitise_initial_datum(datum: GlobalStateDatum, self_mint: Value) -> Bool {
 // ============================================================================
 // Mint validator
 // ============================================================================
-// Only used at genesis to mint the global_state NFT with the initial datum. 
+// Only used at genesis to mint the global_state NFT with the initial datum.
 // Verifies the following:
 // - The one-and-only global_state NFT is being minted, and goes to the output.
+// - That output sits at `global_state_proxy` (its payment credential). The
+//   proxy is unparameterised, so its hash is known before genesis with no
+//   circular dependency; the logic it delegates to is named by datum field 0.
 // - The initial datum is well-formed (basic field checks + trusted entity vkey list is sorted and has no duplicates + power user ll and denylist ll roots are minted).
-// Note: No Check of the receiver address is performed here; the NFT can be sent to any address. 
-//       It MUST be sent to the address of the global_state spend validator address, which we don't know on initialization due to circular dependency.
-//       After this initial minting step the global_state spend validator keeps the NFT at its own address,
-//       except through MigrateGlobalState, which moves it to a new GlobalState validator (admin-signed, until LockUpgrades).
-validator global_state_mint_validator(tx0: ByteArray, index0: Int) {
+// The stake part of the address is left free; choose it deliberately — every
+// logic action preserves the full address afterwards, so it is permanent.
+validator global_state_mint_validator(
+  tx0: ByteArray,
+  index0: Int,
+  /// Hash of `global_state_proxy` (below), the permanent home of the NFT.
+  global_state_proxy_hash: ByteArray,
+) {
   mint(_redeemer: Data, policy_id: PolicyId, self: Transaction) {
     let one_time_utxo = OutputReference(tx0, index0)
     //we won't use input_present, we just need it to be there, otherwise error
@@ -163,9 +181,7 @@ validator global_state_mint_validator(tx0: ByteArray, index0: Int) {
     )
 
     expect InlineDatum(output_datum_raw) = output_parameters.datum
-    // Strict, and genesis is always THIS version: `decode_global_state` requires
-    // `schema_version == gs_schema_version`.
-    let output_datum = decode_global_state(output_datum_raw)
+    expect output_datum: GlobalStateDatum = output_datum_raw
 
     and {
       // No other asset names under this policy are minted alongside the NFT.
@@ -174,6 +190,14 @@ validator global_state_mint_validator(tx0: ByteArray, index0: Int) {
       quantity_of(self.mint, policy_id, constants.global_state_asset_name) == 1,
       // GlobalState is state, not script storage.
       output_parameters.reference_script == None,
+      // Born at the proxy — the SCRIPT, never a key with the same bytes. Every
+      // logic action keeps it there afterwards.
+      output_parameters.address.payment_credential == Script(
+        global_state_proxy_hash,
+      ),
+      // The proxy refuses to delegate to itself anyway; refusing it here keeps
+      // a genesis that could never be spent from landing at all.
+      output_datum.global_state_script_credential_hash != global_state_proxy_hash,
       //Initial datum is well-formed (sort, no duplicates, correct field widths,
       //LL root NFTs also minted in this tx).
       sanitise_initial_datum(output_datum, self.mint),
@@ -186,17 +210,65 @@ validator global_state_mint_validator(tx0: ByteArray, index0: Int) {
 }
 
 // ============================================================================
-// Spend validator
+// Spend proxy
+// ============================================================================
+// The permanent home of the GlobalState NFT. Like `minting_logic_script.ak`
+// for the minting path, it decides as little as possible: it reads field 0 of
+// the datum it guards — `global_state_script_credential_hash` — and requires
+// that credential's withdraw-0 in the same transaction. Every GlobalState rule
+// lives in the script field 0 names (`global_state_logic` below, or whatever
+// `RotateGlobalStateScript` has since installed).
+//
+// Unparameterised on purpose: the GlobalState mint can then take this hash as
+// a parameter (no circularity) and bind the NFT to it at genesis. The address
+// is therefore shared by every deployment — GlobalState is located by its NFT,
+// never by address.
+//
+// No NFT check here: a stray UTxO sent to this address can only be spent with
+// the withdraw-0 of whatever its OWN field 0 names, which governs nothing but
+// that UTxO.
+validator global_state_proxy {
+  spend(
+    datum: Option<Data>,
+    _redeemer: Data,
+    own_out_ref: OutputReference,
+    self: Transaction,
+  ) {
+    expect Some(datum) = datum
+    expect Some(own_input) = find_input(self.inputs, own_out_ref)
+    expect Script(own_hash) = own_input.output.address.payment_credential
+    // Field 0 only, decoded by hand: this file must not depend on the rest of
+    // the datum's shape.
+    let constr = builtin.un_constr_data(datum)
+    expect builtin.fst_pair(constr) == 0
+    expect [logic_raw, ..] = builtin.snd_pair(constr)
+    let logic_hash = builtin.un_b_data(logic_raw)
+
+    and {
+      (bytearray.length(logic_hash) == 28)?,
+      // Self-delegation would be trivially satisfiable by this very spend's
+      // own presence.
+      (logic_hash != own_hash)?,
+      // A genuine withdraw-0, NOT `must_be_signed_by_credential`: the latter
+      // also accepts a key signature, which would satisfy this gate without
+      // the logic ever running — a total bypass of every GlobalState rule.
+      must_run_script_withdrawal(self, logic_hash)?,
+    }
+  }
+
+  else(_) {
+    fail
+  }
+}
+
+// ============================================================================
+// GlobalState logic (withdraw-0, named by datum field 0)
 // ============================================================================
 // NOTE: All values in the utxo must be preserved by this validator.
-// INVARIANT: the global_state NFT leaves this script address ONLY through
-// `MigrateGlobalState`. Every other branch preserves
+// INVARIANT: the global_state NFT never leaves the proxy. Every branch —
+// `RotateGlobalStateScript` included — preserves
 // `global_state_output.address == own_input.output.address`; a new branch MUST
-// do the same. Nothing on chain locates GlobalState by address — every reader
-// (minting proxy, authority, transfer logic, lists, the CIP-113 base layer)
-// authenticates it by the NFT — so a spent GlobalState means "the validator
-// holding the NFT ran", which after a migration is the target validator. That
-// is why the target must be a reviewed build (see MigrateGlobalState).
+// do the same.
 //
 // INVARIANT: non-Mint branches MUST reject concurrent security-token mints.
 // Together with the minting_logic_script input-branch check, this is what
@@ -209,7 +281,31 @@ validator global_state_mint_validator(tx0: ByteArray, index0: Int) {
 // ADMIN: admin credential hash now lives in the input datum (field
 // `admin_credential_hash`). No compile-time owner parameter. Rotation via the
 // `RotateAdmin` action requires dual signature (old + new).
-validator global_state_spend_validator(
+//
+// INVARIANTS ANY REPLACEMENT GS LOGIC MUST PRESERVE (installed through
+// `RotateGlobalStateScript`; nothing on chain re-checks them afterwards):
+//   1. The NFT stays at the proxy with its full address; non-ADA value is
+//      preserved; no reference script on the output.
+//   2. `deactivated` is terminal (no action once set) and `upgrades_locked`
+//      is one-way and closes rotation, minting-script rotation and
+//      `SetMintableAmount`.
+//   3. MintSecurity keeps the supply-cap accounting, and every other action
+//      rejects security-token mints and movements.
+//   4. The datum's 15 known fields keep their order, types and constructor 0,
+//      inline: the minting proxy and the power-users and denylist lists decode
+//      all of them and can never be redeployed. Trailing fields may be added.
+//   5. The logic's own hash is never accepted as the admin, the minting
+//      authority or an operator: every GlobalState transaction carries this
+//      withdrawal, and `must_be_signed_by_credential` accepts a withdrawal as
+//      a signature. Admin and minting authority are kept distinct from field 0
+//      when written; an operator credential is refused where the role is USED
+//      (PauseTransfers here, mint/burn in the minting authority, seizure in
+//      the third-party transfer logic, sanctions in the denylist), so a later rotation cannot reopen it.
+//   6. `publish` accepts registration only, so nobody can deregister the
+//      stake credential the proxy's withdraw-0 depends on.
+//   7. It acts only when it is the input's field 0, except as the incoming
+//      side of a rotation.
+validator global_state_logic(
   security_asset_name: ByteArray,
   issuance_policy_id: ByteArray,
   global_state_policy_id: ByteArray,
@@ -219,17 +315,31 @@ validator global_state_spend_validator(
   /// whatever ROLE FLAGS its holder writes into the datum. Here that would let
   /// a revoked operator keep pausing the protocol. Not circular: the
   /// power-users validators depend on the GlobalState MINT hash, never on this
-  /// spend validator's.
+  /// logic's.
   power_user_list_script_hash: ByteArray,
 ) {
-  spend(
-    datum_opt: Option<Data>,
+  withdraw(
     redeemer: GlobalStateSpendRedeemer,
-    input_out_ref: OutputReference,
+    credential: Credential,
     self: Transaction,
   ) {
-    expect Some(input_datum_data) = datum_opt
-    expect Some(own_input) = find_input(self.inputs, input_out_ref)
+    expect Script(own_hash) = credential
+
+    // The GlobalState input is the one holding the NFT. Exactly one exists, so
+    // the search is unambiguous; reference inputs are never searched — a
+    // logic run must govern a SPENT GlobalState.
+    expect Some(own_input) = list.find(
+      self.inputs,
+      fn(input) {
+        quantity_of(
+          input.output.value,
+          global_state_policy_id,
+          constants.global_state_asset_name,
+        ) == 1
+      },
+    )
+    expect InlineDatum(input_datum_data) = own_input.output.datum
+    let input_datum = decode_global_state(input_datum_data)
 
     // TERMINAL GUARD (irreversibility): once `deactivated` is set, the
     // global_state UTxO can never be spent again — every action is rejected
@@ -245,20 +355,25 @@ validator global_state_spend_validator(
     // does NOT require supply to be zero at deactivation, so the operator may
     // burn down beforehand or immobilise as-is. It only guarantees the state is
     // final afterwards.
-    //
-    // Prefix field 1, read on its own and strictly typed, so the guard holds on
-    // a datum of ANY version (a malformed Bool traps; it never reads as False).
-    // The Migrate arm decodes the rest of the prefix, the other arm the full
-    // datum — each only what it needs.
-    expect [_, deactivated_raw, ..] = builtin.unconstr_fields(input_datum_data)
-    expect deactivated: Bool = deactivated_raw
-    expect !deactivated
+    expect !input_datum.deactivated
+
+    // This withdrawal is present in every transaction it validates, and
+    // `must_be_signed_by_credential` accepts a withdrawal as a signature: an
+    // admin equal to this hash would let anyone pass every admin check.
+    expect input_datum.admin_credential_hash != own_hash
 
     let global_state_output = utils.safe_list_at(
       self.outputs,
       redeemer.global_state_output_index,
     )
     expect InlineDatum(global_state_output_datum) = global_state_output.datum
+
+    // Raw Data field list of the input datum — taken from the RAW datum, so
+    // fields a later logic appended survive every write below. Each branch
+    // proves the output datum equals this with exactly one field replaced,
+    // sharing every unchanged field as opaque Data — no unwrap/rewrap, and no
+    // full-datum re-validation of the output.
+    let input_fields = builtin.unconstr_fields(input_datum_data)
 
     // All branches share these address/NFT preservation invariants.
     let address_preserved = global_state_output.address == own_input.output.address
@@ -312,60 +427,83 @@ validator global_state_spend_validator(
     )
 
     when redeemer.action is {
-      // Dispatched on the PREFIX alone, with no version check — in every
-      // GlobalState version. So whatever shape the datum has, the NFT can
-      // always be passed on: a faulty later version, or a migration to a
-      // validator that cannot convert the datum, is recoverable by migrating
-      // again instead of stranding GlobalState for good.
-      MigrateGlobalState { new_spend_script_hash } -> {
-        let prefix = decode_global_state_prefix(input_datum_data)
-        expect Script(own_hash) = own_input.output.address.payment_credential
-        and {
-          no_concurrent_security_mint,
-          no_security_token_spent,
-          nft_preserved,
-          value_preserved,
-          no_reference_script,
-          bytearray.length(new_spend_script_hash) == 28,
-          // Never a silent no-op.
-          new_spend_script_hash != own_hash,
-          // The one-way upgrade lock closes this path too.
-          !prefix.upgrades_locked,
-          must_be_signed_by_credential(self, prefix.admin_credential_hash),
-          // The one rule that differs from every other branch: the address MOVES —
-          // its payment credential must be exactly the named SCRIPT (never a key
-          // with the same bytes). The stake part is deliberately left free: it
-          // cannot authorise spending GlobalState and no reader locates GlobalState
-          // by address; it only directs the UTxO's ADA rewards / voting weight.
-          global_state_output.address.payment_credential == Script(
-            new_spend_script_hash,
-          ),
-          // Anti-brick: the target's script must be producible — published as a
-          // reference script in this very transaction's reference inputs. KEEP IT:
-          // a migration to a hash nobody can produce is permanent (GlobalState could
-          // never be spent again). The reference script goes UNUSED in this tx, which
-          // the Conway ledger accepts; aiken-java-binding 0.1.0 (uplc 1.1.13) rejects
-          // it off-chain as `RequiredRedeemersMismatch { extra }` — evaluate this tx
-          // with a ledger-faithful evaluator rather than removing the guard.
-          list.any(
-            self.reference_inputs,
-            fn(i) { i.output.reference_script == Some(new_spend_script_hash) },
-          ),
-          // State carried over byte-for-byte, whatever its version; the target
-          // reshapes it, if at all, through its own conversion action.
-          builtin.equals_data(input_datum_data, global_state_output_datum),
+      RotateGlobalStateScript { new_global_state_script_hash } ->
+        // Both logics run in a rotation. Which side THIS run is comes from the
+        // INPUT's field 0, never from the redeemer: the redeemer is the
+        // caller's to choose.
+        if input_datum.global_state_script_credential_hash == own_hash {
+          // OUTGOING — the current logic hands over.
+          let output_fields = builtin.unconstr_fields(global_state_output_datum)
+          // The frozen readers (minting proxy, power-users and denylist lists)
+          // decode all 15 known fields with their types; whatever the new logic
+          // wants, they must still be able to read the result.
+          let output_datum = decode_global_state(global_state_output_datum)
+          let unchanged = fn(idx) {
+            utils.safe_list_at(output_fields, idx) == utils.safe_list_at(
+              input_fields,
+              idx,
+            )
+          }
+          and {
+            no_concurrent_security_mint,
+            no_security_token_spent,
+            address_preserved,
+            nft_preserved,
+            value_preserved,
+            no_reference_script,
+            // The one-way upgrade lock closes this path too.
+            !input_datum.upgrades_locked,
+            must_be_signed_by_credential(
+              self,
+              input_datum.admin_credential_hash,
+            ),
+            bytearray.length(new_global_state_script_hash) == 28,
+            // Never a silent no-op — and the only branch through which the
+            // current logic could otherwise rewrite the datum unchecked.
+            new_global_state_script_hash != own_hash,
+            // The new logic's withdrawal will be in every GlobalState
+            // transaction; it must not double as the minting authority (MintSecurity
+            // alone would then satisfy the minting proxy) or as the admin.
+            new_global_state_script_hash != input_datum.minting_script_credential_hash,
+            new_global_state_script_hash != input_datum.admin_credential_hash,
+            output_datum.global_state_script_credential_hash == new_global_state_script_hash,
+            // What the frozen readers act on is not the rotation's to change.
+            // `deactivated` and the admin keep their own rules, the power-users
+            // list is fixed for life, and the minting authority has its own
+            // rotation.
+            unchanged(idx_deactivated),
+            unchanged(idx_admin_credential_hash),
+            unchanged(idx_power_user_linked_list_policy_id),
+            unchanged(idx_minting_script_credential_hash),
+            // Anti-brick: the new logic RUNS in this transaction — so its
+            // script is producible and its stake credential registered — and,
+            // running, checks the datum it is about to govern. Everything else
+            // in the output is the new logic's to accept or refuse.
+            must_run_script_withdrawal(self, new_global_state_script_hash),
+          }
+        } else {
+          // INCOMING — this logic is being installed. It must be the one named
+          // (a bystander logic never acts) and, being this version, it accepts
+          // exactly the datum it is handed with only field 0 rewritten to
+          // itself: state changes go through its own reviewed actions
+          // afterwards. A later version replaces this check with its own.
+          and {
+            new_global_state_script_hash == own_hash,
+            no_concurrent_security_mint,
+            no_security_token_spent,
+            address_preserved,
+            nft_preserved,
+            value_preserved,
+            no_reference_script,
+            builtin.equals_data(
+              set_global_state_script_credential_hash(input_fields, own_hash),
+              global_state_output_datum,
+            ),
+          }
         }
-      }
       _ -> {
-        // Every other branch acts on THIS version's datum: strict decode,
-        // `schema_version == gs_schema_version`. Bound here, inside the
-        // non-Migrate arm, so it can never block a migration.
-        let input_datum = decode_global_state(input_datum_data)
-        // Raw Data field list of the (now validated) input datum. Each branch
-        // proves the output datum equals this with exactly one field
-        // replaced, sharing every unchanged field as opaque Data — no
-        // unwrap/rewrap, and no full-datum re-validation of the output.
-        let input_fields = builtin.unconstr_fields(input_datum_data)
+        // Every other action is this logic's only while it is the one installed.
+        expect input_datum.global_state_script_credential_hash == own_hash
         when redeemer.action is {
           MintSecurity { issuance_policy_redeemer_index } -> {
             //issuance_logic.mint validator must be called
@@ -422,6 +560,9 @@ validator global_state_spend_validator(
               no_reference_script,
               //Must have permission to pause/unpause transfers
               power_user_data.can_pause,
+              // Never this logic's own hash: its withdrawal is in this very
+              // transaction and would sign for the operator.
+              power_user_credential_hash != own_hash,
               //Must be signed by the power user
               must_be_signed_by_credential(self, power_user_credential_hash),
               builtin.equals_data(
@@ -654,6 +795,9 @@ validator global_state_spend_validator(
               value_preserved,
               no_reference_script,
               bytearray.length(new_admin_credential_hash) == 28,
+              // Never this logic's own hash: its withdrawal is in every
+              // GlobalState transaction and would sign for the admin.
+              new_admin_credential_hash != own_hash,
               //Dual-sig: both old (from input datum) and new admins must sign.
               //Prevents silent takeover; prevents lost-key soft-brick by
               //forcing continuity.
@@ -681,6 +825,9 @@ validator global_state_spend_validator(
               value_preserved,
               no_reference_script,
               bytearray.length(new_minting_script_credential_hash) == 28,
+              // Never this logic's own hash: MintSecurity alone would then
+              // satisfy the minting proxy, skipping every authority rule.
+              new_minting_script_credential_hash != own_hash,
               // The one-way upgrade lock closes this path permanently. See
               // `upgrades_locked` on GlobalStateDatum.
               !input_datum.upgrades_locked,
@@ -777,9 +924,23 @@ validator global_state_spend_validator(
               ),
             }
           }
-          MigrateGlobalState { .. } -> fail
+          // Handled above, before the installed-logic check.
+          RotateGlobalStateScript { .. } -> fail
         }
       }
+    }
+  }
+
+  // Whitelist RegisterCredential only. Rejecting UnregisterCredential prevents
+  // a ~2 ADA griefing DoS: a rubber-stamp publish would allow anyone to
+  // de-register this script's stake credential, which would brick every
+  // GlobalState spend (the proxy's withdraw-0) until re-registered. Also
+  // rejects delegation and DRep/committee cert types — this credential exists
+  // solely for withdraw-0.
+  publish(_r: Data, c: Certificate, _s: Transaction) {
+    when c is {
+      RegisterCredential { .. } -> True
+      _ -> False
     }
   }
 
@@ -806,8 +967,13 @@ const t_admin: ByteArray =
 const t_pu_script_hash: ByteArray =
   #"d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1"
 
+// `global_state_proxy`'s hash: where the NFT lives.
 const t_gs_script_hash: ByteArray =
   #"dddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+
+// The installed GlobalState logic — datum field 0 in every fixture.
+const t_gs_logic: ByteArray =
+  #"9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a"
 
 const t_new_admin: ByteArray =
   #"1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c"
@@ -831,7 +997,7 @@ fn t_out_ref(ix: Int) -> OutputReference {
 
 fn t_datum(transfers_paused: Bool, deactivated: Bool) -> GlobalStateDatum {
   GlobalStateDatum {
-    schema_version: 1,
+    global_state_script_credential_hash: t_gs_logic,
     transfers_paused,
     deactivated,
     mintable_amount: 1_000_000,
@@ -928,28 +1094,54 @@ fn deactivate_redeemer() -> GlobalStateSpendRedeemer {
   }
 }
 
+// A GlobalState spend as the ledger runs it: the proxy on the spent UTxO and
+// the logic its field 0 names, whose withdraw-0 is added here. The ledger hands
+// a spend validator the datum of the input it spends, while the logic reads it
+// from the transaction — so the input at `t_out_ref(0)` is given `input_datum`,
+// exactly the pairing the old single spend validator received.
 fn run_spend(
   input_datum: GlobalStateDatum,
   redeemer: GlobalStateSpendRedeemer,
   tx: Transaction,
 ) -> Bool {
-  run_spend_raw(input_datum, redeemer, tx)
+  let input_data: Data = input_datum
+  let redeemer_data: Data = redeemer
+  let logic = input_datum.global_state_script_credential_hash
+  let tx = Transaction {
+    ..tx,
+    inputs: list.map(
+      tx.inputs,
+      fn(input) {
+        if input.output_reference == t_out_ref(0) {
+          Input {
+            ..input,
+            output: Output { ..input.output, datum: InlineDatum(input_data) },
+          }
+        } else {
+          input
+        }
+      },
+    ),
+    withdrawals: [Pair(Script(logic), 0), ..tx.withdrawals],
+  }
+  and {
+    global_state_proxy.spend(Some(input_data), redeemer_data, t_out_ref(0), tx),
+    run_logic(logic, redeemer, tx),
+  }
 }
 
-/// `run_spend` on an arbitrary input datum — for datums of another version.
-fn run_spend_raw(
-  input_datum: Data,
+fn run_logic(
+  logic: ByteArray,
   redeemer: GlobalStateSpendRedeemer,
   tx: Transaction,
 ) -> Bool {
-  global_state_spend_validator.spend(
+  global_state_logic.withdraw(
     t_sec_name,
     t_issuance_policy,
     t_gs_policy,
     t_pu_script_hash,
-    Some(input_datum),
     redeemer,
-    t_out_ref(0),
+    Script(logic),
     tx,
   )
 }
@@ -1579,7 +1771,7 @@ fn sanitise_datum(
   network_id: Int,
 ) -> GlobalStateDatum {
   GlobalStateDatum {
-    schema_version: 1,
+    global_state_script_credential_hash: t_gs_logic,
     transfers_paused: False,
     deactivated: False,
     mintable_amount: 1_000,
@@ -1759,6 +1951,7 @@ fn run_mint(policy_id: PolicyId, self: Transaction) -> Bool {
   global_state_mint_validator.mint(
     t_mint_tx0,
     t_mint_index0,
+    t_gs_script_hash,
     builtin.constr_data(0, []),
     policy_id,
     self,
@@ -1924,10 +2117,10 @@ test global_state_mint_fails_when_no_output_carries_the_nft() fail {
 // ── PauseTransfers — the power-user gate and its list-address pin ───────────
 //
 // The address pin this branch carries matters more here than in the swappable
-// consumers: `global_state_spend_validator` cannot be rotated on a live
-// deployment, so the assertion is the primary defence rather than a
-// belt-and-braces one. Keep all three tests together — the positive control is
-// what makes the two negatives meaningful.
+// consumers: a GlobalState logic is replaced only by an admin rotation,
+// so the assertion is the primary defence rather than a belt-and-braces one.
+// Keep all three tests together — the positive control is what makes the two
+// negatives meaningful.
 
 const t_pause_pu_cred: ByteArray =
   #"0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c"
@@ -2002,6 +2195,30 @@ test pause_succeeds_for_a_can_pause_power_user_in_the_list() {
     t_pause_datum(False),
     t_pause_redeemer(),
     t_pause_tx(t_pu_node_at(Script(t_pu_script_hash))),
+  )
+}
+
+/// The GlobalState logic's withdrawal is in every pause transaction, and
+/// `must_be_signed_by_credential` accepts a withdrawal as a signature: a
+/// `can_pause` operator whose credential IS the installed logic hash would be
+/// satisfied by anyone. Here the operator does not sign; only the logic's
+/// withdrawal (added by `run_spend`) is present.
+test pause_rejects_an_operator_that_is_the_global_state_logic() {
+  let input_datum = GlobalStateDatum {
+    ..t_pause_datum(False),
+    global_state_script_credential_hash: t_pause_pu_cred,
+  }
+  !run_spend(
+    input_datum,
+    t_pause_redeemer(),
+    Transaction {
+      ..t_tx(
+        input_datum,
+        GlobalStateDatum { ..input_datum, transfers_paused: True },
+        [],
+      ),
+      reference_inputs: [t_pu_node_at(Script(t_pu_script_hash))],
+    },
   )
 }
 
@@ -2114,7 +2331,7 @@ test pause_rejects_a_foreign_asset_added_to_the_continuing_output() {
 /// One list must not double as the other. `sanitise_mint()` mints both
 /// roots under distinct policies, so with the datum ids made equal the mint
 /// check still passes and the new inequality assertion is what rejects it.
-/// No spend branch writes either field, so this is the only chance.
+/// Both fields are immutable after genesis, so this is the only chance.
 test sanitise_rejects_identical_list_policies() {
   let d = sanitise_datum(#"", 1)
   !sanitise_initial_datum(
@@ -3384,407 +3601,725 @@ test mint_beyond_burned_headroom_rejected_after_zero_cap() {
   )
 }
 
-// ── MigrateGlobalState — move the NFT + datum to a new GlobalState validator ─
-//
-// Every negative below is a one-change copy of `t_migrate_tx`, which builds a
-// migration that passes: output at Script(t_migrate_target) with the same stake
-// credential, datum byte-identical, NFT and value preserved, and a reference
-// input carrying the target script (the anti-brick guard).
+// ── global_state_proxy — the delegation gate ─────────────────────────────────
 
-const t_migrate_target: ByteArray =
-  #"2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b"
-
-fn migrate_redeemer(
-  new_spend_script_hash: ByteArray,
-) -> GlobalStateSpendRedeemer {
-  GlobalStateSpendRedeemer {
-    global_state_output_index: 0,
-    action: MigrateGlobalState { new_spend_script_hash },
+fn proxy_tx(withdrawals: Pairs<Credential, Int>) -> Transaction {
+  Transaction {
+    ..t_tx(t_datum(False, False), t_datum(False, False), []),
+    withdrawals,
   }
 }
 
-fn t_ref_script_input(script_hash: ByteArray) -> Input {
-  Input {
-    output_reference: t_out_ref(7),
-    output: Output {
-      address: Address {
-        payment_credential: VerificationKey(t_admin),
-        stake_credential: None,
-      },
-      value: from_lovelace(20_000_000),
-      datum: NoDatum,
-      reference_script: Some(script_hash),
-    },
-  }
-}
-
-fn with_output_address(tx: Transaction, address: Address) -> Transaction {
-  expect [gs_out, ..rest] = tx.outputs
-  Transaction { ..tx, outputs: [Output { ..gs_out, address }, ..rest] }
-}
-
-fn t_migrate_tx(input_datum: GlobalStateDatum, target: ByteArray) -> Transaction {
-  let tx = with_output_address(
-    t_tx(input_datum, input_datum, [t_admin]),
-    Address { payment_credential: Script(target), stake_credential: None },
+fn run_proxy(datum: Data, tx: Transaction) -> Bool {
+  global_state_proxy.spend(
+    Some(datum),
+    builtin.constr_data(0, []),
+    t_out_ref(0),
+    tx,
   )
-  Transaction { ..tx, reference_inputs: [t_ref_script_input(target)] }
 }
 
-test migrate_global_state_succeeds_when_admin_signs() {
-  let input_datum = t_datum(False, False)
+fn t_datum_data() -> Data {
+  let d: Data = t_datum(False, False)
+  d
+}
+
+test proxy_succeeds_with_the_named_withdrawal() {
+  run_proxy(t_datum_data(), proxy_tx([Pair(Script(t_gs_logic), 0)]))
+}
+
+test proxy_fails_without_the_logic_withdrawal() {
+  !run_proxy(t_datum_data(), proxy_tx([]))
+}
+
+test proxy_fails_with_a_different_withdrawal() {
+  !run_proxy(t_datum_data(), proxy_tx([Pair(Script(t_new_gs_logic), 0)]))
+}
+
+// A key signature for the named hash is not the logic running.
+test proxy_fails_when_the_logic_is_merely_signed_for() {
+  !run_proxy(
+    t_datum_data(),
+    Transaction { ..proxy_tx([]), extra_signatories: [t_gs_logic] },
+  )
+}
+
+// The proxy's own withdrawal IS present, so only the self-delegation guard can
+// reject this.
+test proxy_fails_when_field_0_is_its_own_hash() {
+  let datum: Data = GlobalStateDatum {
+    ..t_datum(False, False),
+    global_state_script_credential_hash: t_gs_script_hash,
+  }
+  !run_proxy(datum, proxy_tx([Pair(Script(t_gs_script_hash), 0)]))
+}
+
+test proxy_fails_on_a_malformed_field_0() fail {
+  let raw: Data = t_datum(False, False)
+  let fields = utils.replace_data_field(
+    builtin.unconstr_fields(raw),
+    0,
+    builtin.i_data(1),
+  )
+  run_proxy(
+    builtin.constr_data(0, fields),
+    proxy_tx([Pair(Script(t_gs_logic), 0)]),
+  )
+}
+
+test proxy_fails_on_a_short_field_0() {
+  let datum: Data = GlobalStateDatum {
+    ..t_datum(False, False),
+    global_state_script_credential_hash: #"9a9a",
+  }
+  !run_proxy(datum, proxy_tx([Pair(Script(#"9a9a"), 0)]))
+}
+
+// ── global_state_logic — installed-logic, admin and credential guards ────────
+
+fn lock_tx() -> Transaction {
+  let tx = t_tx(
+    t_datum(False, False),
+    GlobalStateDatum { ..t_datum(False, False), upgrades_locked: True },
+    [t_admin],
+  )
+  tx
+}
+
+test logic_runs_an_action_when_it_is_field_0() {
+  run_logic(t_gs_logic, lock_upgrades_redeemer(), lock_tx())
+}
+
+// A logic that is not (or no longer) field 0 never acts on GlobalState.
+test logic_fails_when_it_is_not_field_0() fail {
+  run_logic(t_new_gs_logic, lock_upgrades_redeemer(), lock_tx())
+}
+
+test logic_fails_when_admin_is_its_own_hash() fail {
+  let input_datum = GlobalStateDatum {
+    ..t_datum(False, False),
+    admin_credential_hash: t_gs_logic,
+  }
   run_spend(
     input_datum,
-    migrate_redeemer(t_migrate_target),
-    t_migrate_tx(input_datum, t_migrate_target),
+    lock_upgrades_redeemer(),
+    t_tx(
+      input_datum,
+      GlobalStateDatum { ..input_datum, upgrades_locked: True },
+      [],
+    ),
   )
 }
 
-test migrate_global_state_fails_without_admin_signature() {
+// The logic reads only a SPENT GlobalState: one that is merely referenced
+// is not there for it to find.
+test logic_fails_when_global_state_is_only_referenced() fail {
+  let tx = lock_tx()
+  run_logic(
+    t_gs_logic,
+    lock_upgrades_redeemer(),
+    Transaction { ..tx, inputs: [], reference_inputs: tx.inputs },
+  )
+}
+
+test logic_accepts_register_credential() {
+  global_state_logic.publish(
+    t_sec_name,
+    t_issuance_policy,
+    t_gs_policy,
+    t_pu_script_hash,
+    builtin.constr_data(0, []),
+    RegisterCredential { credential: Script(t_gs_logic), deposit: Never },
+    lock_tx(),
+  )
+}
+
+test logic_rejects_unregister_credential() {
+  !global_state_logic.publish(
+    t_sec_name,
+    t_issuance_policy,
+    t_gs_policy,
+    t_pu_script_hash,
+    builtin.constr_data(0, []),
+    UnregisterCredential { credential: Script(t_gs_logic), refund: Never },
+    lock_tx(),
+  )
+}
+
+test rotate_minting_script_to_the_gs_logic_fails() {
   let input_datum = t_datum(False, False)
-  let tx = t_migrate_tx(input_datum, t_migrate_target)
   !run_spend(
     input_datum,
-    migrate_redeemer(t_migrate_target),
-    Transaction { ..tx, extra_signatories: [t_new_admin] },
+    rotate_minting_script_redeemer(t_gs_logic),
+    t_tx(
+      input_datum,
+      GlobalStateDatum {
+        ..input_datum,
+        minting_script_credential_hash: t_gs_logic,
+      },
+      [t_admin],
+    ),
   )
 }
 
-test migrate_global_state_fails_once_upgrades_are_locked() {
+test rotate_admin_to_the_gs_logic_fails() {
+  let input_datum = t_datum(False, False)
+  !run_spend(
+    input_datum,
+    rotate_admin_redeemer(t_gs_logic),
+    t_tx(
+      input_datum,
+      GlobalStateDatum { ..input_datum, admin_credential_hash: t_gs_logic },
+      [t_admin, t_gs_logic],
+    ),
+  )
+}
+
+// ── RotateGlobalStateScript — replace the logic, both sides ──────────────────
+//
+// `t_rotate_tx` builds a rotation that passes on both sides: admin signs, the
+// output is the input with field 0 := `t_new_gs_logic`, and both logics'
+// withdrawals are present. Every negative is a one-change copy.
+
+const t_new_gs_logic: ByteArray =
+  #"2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b"
+
+fn rotate_gs_redeemer(new: ByteArray) -> GlobalStateSpendRedeemer {
+  GlobalStateSpendRedeemer {
+    global_state_output_index: 0,
+    action: RotateGlobalStateScript { new_global_state_script_hash: new },
+  }
+}
+
+fn rotated(datum: GlobalStateDatum, logic: ByteArray) -> GlobalStateDatum {
+  GlobalStateDatum { ..datum, global_state_script_credential_hash: logic }
+}
+
+fn both_withdrawals() -> Pairs<Credential, Int> {
+  [Pair(Script(t_gs_logic), 0), Pair(Script(t_new_gs_logic), 0)]
+}
+
+fn t_rotate_tx_from(
+  input_datum: GlobalStateDatum,
+  output_datum: GlobalStateDatum,
+  signatories: List<ByteArray>,
+) -> Transaction {
+  Transaction {
+    ..t_tx(input_datum, output_datum, signatories),
+    withdrawals: both_withdrawals(),
+  }
+}
+
+fn t_rotate_tx(output_datum: GlobalStateDatum) -> Transaction {
+  t_rotate_tx_from(t_datum(False, False), output_datum, [t_admin])
+}
+
+fn t_rotated_datum() -> GlobalStateDatum {
+  rotated(t_datum(False, False), t_new_gs_logic)
+}
+
+fn with_raw_output(tx: Transaction, raw: Data) -> Transaction {
+  Transaction {
+    ..tx,
+    outputs: [
+      Output { ..t_output(t_datum(False, False)), datum: InlineDatum(raw) },
+    ],
+  }
+}
+
+fn outgoing(new: ByteArray, tx: Transaction) -> Bool {
+  run_logic(t_gs_logic, rotate_gs_redeemer(new), tx)
+}
+
+fn incoming(tx: Transaction) -> Bool {
+  run_logic(t_new_gs_logic, rotate_gs_redeemer(t_new_gs_logic), tx)
+}
+
+test rotate_gs_logic_succeeds_when_admin_signs() {
+  let tx = t_rotate_tx(t_rotated_datum())
+  let input_data: Data = t_datum(False, False)
+  and {
+    global_state_proxy.spend(
+      Some(input_data),
+      builtin.constr_data(0, []),
+      t_out_ref(0),
+      tx,
+    ),
+    outgoing(t_new_gs_logic, tx),
+    incoming(tx),
+  }
+}
+
+test rotate_gs_logic_fails_without_admin_signature() {
+  !outgoing(
+    t_new_gs_logic,
+    t_rotate_tx_from(t_datum(False, False), t_rotated_datum(), []),
+  )
+}
+
+test rotate_gs_logic_fails_once_upgrades_are_locked() {
   let input_datum = t_datum_locked()
-  !run_spend(
-    input_datum,
-    migrate_redeemer(t_migrate_target),
-    t_migrate_tx(input_datum, t_migrate_target),
+  !outgoing(
+    t_new_gs_logic,
+    t_rotate_tx_from(
+      input_datum,
+      rotated(input_datum, t_new_gs_logic),
+      [t_admin],
+    ),
   )
 }
 
-test migrate_global_state_fails_to_its_own_hash() {
-  // Never a silent no-op.
-  let input_datum = t_datum(False, False)
-  !run_spend(
-    input_datum,
-    migrate_redeemer(t_gs_script_hash),
-    t_migrate_tx(input_datum, t_gs_script_hash),
+test deactivated_input_rejects_rotate_gs_logic() fail {
+  let input_datum = t_datum(True, True)
+  outgoing(
+    t_new_gs_logic,
+    t_rotate_tx_from(
+      input_datum,
+      rotated(input_datum, t_new_gs_logic),
+      [t_admin],
+    ),
   )
 }
 
-test migrate_global_state_fails_on_a_short_hash() {
-  let input_datum = t_datum(False, False)
-  !run_spend(
-    input_datum,
-    migrate_redeemer(#"2b2b"),
-    t_migrate_tx(input_datum, #"2b2b"),
-  )
-}
-
-test migrate_global_state_fails_when_the_output_stays_put() {
-  let input_datum = t_datum(False, False)
-  let tx = with_output_address(
-    t_migrate_tx(input_datum, t_migrate_target),
-    Address {
-      payment_credential: Script(t_gs_script_hash),
-      stake_credential: None,
-    },
-  )
-  !run_spend(input_datum, migrate_redeemer(t_migrate_target), tx)
-}
-
-test migrate_global_state_fails_to_a_script_other_than_named() {
-  let input_datum = t_datum(False, False)
-  let tx = with_output_address(
-    t_migrate_tx(input_datum, t_migrate_target),
-    Address {
-      payment_credential: Script(t_new_minting_script),
-      stake_credential: None,
-    },
-  )
-  !run_spend(input_datum, migrate_redeemer(t_migrate_target), tx)
-}
-
-test migrate_global_state_fails_to_a_key_with_the_same_bytes() {
-  // A mutant comparing only hash bytes would accept a key-controlled address.
-  let input_datum = t_datum(False, False)
-  let tx = with_output_address(
-    t_migrate_tx(input_datum, t_migrate_target),
-    Address {
-      payment_credential: VerificationKey(t_migrate_target),
-      stake_credential: None,
-    },
-  )
-  !run_spend(input_datum, migrate_redeemer(t_migrate_target), tx)
-}
-
-// Owner decision (2026-10-08): only the payment credential is pinned; the
-// stake part may change with the migration.
-test migrate_global_state_allows_a_different_stake_credential() {
-  let input_datum = t_datum(False, False)
-  let tx = with_output_address(
-    t_migrate_tx(input_datum, t_migrate_target),
-    Address {
-      payment_credential: Script(t_migrate_target),
-      stake_credential: Some(Inline(VerificationKey(t_admin))),
-    },
-  )
-  run_spend(input_datum, migrate_redeemer(t_migrate_target), tx)
-}
-
-test migrate_global_state_fails_when_the_datum_changes() {
-  let input_datum = t_datum(False, False)
-  let tx = t_migrate_tx(input_datum, t_migrate_target)
-  expect [gs_out, ..rest] = tx.outputs
-  let changed = GlobalStateDatum { ..input_datum, mintable_amount: 42 }
-  !run_spend(
-    input_datum,
-    migrate_redeemer(t_migrate_target),
+test rotate_gs_logic_fails_without_the_new_withdrawal() {
+  !outgoing(
+    t_new_gs_logic,
     Transaction {
-      ..tx,
-      outputs: [Output { ..gs_out, datum: InlineDatum(changed) }, ..rest],
+      ..t_rotate_tx(t_rotated_datum()),
+      withdrawals: [Pair(Script(t_gs_logic), 0)],
     },
   )
 }
 
-test migrate_global_state_fails_when_the_nft_is_dropped() {
-  let input_datum = t_datum(False, False)
-  !run_spend(
-    input_datum,
-    migrate_redeemer(t_migrate_target),
-    with_gs_output_value(
-      t_migrate_tx(input_datum, t_migrate_target),
-      fn(_v) { from_lovelace(2_000_000) },
+test rotate_gs_logic_fails_when_the_new_logic_is_merely_signed_for() {
+  !outgoing(
+    t_new_gs_logic,
+    Transaction {
+      ..t_rotate_tx(t_rotated_datum()),
+      withdrawals: [Pair(Script(t_gs_logic), 0)],
+      extra_signatories: [t_admin, t_new_gs_logic],
+    },
+  )
+}
+
+// Self-rotation by the installed logic, admin-signed: refused, so it can never
+// be used to rewrite the datum unchecked.
+test rotate_to_the_current_logic_fails_with_admin() {
+  let output_datum = GlobalStateDatum {
+    ..t_datum(False, False),
+    mintable_amount: 999_999_999,
+  }
+  !outgoing(t_gs_logic, t_rotate_tx(output_datum))
+}
+
+// The same with no signature at all — the takeover shape.
+test incoming_side_rejects_self_rotation() {
+  let output_datum = GlobalStateDatum {
+    ..t_datum(False, False),
+    admin_credential_hash: t_new_admin,
+    upgrades_locked: False,
+    mintable_amount: 999_999_999,
+  }
+  !outgoing(
+    t_gs_logic,
+    t_rotate_tx_from(t_datum(False, False), output_datum, []),
+  )
+}
+
+test rotate_gs_logic_fails_to_the_minting_script() {
+  let tx = Transaction {
+    ..t_rotate_tx(rotated(t_datum(False, False), t_minting_script)),
+    withdrawals: [
+      Pair(Script(t_gs_logic), 0),
+      Pair(Script(t_minting_script), 0),
+    ],
+  }
+  !outgoing(t_minting_script, tx)
+}
+
+test rotation_fails_when_new_logic_equals_the_admin() {
+  let tx = Transaction {
+    ..t_rotate_tx(rotated(t_datum(False, False), t_admin)),
+    withdrawals: [Pair(Script(t_gs_logic), 0), Pair(Script(t_admin), 0)],
+  }
+  !outgoing(t_admin, tx)
+}
+
+test rotate_gs_logic_fails_on_a_short_hash() {
+  let tx = Transaction {
+    ..t_rotate_tx(rotated(t_datum(False, False), #"2b2b")),
+    withdrawals: [Pair(Script(t_gs_logic), 0), Pair(Script(#"2b2b"), 0)],
+  }
+  !outgoing(#"2b2b", tx)
+}
+
+test rotate_gs_logic_fails_when_field_0_is_not_the_named_logic() {
+  !outgoing(
+    t_new_gs_logic,
+    t_rotate_tx(rotated(t_datum(False, False), t_new_minting_script)),
+  )
+}
+
+test rotate_gs_logic_fails_when_the_nft_leaves_the_proxy() {
+  let tx = t_rotate_tx(t_rotated_datum())
+  let moved = Output {
+    ..t_output(t_rotated_datum()),
+    address: Address {
+      payment_credential: Script(t_new_gs_logic),
+      stake_credential: None,
+    },
+  }
+  !outgoing(t_new_gs_logic, Transaction { ..tx, outputs: [moved] })
+}
+
+test rotate_gs_logic_fails_when_deactivated_changes() {
+  !outgoing(
+    t_new_gs_logic,
+    t_rotate_tx(GlobalStateDatum { ..t_rotated_datum(), deactivated: True }),
+  )
+}
+
+test rotate_gs_logic_fails_when_the_admin_changes() {
+  !outgoing(
+    t_new_gs_logic,
+    t_rotate_tx(
+      GlobalStateDatum {
+        ..t_rotated_datum(),
+        admin_credential_hash: t_new_admin,
+      },
     ),
   )
 }
 
-test migrate_global_state_fails_with_a_foreign_asset_added() {
-  let input_datum = t_datum(False, False)
-  !run_spend(
-    input_datum,
-    migrate_redeemer(t_migrate_target),
-    with_gs_output_value(
-      t_migrate_tx(input_datum, t_migrate_target),
-      fn(v) { merge(v, from_asset(t_foreign_policy, "X", 1)) },
+test rotate_gs_logic_fails_when_the_power_users_list_changes() {
+  !outgoing(
+    t_new_gs_logic,
+    t_rotate_tx(
+      GlobalStateDatum {
+        ..t_rotated_datum(),
+        power_user_linked_list_policy_id: t_pu_ll_policy,
+      },
     ),
   )
 }
 
-test migrate_global_state_fails_with_a_reference_script_on_the_output() {
-  let input_datum = t_datum(False, False)
-  let tx = t_migrate_tx(input_datum, t_migrate_target)
-  expect [gs_out, ..rest] = tx.outputs
-  !run_spend(
-    input_datum,
-    migrate_redeemer(t_migrate_target),
+test rotate_gs_logic_fails_when_the_minting_script_changes() {
+  !outgoing(
+    t_new_gs_logic,
+    t_rotate_tx(
+      GlobalStateDatum {
+        ..t_rotated_datum(),
+        minting_script_credential_hash: t_new_minting_script,
+      },
+    ),
+  )
+}
+
+// A retyped known field would make the frozen readers trap for good.
+test rotate_gs_logic_fails_when_the_output_is_not_readable() fail {
+  let raw: Data = t_rotated_datum()
+  let fields = utils.replace_data_field(
+    builtin.unconstr_fields(raw),
+    idx_mintable_amount,
+    builtin.b_data(#"00"),
+  )
+  outgoing(
+    t_new_gs_logic,
+    with_raw_output(
+      t_rotate_tx(t_rotated_datum()),
+      builtin.constr_data(0, fields),
+    ),
+  )
+}
+
+test rotate_gs_logic_fails_with_a_concurrent_security_mint() {
+  !outgoing(
+    t_new_gs_logic,
+    Transaction {
+      ..t_rotate_tx(t_rotated_datum()),
+      mint: from_asset(t_issuance_policy, t_sec_name, 1),
+    },
+  )
+}
+
+test rotate_gs_logic_fails_when_the_security_token_is_spent() {
+  !outgoing(
+    t_new_gs_logic,
+    with_security_token_input(t_rotate_tx(t_rotated_datum())),
+  )
+}
+
+test rotate_gs_logic_fails_with_a_reference_script_on_the_output() {
+  !outgoing(
+    t_new_gs_logic,
+    Transaction {
+      ..t_rotate_tx(t_rotated_datum()),
+      outputs: [t_output_with_reference_script(t_rotated_datum())],
+    },
+  )
+}
+
+// "Don't block updates": the outgoing logic leaves every other field, and any
+// appended field, to the new logic.
+test rotate_gs_logic_outgoing_allows_another_field_to_change() {
+  outgoing(
+    t_new_gs_logic,
+    t_rotate_tx(GlobalStateDatum { ..t_rotated_datum(), mintable_amount: 7 }),
+  )
+}
+
+test rotate_gs_logic_outgoing_allows_an_appended_field() {
+  let raw: Data = t_rotated_datum()
+  outgoing(
+    t_new_gs_logic,
+    with_raw_output(
+      t_rotate_tx(t_rotated_datum()),
+      builtin.constr_data(
+        0,
+        list.concat(builtin.unconstr_fields(raw), [builtin.i_data(1)]),
+      ),
+    ),
+  )
+}
+
+// ── incoming side (this version being installed) ─────────────────────────────
+
+test rotate_gs_logic_incoming_accepts_only_field_0_rewritten() {
+  incoming(t_rotate_tx(t_rotated_datum()))
+}
+
+test rotate_gs_logic_incoming_rejects_another_change() {
+  !incoming(
+    t_rotate_tx(GlobalStateDatum { ..t_rotated_datum(), mintable_amount: 7 }),
+  )
+}
+
+test incoming_side_rejects_a_non_nft_output() {
+  let tx = t_rotate_tx(t_rotated_datum())
+  !incoming(
     Transaction {
       ..tx,
       outputs: [
-        Output { ..gs_out, reference_script: Some(t_reference_script) },
-        ..rest
+        Output {
+          ..t_output(t_rotated_datum()),
+          value: from_lovelace(2_000_000),
+        },
       ],
     },
   )
 }
 
-test migrate_global_state_fails_with_a_concurrent_security_mint() {
-  let input_datum = t_datum(False, False)
-  !run_spend(
-    input_datum,
-    migrate_redeemer(t_migrate_target),
-    with_security_token_minted_into_an_output(
-      t_migrate_tx(input_datum, t_migrate_target),
-    ),
+// The installed logic is ALWAYS the outgoing side, whatever the redeemer
+// claims: a self-rotation that changes nothing still needs the admin and is
+// still refused as a no-op. (Chosen by the redeemer instead, this would be
+// taken as the incoming side, whose equality check alone would accept it.)
+test self_rotation_without_changes_is_refused() {
+  !outgoing(
+    t_gs_logic,
+    t_rotate_tx_from(t_datum(False, False), t_datum(False, False), []),
   )
 }
 
-test migrate_global_state_fails_when_the_security_token_is_spent() {
-  let input_datum = t_datum(False, False)
-  !run_spend(
-    input_datum,
-    migrate_redeemer(t_migrate_target),
-    with_security_token_input(t_migrate_tx(input_datum, t_migrate_target)),
+// Named in the output but not in the redeemer: each logic gets its own
+// redeemer, and the incoming side acts only on one naming it.
+test incoming_side_rejects_a_redeemer_naming_another_logic() {
+  !run_logic(
+    t_new_gs_logic,
+    rotate_gs_redeemer(t_new_minting_script),
+    t_rotate_tx(t_rotated_datum()),
   )
 }
 
-test migrate_global_state_fails_without_the_target_script_referenced() {
-  // Anti-brick: a target whose script nobody can produce would leave GlobalState
-  // unspendable forever — unlike a bad RotateMintingScript, never undoable.
-  let input_datum = t_datum(False, False)
-  let tx = t_migrate_tx(input_datum, t_migrate_target)
-  !run_spend(
-    input_datum,
-    migrate_redeemer(t_migrate_target),
-    Transaction { ..tx, reference_inputs: [] },
+// A logic that is neither installed nor the one named never acts.
+test rotation_fails_for_a_bystander_logic() {
+  !run_logic(
+    t_new_gs_logic,
+    rotate_gs_redeemer(t_new_minting_script),
+    t_rotate_tx(rotated(t_datum(False, False), t_new_minting_script)),
   )
 }
 
-test migrate_global_state_fails_when_the_reference_carries_another_script() {
-  let input_datum = t_datum(False, False)
-  let tx = t_migrate_tx(input_datum, t_migrate_target)
-  !run_spend(
-    input_datum,
-    migrate_redeemer(t_migrate_target),
-    Transaction {
-      ..tx,
-      reference_inputs: [t_ref_script_input(t_new_minting_script)],
-    },
-  )
-}
-
-test deactivated_input_rejects_migrate_global_state() fail {
-  let input_datum = t_datum(True, True)
-  run_spend(
-    input_datum,
-    migrate_redeemer(t_migrate_target),
-    t_migrate_tx(input_datum, t_migrate_target),
-  )
-}
-
-// ── Schema versions: Migrate on any version, everything else on version 1 ───
-//
-// `as_version_2` / `as_foreign_version` rewrite every GlobalState datum in a
-// transaction (inputs, reference inputs AND the continuing output), so each
-// test below is a one-change copy of the named passing control: the datum is
-// identical except for its version (and, for the foreign shape, its tail).
-
-fn with_gs_outputs_rewritten(
-  tx: Transaction,
-  rewrite: fn(Data) -> Data,
-) -> Transaction {
-  Transaction {
-    ..tx,
-    outputs: list.map(
-      tx.outputs,
-      fn(o) {
-        if quantity_of(o.value, t_gs_policy, constants.global_state_asset_name) == 1 {
-          expect InlineDatum(raw) = o.datum
-          Output { ..o, datum: InlineDatum(rewrite(raw)) }
-        } else {
-          o
-        }
-      },
-    ),
-  }
-}
-
-fn as_version_2(tx: Transaction) -> Transaction {
-  with_gs_outputs_rewritten(
-    tests.with_gs_version(tx, t_gs_policy, 2),
-    fn(raw) { tests.gs_with_version(raw, 2) },
-  )
-}
-
-fn as_foreign_version(tx: Transaction) -> Transaction {
-  with_gs_outputs_rewritten(
-    tests.with_foreign_gs_version(tx, t_gs_policy),
-    tests.foreign_gs_version,
-  )
-}
-
-fn version_2(datum: GlobalStateDatum) -> Data {
-  tests.gs_with_version(datum, 2)
-}
-
-// MigrateGlobalState reads only the PREFIX, in every version: the NFT can always
-// be passed on, whatever the datum's shape. Without this a faulty later version
-// could strand GlobalState for good. Control:
-// `migrate_global_state_succeeds_when_admin_signs`.
-test migrate_global_state_succeeds_on_a_later_version() {
-  let input_datum = t_datum(False, False)
-  run_spend_raw(
-    tests.foreign_gs_version(input_datum),
-    migrate_redeemer(t_migrate_target),
-    as_foreign_version(t_migrate_tx(input_datum, t_migrate_target)),
-  )
-}
-
-// …and its prefix guards still bind on such a datum: the one-way lock…
-test migrate_global_state_fails_on_a_later_version_when_locked() {
-  let input_datum = t_datum_locked()
-  !run_spend_raw(
-    tests.foreign_gs_version(input_datum),
-    migrate_redeemer(t_migrate_target),
-    as_foreign_version(t_migrate_tx(input_datum, t_migrate_target)),
-  )
-}
-
-// …the admin signature…
-test migrate_global_state_fails_on_a_later_version_without_admin() {
-  let input_datum = t_datum(False, False)
-  let tx = t_migrate_tx(input_datum, t_migrate_target)
-  !run_spend_raw(
-    tests.foreign_gs_version(input_datum),
-    migrate_redeemer(t_migrate_target),
-    as_foreign_version(Transaction { ..tx, extra_signatories: [t_new_admin] }),
-  )
-}
-
-// …and the terminal deactivation guard, read from the prefix before dispatch.
-test migrate_global_state_fails_on_a_deactivated_later_version() fail {
-  let input_datum = t_datum(True, True)
-  run_spend_raw(
-    tests.foreign_gs_version(input_datum),
-    migrate_redeemer(t_migrate_target),
-    as_foreign_version(t_migrate_tx(input_datum, t_migrate_target)),
-  )
-}
-
-// Every other branch acts on a version-1 datum only. One per redeemer group;
-// each copies the named control with the datum set to version 2.
-
-// Control: `burn_succeeds_when_mintable_amount_is_zero`.
-test mint_security_fails_on_another_version() fail {
+test rotate_gs_logic_incoming_fails_when_admin_is_its_own_hash() fail {
   let input_datum = GlobalStateDatum {
     ..t_datum(False, False),
-    mintable_amount: 0,
+    admin_credential_hash: t_new_gs_logic,
   }
-  let output_datum = GlobalStateDatum { ..input_datum, mintable_amount: 100 }
-  run_spend_raw(
-    version_2(input_datum),
-    mintsecurity_redeemer(),
-    as_version_2(t_mintsecurity_tx(input_datum, output_datum, -100, [t_admin])),
+  incoming(
+    t_rotate_tx_from(
+      input_datum,
+      rotated(input_datum, t_new_gs_logic),
+      [t_new_gs_logic],
+    ),
   )
 }
 
-// Control: `pause_succeeds_for_a_can_pause_power_user_in_the_list`.
-test pause_fails_on_another_version() fail {
-  run_spend_raw(
-    version_2(t_pause_datum(False)),
-    t_pause_redeemer(),
-    as_version_2(t_pause_tx(t_pu_node_at(Script(t_pu_script_hash)))),
+// ── after a rotation ─────────────────────────────────────────────────────────
+
+// The installed logic governs the rotated datum: an ordinary action under it
+// succeeds, and the previous logic can no longer act.
+test rotated_logic_runs_the_next_action() {
+  let input_datum = t_rotated_datum()
+  run_spend(
+    input_datum,
+    GlobalStateSpendRedeemer {
+      global_state_output_index: 0,
+      action: SetRequiresSenderKyc { enabled: True },
+    },
+    t_tx(
+      input_datum,
+      GlobalStateDatum { ..input_datum, requires_sender_kyc: True },
+      [t_admin],
+    ),
   )
 }
 
-// Control: `lock_upgrades_succeeds_when_admin_signs`.
-test lock_upgrades_fails_on_another_version() fail {
-  let input_datum = t_datum(False, False)
-  run_spend_raw(
-    version_2(input_datum),
-    lock_upgrades_redeemer(),
-    as_version_2(t_tx(input_datum, t_datum_locked(), [t_admin])),
+test previous_logic_cannot_act_after_a_rotation() fail {
+  let input_datum = t_rotated_datum()
+  run_logic(
+    t_gs_logic,
+    GlobalStateSpendRedeemer {
+      global_state_output_index: 0,
+      action: SetRequiresSenderKyc { enabled: True },
+    },
+    t_tx(
+      input_datum,
+      GlobalStateDatum { ..input_datum, requires_sender_kyc: True },
+      [t_admin],
+    ),
   )
 }
 
-// Control: `deactivate_succeeds_when_paused_and_admin_signs`.
-test deactivate_fails_on_another_version() fail {
-  let input_datum = t_datum(True, False)
-  let output_datum = GlobalStateDatum { ..input_datum, deactivated: True }
-  run_spend_raw(
-    version_2(input_datum),
-    deactivate_redeemer(),
-    as_version_2(t_tx(input_datum, output_datum, [t_admin])),
+// Fields a later logic appended survive this version's writes.
+fn appended(datum: GlobalStateDatum) -> Data {
+  let raw: Data = datum
+  builtin.constr_data(
+    0,
+    list.concat(builtin.unconstr_fields(raw), [builtin.b_data(#"ff")]),
   )
 }
 
-// Genesis mints only a version-1 GlobalState. Control:
-// `global_state_mint_succeeds_with_nonce_and_sanitised_datum`.
-test global_state_mint_rejects_another_version() fail {
-  let datum = sanitise_datum(#"", 1)
+fn kyc_tx_raw(input_raw: Data, output_raw: Data) -> Transaction {
+  let tx = t_tx(t_datum(False, False), t_datum(False, False), [t_admin])
+  Transaction {
+    ..tx,
+    inputs: [
+      Input {
+        output_reference: t_out_ref(0),
+        output: Output {
+          ..t_output(t_datum(False, False)),
+          datum: InlineDatum(input_raw),
+        },
+      },
+    ],
+    outputs: [
+      Output {
+        ..t_output(t_datum(False, False)),
+        datum: InlineDatum(output_raw),
+      },
+    ],
+  }
+}
+
+fn kyc_redeemer() -> GlobalStateSpendRedeemer {
+  GlobalStateSpendRedeemer {
+    global_state_output_index: 0,
+    action: SetRequiresSenderKyc { enabled: True },
+  }
+}
+
+test an_action_keeps_an_appended_field() {
+  run_logic(
+    t_gs_logic,
+    kyc_redeemer(),
+    kyc_tx_raw(
+      appended(t_datum(False, False)),
+      appended(
+        GlobalStateDatum { ..t_datum(False, False), requires_sender_kyc: True },
+      ),
+    ),
+  )
+}
+
+test an_action_cannot_drop_an_appended_field() {
+  !run_logic(
+    t_gs_logic,
+    kyc_redeemer(),
+    kyc_tx_raw(
+      appended(t_datum(False, False)),
+      GlobalStateDatum { ..t_datum(False, False), requires_sender_kyc: True },
+    ),
+  )
+}
+
+// ── genesis — the NFT is born at the proxy ───────────────────────────────────
+
+fn genesis_with(output: Output) -> Bool {
   let mint = merge(
     from_asset(t_gs_policy, constants.global_state_asset_name, 1),
     sanitise_mint(),
   )
-  run_mint(
-    t_gs_policy,
-    as_version_2(t_mint_tx([t_nonce_input()], [t_mint_output(datum)], mint)),
+  run_mint(t_gs_policy, t_mint_tx([t_nonce_input()], [output], mint))
+}
+
+test global_state_mint_fails_when_the_nft_is_not_at_the_proxy() {
+  !genesis_with(
+    Output {
+      ..t_mint_output(sanitise_datum(#"", 1)),
+      address: Address {
+        payment_credential: Script(t_new_gs_logic),
+        stake_credential: None,
+      },
+    },
+  )
+}
+
+test global_state_mint_fails_when_the_nft_goes_to_a_key_with_the_proxy_bytes() {
+  !genesis_with(
+    Output {
+      ..t_mint_output(sanitise_datum(#"", 1)),
+      address: Address {
+        payment_credential: VerificationKey(t_gs_script_hash),
+        stake_credential: None,
+      },
+    },
+  )
+}
+
+test global_state_mint_allows_any_stake_credential() {
+  genesis_with(
+    Output {
+      ..t_mint_output(sanitise_datum(#"", 1)),
+      address: Address {
+        payment_credential: Script(t_gs_script_hash),
+        stake_credential: Some(Inline(VerificationKey(t_admin))),
+      },
+    },
+  )
+}
+
+test global_state_mint_fails_when_field_0_is_the_proxy() {
+  !genesis_with(
+    t_mint_output(rotated(sanitise_datum(#"", 1), t_gs_script_hash)),
+  )
+}
+
+test sanitise_rejects_a_short_global_state_logic() {
+  !sanitise_initial_datum(
+    rotated(sanitise_datum(#"", 1), #"9a9a"),
+    sanitise_mint(),
+  )
+}
+
+test sanitise_rejects_a_global_state_logic_equal_to_the_minting_script() {
+  !sanitise_initial_datum(
+    rotated(sanitise_datum(#"", 1), t_minting_script),
+    sanitise_mint(),
+  )
+}
+
+test sanitise_rejects_a_global_state_logic_equal_to_the_admin() {
+  !sanitise_initial_datum(
+    rotated(sanitise_datum(#"", 1), t_admin),
+    sanitise_mint(),
   )
 }

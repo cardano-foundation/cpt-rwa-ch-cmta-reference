@@ -17,8 +17,7 @@ Aiken-shaped sketches, not a ready-to-submit SDK or CLI implementation.
    one for the denylist root. The list mint validators' `init_input_out_ref` values and the
    GlobalState mint validator's `tx0`/`index0` must match the inputs actually spent at genesis.
 3. Choose the admin credential, initial minting authority script hash, cap, network ID and KYC
-   settings. The initial datum must have `schema_version = 1`, `transfers_paused = False`,
-   `deactivated = False`,
+   settings. The initial datum must have `transfers_paused = False`, `deactivated = False`,
    `upgrades_locked = False`, a non-negative `mintable_amount`, a 28-byte admin hash, a 28-byte
    authority hash, a network ID from 0 to 255 and an empty or 32-byte `member_root_hash`.
    Trusted-entity vkeys are 32 bytes, sorted and unique. See
@@ -44,23 +43,27 @@ redeemer from their respective [`MintRedeemer` types](../lib/types/power_users.a
 root output. The GlobalState mint validator checks that both root policies mint in this same
 transaction; a later transaction for either root is rejected.
 
-Output the GlobalState NFT with an inline `GlobalStateDatum` at
-`global_state.global_state_spend_validator`. Output each root at its corresponding list spend
-validator address. The three mint validators cannot verify those destination addresses at
-genesis, so compare the applied hashes and output addresses **before signing**. Also assert that
-the two list policy IDs are distinct and equal the compiled list mint hashes. The denylist `Init`
-enforces one binding on chain: the GlobalState minted in the same transaction must name the
-`power_users_linked_list_policy_id` compiled into `denylist.mint`, and must name that mint as its
-denylist. So the denylist root can only be created in the genesis transaction, alongside
-GlobalState. Recompute the denylist policy id from the same value you write into the datum before
-signing anyway: a mismatch is refused, but only after you have built and submitted the
-transaction. The datum's
+Output the GlobalState NFT with an inline `GlobalStateDatum` at `global_state.global_state_proxy`
+(unparameterised; the GlobalState mint takes its hash as `global_state_proxy_hash` and rejects any
+other payment credential). Datum **field 0**, `global_state_script_credential_hash`, is the hash of
+`global_state.global_state_logic` applied with this deployment's parameters; it must be 28 bytes and
+differ from the admin, the minting authority and the proxy. Output each root at its corresponding
+list spend validator address. The list mint validators cannot verify those destination addresses,
+and nothing on chain can bind field 0 to the compiled logic hash, so compare the applied hashes,
+field 0 and output addresses **before signing**. Each list's `Init` rejects a GlobalState output of
+this same transaction that names another list (`power_user_linked_list_policy_id` /
+`denylist_linked_list_policy_id`). That catches swapped ids and any genesis that initialises the
+real lists, but not a datum naming some other policy that mints in the transaction while the real
+`Init`s never run — so the off-chain check stays load-bearing: assert that the two list policy IDs
+are distinct and equal the compiled list mint hashes. The datum's
 `minting_script_credential_hash` must identify the intended current minting authority, not the
 permanent proxy.
 
-### 2. Register the four withdrawal credentials
+### 2. Register the five withdrawal credentials
 
-Register the applied stake credentials for `minting_logic_validator` (proxy),
+Register the applied stake credential of `global_state_logic` before the first GlobalState action
+(its hash is known before genesis, so registering it first is simplest). Then register the
+applied stake credentials for `minting_logic_validator` (proxy),
 `minting_authority_validator`, `transfer_logic_validator` and
 `third_party_transfer_logic_validator`. The first two **must** be registered before the CIP-113
 registry insert, because registration runs both withdraw-0 scripts. The latter two must be
@@ -89,8 +92,10 @@ RegisterStructural {
 `registry_node_output_index` must identify **this token's new node**, not the covering node that
 the CIP-113 insert also outputs. Do not mint anything under this issuance policy in a
 `RegisterStructural` transaction. [`RegisterMint`](../lib/types/minting_authority.ak) is the
-alternative if initial supply is issued during the insert: spend GlobalState, use its
-`MintSecurity` spend redeemer, invoke the proxy with `GlobalStateSpent`, and supply the minter node,
+alternative if initial supply is issued during the insert: spend GlobalState, put `MintSecurity`
+on the `global_state_logic` withdrawal (see
+[How a GlobalState action is submitted](#upgrades-and-operator-checks)), invoke the minting proxy
+with `GlobalStateSpent`, and supply the minter node,
 `minted_amount` and destination actions as for a normal mint below. Only this registration shape
 may also create a single CIP-68 reference NFT. The registry's base-layer redeemers and covering
 node proof are version-specific; construct them using the deployed CIP-113 implementation.
@@ -160,14 +165,16 @@ an independently issued attestation before that attestation expires.
 
 ## Mint, burn and forced transfer
 
-For a later mint, spend the GlobalState UTxO and continue it at the same script address, with its
-NFT and non-ADA value preserved. Set its spend redeemer to
+For a later mint, spend the GlobalState UTxO at `global_state_proxy` (any spend redeemer; it is
+ignored) and continue it at the same address, with its NFT and non-ADA value preserved. Add the
+withdrawal of the GlobalState logic named in datum field 0, with redeemer
 `GlobalStateSpendRedeemer { global_state_output_index, action: MintSecurity {
 issuance_policy_redeemer_index } }`; the inner index points into the transaction's **redeemers**
 at `Mint(issuance_policy_id)`. The validator writes the new `mintable_amount` by subtracting the
 actual minted security quantity. Include the `can_mint` power-user node as a reference input,
-signed by that operator; the CIP-113 registry node is referenced, not spent. Invoke the proxy and
-authority as zero-value withdrawals:
+signed by that operator; the CIP-113 registry node is referenced, not spent. Besides the
+GlobalState logic, invoke the minting proxy and the minting authority as zero-value withdrawals —
+three withdrawals in all:
 
 ```aiken
 // Proxy withdraw redeemer
@@ -217,7 +224,12 @@ authority. Register its stake credential first. Before switching, verify that th
 preserves supply-cap enforcement, GlobalState spending for supply changes, allowed asset names,
 registration structure and deactivation rules described at the top of
 [`minting_authority.ak`](../validators/minting_authority.ak). Test an unsigned mint and each
-power-user role without its authorised signature; each should reject.
+power-user role without its authorised signature; each should reject. **No power-user credential,
+admin or minting authority may ever equal GlobalState datum field 0** (the GlobalState logic hash):
+every GlobalState spend carries that logic's withdrawal, and `must_be_signed_by_credential` accepts
+a withdrawal as a signature, so such a role would be exercisable by anyone. All three are guarded
+on chain — the admin and minting authority when written, an operator wherever its role is used
+(pause, mint/burn, seizure, sanctions) — so a misconfigured role fails closed; still avoid granting one.
 
 To change transfer or third-party logic, update this token's CIP-113 registry node with
 `UpgradeRegistryNode { registry_node_input_index, registry_node_output_index,
@@ -226,103 +238,41 @@ pins the node to this issuance policy, retains this deployment's GlobalState and
 unfracking setting, and checks `upgrades_locked == False`. Register replacement logic stake
 credentials before their first use. This transaction cannot change the token supply.
 
+**How a GlobalState action is submitted.** GlobalState is never governed by its spend script
+alone. Spend the GlobalState UTxO at `global_state_proxy` with any redeemer (it is ignored), and add a
+withdrawal from the credential in datum field 0 — the current `global_state_logic` — carrying the
+`GlobalStateSpendRedeemer { global_state_output_index, action }` described below. Withdraw the
+credential's whole reward balance (normally 0, but anyone can top a reward account up). The logic
+finds the GlobalState input by its NFT. The proxy's address is shared by every deployment, so
+locate GlobalState by the NFT, never by address.
+
 To adjust the supply cap, spend GlobalState with `GlobalStateSpendRedeemer {
 global_state_output_index, action: SetMintableAmount { new_mintable_amount } }` (constructor
 index 13), signed by the admin. The continuing output must equal the input datum with only
 `mintable_amount` replaced by `new_mintable_amount`, which must lie in `[0, 2^63 − 1]`. The value
 is absolute remaining headroom, not a delta and not total supply. The transaction must not mint,
-burn or spend the security token, so a raise followed by a mint takes two transactions. Adding
-this action changed the GlobalState spend validator's hash, and therefore its address; every
-branch pins the continuing output to the current address, so a deployment made before it cannot
-gain the action. It requires a fresh deployment.
+burn or spend the security token, so a raise followed by a mint takes two transactions.
 
-To replace the GlobalState validator, first publish the new validator as a reference script, then
-spend GlobalState with `MigrateGlobalState { new_spend_script_hash }` (constructor index 14), signed
-by the admin. Include the published reference script among the reference inputs, send the
-continuing output to an address whose payment credential is `Script(new_spend_script_hash)` (any
-stake part), and carry the
-datum and the non-ADA value over unchanged. No security token may be minted, burned or spent in the
-same transaction. Off-chain code must take the GlobalState validator from the address that holds the
-NFT, never from a fixed blueprint, because that address changes with each migration. Locate
-GlobalState by its NFT as every validator does. Read `schema_version` (field 0) before anything
-else and decode the rest only with the layout of that version — see
-[Upgrading GlobalState's shape](#upgrading-globalstates-shape). A migration alone never changes the
-datum.
+To replace the GlobalState logic, apply and verify the new `global_state_logic` build against
+the blueprint, register its stake credential in an **earlier** transaction (registering and
+withdrawing in one transaction does not work), and dry-run the rotation, one `MintSecurity` and a
+rotation back on an emulator or preprod. Then spend GlobalState with `RotateGlobalStateScript {
+new_global_state_script_hash }` (constructor index 14) as the redeemer of **both** withdrawals —
+the current logic (old field 0) and the new one — signed by the admin. The continuing output stays at
+the proxy with the same non-ADA value; its datum has field 0 set to the new hash. The current logic
+requires `deactivated`, the admin, the power-users list policy and the minting-authority hash to be
+unchanged and the datum to still decode as the 15-field `GlobalStateDatum` (the minting proxy and
+both lists decode it and can never be redeployed); everything else is the new logic's to accept.
+This version, as the new logic, accepts exactly the input datum with field 0 rewritten. The new hash
+must differ from the admin and the minting authority. No security token may be minted, burned or
+spent in the same transaction. The datum is append-only: decode the first 15 fields and ignore any
+after them, as `decode_global_state` does on chain — a later logic may add fields, and a reader that
+insists on exactly 15 would stop working for that token.
 
-`LockUpgrades` irreversibly closes the authority-rotation, registry-upgrade and GlobalState-migration
+`LockUpgrades` irreversibly closes the authority-rotation, registry-upgrade and GlobalState-logic-rotation
 paths, and admin changes to the supply cap, for **later** transactions. A registry upgrade bundled into the same transaction can still read the
 unlocked input state and succeed; inspect all redeemers in the locking transaction. Admin-only
 GlobalState actions similarly expose their pre-state to a bundled registry operation. Record the
 active script hashes, operator credentials, base-layer version and lock transaction as deployment
 artifacts. For final retirement, follow the ordered
 [decommissioning runbook](security/security-fixes.md#the-decommissioning-runbook-in-order).
-
-## Upgrading GlobalState's shape
-
-The GlobalState datum is versioned (see [`GlobalStateDatum`](../lib/types/global_state.ak)):
-
-| Fields | Contents | Who reads them |
-|---|---|---|
-| 0–4, the **prefix** | `schema_version`, `deactivated`, `upgrades_locked`, `admin_credential_hash`, `minting_script_credential_hash` | Everyone. The minting proxy and the power-users and denylist validators, which can never be replaced, read **only** these, and never check the version. So does `MigrateGlobalState`. |
-| 5 onward, the **tail** | Whatever `schema_version` says | Only upgradeable readers built for that exact version: the GlobalState branches, the minting authority, transfer and third-party logic. |
-
-A version-1 build of any upgradeable script fails closed on a datum of any other version, instead
-of reading a field that has moved. Off-chain readers must do the same: dispatch on field 0.
-
-### Obligations on every later version
-
-1. **The prefix is permanent.** Fields 0–4 keep their order, type and meaning, and the datum keeps
-   constructor 0. `deactivated` and `upgrades_locked` only ever go from False to True. The admin and
-   the minting-script hash change only through dedicated admin-signed actions, never as a side
-   effect. Anything that must stop the proxy or the lists has to go through `deactivated`, or
-   through rotating the minting script, because those validators cannot see the tail.
-2. **The new GlobalState spend validator:**
-   * takes its datum as `Data` and implements `MigrateGlobalState` on the prefix alone, with no
-     version check, exactly as version 1 does, so the NFT can always be moved on;
-   * accepts the previous version's datum **only** in a one-shot conversion action. `MintSecurity`
-     and every other branch reject any version other than their own (`MigrateGlobalState`
-     excepted);
-   * makes that conversion assert, on chain, that output fields 1–4 are byte-identical to the
-     input's and that field 0 is the new version;
-   * gives the conversion the full guard set of every non-mint branch: no security token minted,
-     burned or spent; NFT, value and address preserved; no reference script; admin signature;
-   * carries over the tail's one-way and fixed meanings: never re-enable `SetMintableAmount` after
-     a lock, never change `network_id` (every issued KYC proof is bound to it) or the two list
-     policy ids, and never reset the `mintable_amount` headroom.
-3. **Every other upgradeable reader checks the exact version it was built for.**
-
-`schema_version` is not a security boundary against a malicious admin. Until `LockUpgrades`, the
-admin chooses the code (see `MigrateGlobalState`). It protects against misreads between correct
-builds.
-
-### Runbook for a reshaping upgrade
-
-0. **Pre-flight.**
-   * Build v2 of the GlobalState spend validator, the minting authority, and the transfer and
-     third-party logic.
-   * Publish each as a reference script.
-   * Register the new withdraw-0 stake credentials.
-   * Evaluate the conversion transaction against the live datum with a ledger-faithful evaluator
-     **before** migrating.
-1. Pause transfers (`PauseTransfers`).
-2. `MigrateGlobalState` to the v2 spend validator. The datum is carried over byte-identical.
-   Scripts that only *reference* GlobalState keep reading it: the v1 transfer and third-party
-   logic, the proxy, and the lists. But every action that *spends* GlobalState now runs v2, which
-   accepts a version-1 datum only in its conversion action. So mint, burn and every admin action
-   wait for step 3.
-3. Run v2's conversion action (version 1 → 2).
-4. `RotateMintingScript` to the v2 authority, through v2's action.
-5. `UpgradeRegistryNode` to the v2 transfer and third-party logic, authorised by the v2 authority.
-6. Unpause, through v2's `PauseTransfers`.
-
-**From step 3 until step 5,** transfers and **seizure** fail closed. The pause does not stop
-seizure, but the version check does. **Until step 4,** mint, burn, `RegisterMint` and registry
-upgrades also fail closed, because the v1 authority is still named. Keep that window short. The
-proxy and the lists keep working throughout.
-
-**Out-of-order steps** also fail closed rather than misread, for example a v2 authority named before
-the conversion.
-
-**Recovery.** `MigrateGlobalState` works on every version, so GlobalState can always be moved to a
-fixed build. A v1 validator can only operate on a version-1 datum, though: once the conversion has
-run, recovery means moving **forward** to a build that accepts the current version, not back to v1.

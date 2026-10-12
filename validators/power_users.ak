@@ -16,7 +16,8 @@ use cardano/transaction.{
 use constants
 use tests
 use types/global_state.{
-  GlobalStateDatum, active_admin_from_ref_input, gs_prefix_from_ref_input,
+  GlobalStateDatum, active_admin_from_ref_input, genesis_global_state,
+  gs_datum_from_ref_input,
 }
 use types/power_users.{
   AddPowerUser, Deinit, Init, MintRedeemer, ModifyPowerUser, PowerUser,
@@ -119,8 +120,9 @@ validator mint(
   mint(redeemer: MintRedeemer, policy_id: PolicyId, self: Transaction) {
     when redeemer is {
       Init { root_output_index } -> {
-        // Init is nonce-gated — GS doesn't exist yet at bootstrap time, so
-        // admin-via-datum lookup isn't feasible. The one-shot UTxO is
+        // Init is nonce-gated — GS is only being created in this same
+        // transaction (an output, not yet an input), so admin-via-datum lookup
+        // isn't feasible. The one-shot UTxO is
         // operator-held, which implicitly gates this action to the operator.
         let nonce_validated = list.any(
           self.inputs,
@@ -132,6 +134,13 @@ validator mint(
           dict.size(tokens(self.mint, policy_id)) == 1,
           // Genesis: no list node exists yet, so none may be spent.
           (utils.count_inputs_with_policy(self.inputs, policy_id) == 0)?,
+          // Genesis binding: the GlobalState minted in this same transaction
+          // must name THIS list. The GlobalState mint only checks that the
+          // policy its datum names mints something, and the id is immutable
+          // afterwards — so a deployment naming another list would leave this
+          // one, and the role or sanctions checks it carries, unreachable for
+          // good. Not circular: the GlobalState policy is a parameter here.
+          (genesis_global_state(self.outputs, global_state_policy_id).power_user_linked_list_policy_id == policy_id)?,
           // The library hands this callback the produced root's ADDRESS, so a
           // caller could in principle pin where the root lands. THIS ONE CANNOT,
           // and the reason is worth recording so nobody tries to "fix" it:
@@ -158,9 +167,8 @@ validator mint(
         //
         // Burning this root is irreversible: `Init` is gated on a one-shot UTxO
         // consumed at genesis, `AddPowerUser` needs an existing element as its
-        // anchor, and this list's policy id is compiled into the denylist and
-        // the authority and carried unchanged by every GlobalState version. So
-        // once the root is gone no operator can ever be
+        // anchor, and `power_user_linked_list_policy_id` is immutable in the
+        // GlobalState datum. So once the root is gone no operator can ever be
         // added again — mint, burn, pause, unpause, seizure and sanctions all
         // authenticate against a node of THIS list and would be lost for good.
         // If transfers happened to be paused at that moment they stay paused
@@ -169,11 +177,10 @@ validator mint(
         // Requiring `deactivated` keeps the branch to its purpose: reclaiming
         // the root's min-ADA after the token has been retired.
         //
-        // `gs_prefix_from_ref_input`, not `active_admin_from_ref_input`, for the
+        // `gs_datum_from_ref_input`, not `active_admin_from_ref_input`, for the
         // reason given in `validators/denylist.ak`: the latter traps precisely
-        // on the state this branch requires. The PREFIX only, so this keeps
-        // working on every later GlobalState version.
-        let gs = gs_prefix_from_ref_input(
+        // on the state this branch requires.
+        let gs = gs_datum_from_ref_input(
           self.reference_inputs,
           global_state_ref_input_index,
           global_state_policy_id,
@@ -548,7 +555,7 @@ fn t_pu_new_node_output(key: ByteArray) -> Output {
 
 fn t_gs_datum(deactivated: Bool) -> GlobalStateDatum {
   GlobalStateDatum {
-    schema_version: 1,
+    global_state_script_credential_hash: #"9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a",
     transfers_paused: False,
     deactivated,
     mintable_amount: 1_000_000_000,
@@ -844,7 +851,7 @@ test power_users_init_succeeds_on_the_nonce_utxo() {
       ..t_base_tx(),
       inputs: [t_nonce_input(50)],
       mint: from_asset(t_pu_policy, constants.linked_list_root_key, 1),
-      outputs: [t_pu_root_output(None)],
+      outputs: [t_pu_root_output(None), t_gs_utxo(0, t_gs_datum(False)).output],
     },
   )
 }
@@ -863,7 +870,7 @@ test power_users_init_rejects_a_missing_nonce() fail {
       ..t_base_tx(),
       inputs: [],
       mint: from_asset(t_pu_policy, constants.linked_list_root_key, 1),
-      outputs: [t_pu_root_output(None)],
+      outputs: [t_pu_root_output(None), t_gs_utxo(0, t_gs_datum(False)).output],
     },
   )
 }
@@ -927,32 +934,52 @@ test power_users_deinit_rejects_a_missing_admin_signature() {
   )
 }
 
-// Non-upgradeable: must keep reading the GlobalState of a LATER version — same
-// prefix, `schema_version = 2`, a tail of another shape (see GlobalStatePrefix).
-// Covers `active_admin_from_ref_input`, shared by Add, Remove and Modify.
-test power_users_insert_accepts_a_later_global_state_version() {
+// Non-upgradeable: must keep reading a GlobalState datum a future version
+// extended with trailing fields (see decode_global_state).
+test power_users_insert_accepts_a_global_state_with_trailing_fields() {
   t_run_pu_add(
     t_key_28,
-    tests.with_foreign_gs_version(t_pu_insert_tx(t_key_28), t_gs_policy),
+    tests.with_trailing_gs_fields(t_pu_insert_tx(t_key_28), t_gs_policy),
   )
 }
 
-// The Deinit read site, likewise. Control: the test above it with the v1 datum.
-test power_users_deinit_accepts_a_later_global_state_version() {
+// ── Init — bound to the genesis GlobalState ──────────────────────────────────
+//
+// The GlobalState minted alongside must name THIS list; its id is immutable
+// afterwards, so a mismatch would leave every role on this list unreachable.
+
+fn t_run_pu_init(outputs: List<Output>) -> Bool {
   mint.mint(
     t_gs_policy,
-    t_oref(99),
-    Deinit { global_state_ref_input_index: 0 },
+    t_oref(50),
+    Init { root_output_index: 0 },
     t_pu_policy,
-    tests.with_foreign_gs_version(
-      Transaction {
-        ..t_base_tx(),
-        inputs: [t_pu_root_input(0)],
-        reference_inputs: [t_gs_utxo(0, t_gs_datum(True))],
-        mint: from_asset(t_pu_policy, constants.linked_list_root_key, -1),
-        extra_signatories: [t_admin],
-      },
-      t_gs_policy,
-    ),
+    Transaction {
+      ..t_base_tx(),
+      inputs: [t_nonce_input(50)],
+      mint: from_asset(t_pu_policy, constants.linked_list_root_key, 1),
+      outputs,
+    },
   )
+}
+
+test power_users_init_rejects_a_global_state_naming_another_list() {
+  !t_run_pu_init(
+    [
+      t_pu_root_output(None),
+      t_gs_utxo(
+        0,
+        GlobalStateDatum {
+          ..t_gs_datum(False),
+          power_user_linked_list_policy_id: #"0101010101010101010101010101010101010101010101010101010101",
+        },
+      ).output,
+    ],
+  )
+}
+
+// No GlobalState created in this transaction: nothing to bind to, so genesis
+// cannot proceed (the lookup traps, hence `fail`).
+test power_users_init_rejects_without_a_genesis_global_state() fail {
+  t_run_pu_init([t_pu_root_output(None)])
 }

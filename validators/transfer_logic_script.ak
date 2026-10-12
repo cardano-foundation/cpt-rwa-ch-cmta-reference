@@ -18,7 +18,6 @@ use cip68
 use compliance
 use constants
 use kyc/verify.{membership_leaf_key, membership_leaf_value}
-use tests
 use types/cip68.{Cip68Datum} as types_cip68
 use types/global_state.{
   GlobalStateDatum, GlobalStateLocation, GlobalStateReferenced, GlobalStateSpent,
@@ -359,7 +358,7 @@ fn t_gs_datum(
   req_receiver: Bool,
 ) -> GlobalStateDatum {
   GlobalStateDatum {
-    schema_version: 1,
+    global_state_script_credential_hash: #"9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a",
     transfers_paused: paused,
     deactivated,
     mintable_amount: 1_000_000,
@@ -580,7 +579,7 @@ fn t_gs_datum_with_tel(
   trusted_keys: Pairs<ByteArray, Data>,
 ) -> GlobalStateDatum {
   GlobalStateDatum {
-    schema_version: 1,
+    global_state_script_credential_hash: #"9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a",
     transfers_paused: False,
     deactivated: False,
     mintable_amount: 1_000_000,
@@ -926,7 +925,7 @@ fn t_gs_datum_with_member_root(
   member_root_hash: ByteArray,
 ) -> GlobalStateDatum {
   GlobalStateDatum {
-    schema_version: 1,
+    global_state_script_credential_hash: #"9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a",
     transfers_paused: False,
     deactivated: False,
     mintable_amount: 1_000_000,
@@ -1264,20 +1263,6 @@ test transfer_rejects_a_cip68_output_holding_security_tokens() fail {
         ..out,
         value: merge(out.value, from_asset(t_issuance_policy, t_sec_name, 5)),
       },
-    ),
-  )
-}
-
-// A transfer logic built for GlobalState version 1 fails closed on a converted
-// GlobalState (identical but `schema_version = 2`) rather than read a field that
-// may have moved. Control: `transfer_succeeds_when_clean`.
-test transfer_fails_on_another_global_state_version() fail {
-  run_transfer(
-    t_redeemer(),
-    tests.with_gs_version(
-      t_transfer_tx(False, False, False, False),
-      t_gs_policy,
-      2,
     ),
   )
 }
