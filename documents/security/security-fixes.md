@@ -331,7 +331,7 @@ exactly one extra input, so they isolate the count),
 `absence_proof_rejects_a_covering_node_in_a_wallet`,
 `wallet_held_power_user_node_cannot_authorise_a_sanction`,
 `misplaced_power_user_node_cannot_authorise_a_sanction`, and — in
-`validators/global_state.ak` — `pause_fails_when_the_power_user_node_is_in_a_wallet` and
+`validators/global_state_logic_tests.ak` — `pause_fails_when_the_power_user_node_is_in_a_wallet` and
 `pause_fails_when_the_power_user_node_is_at_the_wrong_script`, each with a positive control.
 
 The two `*_spend_handler_is_pure_delegation` tests are deliberate records that the `spend` handlers
@@ -497,7 +497,7 @@ withdrawal from the control UTxO is a privileged operator moving their own worki
 attack. `value_preserved` is therefore exactly what the code says it is, and nothing more:
 
 ```aiken
-// validators/global_state.ak
+// validators/global_state_logic.ak
 let value_preserved = without_lovelace(own_input.output.value) == without_lovelace(
   global_state_output.value,
 )

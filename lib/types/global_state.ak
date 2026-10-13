@@ -52,7 +52,7 @@ pub type GlobalStateLocation {
 /// denylist lists decode all of them, with their types.
 pub type GlobalStateDatum {
   // Credential hash of the GlobalState LOGIC script (a withdraw validator,
-  // `global_state_logic` in validators/global_state.ak). FIELD 0 FOREVER: the
+  // `global_state_logic` in validators/global_state_logic.ak). FIELD 0 FOREVER: the
   // permanent spend proxy (`global_state_proxy`) that holds the NFT reads only
   // this field and requires this credential's withdraw-0 in every spend, so
   // every GlobalState rule lives in the script named here. Rotatable through
@@ -165,8 +165,8 @@ pub type GlobalStateDatum {
 // Field accessors
 // ============================================================================
 // Field indices into the GlobalStateDatum Constr — the single source of truth
-// for on-chain field order, shared by the getters below and by the spend
-// validator's `replace_data_field` write path. Guarded by
+// for on-chain field order, shared by the getters below and by the GlobalState
+// logic's `replace_data_field` write path. Guarded by
 // `gs_getters_read_correct_fields` (see Tests): reorder/insert/remove a field
 // in GlobalStateDatum and that test fails, flagging every index user.
 

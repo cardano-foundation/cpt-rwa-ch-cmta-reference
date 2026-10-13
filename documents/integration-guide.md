@@ -43,10 +43,10 @@ redeemer from their respective [`MintRedeemer` types](../lib/types/power_users.a
 root output. The GlobalState mint validator checks that both root policies mint in this same
 transaction; a later transaction for either root is rejected.
 
-Output the GlobalState NFT with an inline `GlobalStateDatum` at `global_state.global_state_proxy`
+Output the GlobalState NFT with an inline `GlobalStateDatum` at `global_state_proxy.global_state_proxy`
 (unparameterised; the GlobalState mint takes its hash as `global_state_proxy_hash` and rejects any
 other payment credential). Datum **field 0**, `global_state_script_credential_hash`, is the hash of
-`global_state.global_state_logic` applied with this deployment's parameters; it must be 28 bytes and
+`global_state_logic.global_state_logic` applied with this deployment's parameters; it must be 28 bytes and
 differ from the admin, the minting authority and the proxy. Output each root at its corresponding
 list spend validator address. The list mint validators cannot verify those destination addresses,
 and nothing on chain can bind field 0 to the compiled logic hash, so compare the applied hashes,
