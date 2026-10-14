@@ -191,7 +191,7 @@ referenced by compact identifiers or hashes.
     compliance function can be delegated without handing over control of the protocol.
   * `can_mint` — mint new tokens, up to the remaining supply cap
   * `can_burn` — burn tokens, restoring headroom under the cap
-  * `can_pause` — pause and unpause all standard transfers
+  * `can_pause` — pause and unpause all standard transfers (each write must flip the flag)
   * `can_force_transfer` — seize tokens, moving them to a vetted address
 * **Trusted entity** — an off-chain KYC attestor whose Ed25519 verification key is listed in the
   GlobalState datum. It signs the KYC proofs that transfers present. Not an on-chain role: it never

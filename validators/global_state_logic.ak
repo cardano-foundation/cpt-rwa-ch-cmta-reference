@@ -329,6 +329,9 @@ validator global_state_logic(
               nft_preserved,
               value_preserved,
               no_reference_script,
+              // The flag must flip (F11): a no-op write would only churn the
+              // GlobalState UTxO reference and stale the admin's transactions.
+              transfers_paused != input_datum.transfers_paused,
               //Must have permission to pause/unpause transfers
               power_user_data.can_pause,
               // Never this logic's own hash: its withdrawal is in this very

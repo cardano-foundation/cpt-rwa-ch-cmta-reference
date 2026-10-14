@@ -805,6 +805,45 @@ test pause_succeeds_for_a_can_pause_power_user_in_the_list() {
   )
 }
 
+// ── PauseTransfers — the flag must flip (F11) ───────────────────────────────
+// A write that leaves `transfers_paused` as it was changes nothing but the
+// GlobalState UTxO reference, which is exactly what makes admin transactions
+// built against the previous reference stale. Each case below is a pause
+// transaction from `from` to `to`, otherwise identical to the positive above.
+
+fn t_pause_flip(from: Bool, to: Bool) -> Bool {
+  run_spend(
+    t_pause_datum(from),
+    GlobalStateSpendRedeemer {
+      global_state_output_index: 0,
+      action: PauseTransfers {
+        transfers_paused: to,
+        power_user_node_ref_input_index: 0,
+      },
+    },
+    Transaction {
+      ..t_tx(t_pause_datum(from), t_pause_datum(to), [t_pause_pu_cred]),
+      reference_inputs: [t_pu_node_at(Script(t_pu_script_hash))],
+    },
+  )
+}
+
+test pause_flip_pausing_an_unpaused_contract_succeeds() {
+  t_pause_flip(False, True)
+}
+
+test pause_flip_unpausing_a_paused_contract_succeeds() {
+  t_pause_flip(True, False)
+}
+
+test pause_flip_rejects_pausing_an_already_paused_contract() {
+  !t_pause_flip(True, True)
+}
+
+test pause_flip_rejects_unpausing_an_already_unpaused_contract() {
+  !t_pause_flip(False, False)
+}
+
 /// The GlobalState logic's withdrawal is in every pause transaction, and
 /// `must_be_signed_by_credential` accepts a withdrawal as a signature: a
 /// `can_pause` operator whose credential IS the installed logic hash would be

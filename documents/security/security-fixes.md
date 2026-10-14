@@ -928,16 +928,22 @@ Left as is. The seizure path carries an equivalent guard (`at_least_one_seized_i
 authorises an *override* and must be bound to real seized value; the transfer path authorises
 nothing on its own.
 
-### `PauseTransfers` accepts a no-op transition
+### `PauseTransfers` churn can race admin recovery (F11, issue #17) — partly changed
 
-The branch does not require `transfers_paused` to actually change, so a `can_pause` operator can
-re-pause an already-paused protocol. This churns the single control UTxO and, given that lovelace is
-unconstrained (§7), can move ADA out of it repeatedly.
+**Changed (2026-10-14):** the branch now requires `transfers_paused` to flip. Previously a
+`can_pause` operator could re-pause an already-paused protocol (or re-unpause an unpaused one) as
+often as they liked. Each such write changed nothing but the GlobalState UTxO reference, and every
+admin transaction built against the previous reference became stale. That includes the power-users
+update that revokes the operator's `can_pause`, because it reads GlobalState as a reference input.
+Pinned by the `pause_flip_*` tests in `validators/global_state_logic_tests.ak`.
 
-Not a defect: the operator is signing, holds the flag, and can already pause and unpause at will —
-the no-op grants no authority they lack. The recovery is the ordinary one, the admin removing the
-flag. (`LockUpgrades` *does* refuse a no-op, but for a different reason: it is one-way, so
-`True → True` would be a silent no-op on an irreversible action.)
+**Still accepted:** contention on the singleton UTxO is not removed. An operator can still
+alternate paused → unpaused → paused, one write per flip, and lovelace stays unconstrained (§7).
+Every such write now changes the protocol state visibly and is attributable to the signing
+operator. Recovery is the ordinary one: the admin revokes `can_pause`, built against the freshest
+GlobalState UTxO and resubmitted if it goes stale. Removing the race entirely needs a larger change
+to emergency semantics, such as admin-only unpause or direct deactivation without a paused
+pre-state, and was not chosen.
 
 ### Datum size: the three caps do not add up to a joint bound
 
