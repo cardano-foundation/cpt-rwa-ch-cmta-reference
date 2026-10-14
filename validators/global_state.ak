@@ -28,11 +28,11 @@ use cardano/transaction.{
 }
 use constants
 use tests/global_state_fixtures.{
-  rotated, t_admin, t_data_of_raw_length, t_dl_ll_policy, t_gs_logic,
-  t_gs_policy, t_gs_script_hash, t_many_entities, t_metadata_len_at_cap,
-  t_metadata_len_over_cap, t_minting_script, t_new_gs_logic, t_pu_ll_policy,
-  t_reference_script, t_root32, t_security_info_len_at_cap,
-  t_security_info_len_over_cap, t_tx, t_vkey_10,
+  rotated, t_admin, t_data_of_raw_length, t_datum_size, t_dl_ll_policy,
+  t_gs_logic, t_gs_policy, t_gs_script_hash, t_many_entities, t_max_datum_bytes,
+  t_metadata_len_at_cap, t_metadata_len_over_cap, t_minting_script,
+  t_new_gs_logic, t_pu_ll_policy, t_reference_script, t_root32,
+  t_security_info_len_at_cap, t_security_info_len_over_cap, t_tx, t_vkey_10,
 }
 use types/global_state.{GlobalStateDatum, TrustedEntityMetadata}
 use utils.{quantity_of_policy_id}
@@ -157,6 +157,7 @@ fn sanitise_initial_datum(datum: GlobalStateDatum, self_mint: Value) -> Bool {
 //   proxy is unparameterised, so its hash is known before genesis with no
 //   circular dependency; the logic it delegates to is named by datum field 0.
 // - The initial datum is well-formed (basic field checks + trusted entity vkey list is sorted and has no duplicates + power user ll and denylist ll roots are minted).
+// - The serialised initial datum fits `max_global_state_datum_bytes` (F09).
 // The stake part of the address is left free; choose it deliberately — every
 // logic action preserves the full address afterwards, so it is permanent.
 validator global_state_mint_validator(
@@ -164,6 +165,11 @@ validator global_state_mint_validator(
   index0: Int,
   /// Hash of `global_state_proxy` (global_state_proxy.ak), the NFT's permanent home.
   global_state_proxy_hash: ByteArray,
+  /// Aggregate cap on the CBOR-serialised GlobalState datum, in bytes (F09).
+  /// Every GlobalState transaction carries the whole datum in its output, so
+  /// this keeps room in the 16 KiB transaction for everything else. 8192 is
+  /// the recommended value.
+  max_global_state_datum_bytes: Int,
 ) {
   mint(_redeemer: Data, policy_id: PolicyId, self: Transaction) {
     let one_time_utxo = OutputReference(tx0, index0)
@@ -202,6 +208,8 @@ validator global_state_mint_validator(
       //Initial datum is well-formed (sort, no duplicates, correct field widths,
       //LL root NFTs also minted in this tx).
       sanitise_initial_datum(output_datum, self.mint),
+      // Aggregate datum cap (F09) — see `max_global_state_datum_bytes`.
+      bytearray.length(builtin.serialise_data(output_datum_raw)) <= max_global_state_datum_bytes,
     }
   }
 
@@ -382,6 +390,7 @@ fn run_mint(policy_id: PolicyId, self: Transaction) -> Bool {
     t_mint_tx0,
     t_mint_index0,
     t_gs_script_hash,
+    t_max_datum_bytes,
     builtin.constr_data(0, []),
     policy_id,
     self,
@@ -645,4 +654,34 @@ test sanitise_rejects_a_global_state_logic_equal_to_the_admin() {
     rotated(sanitise_datum(#"", 1), t_admin),
     sanitise_mint(),
   )
+}
+
+// ── Aggregate datum cap (F09) ────────────────────────────────────────────────
+// The genesis datum's serialised size must not exceed
+// `max_global_state_datum_bytes`: the valid genesis with the cap exactly at
+// its size, then one byte below it.
+
+fn genesis_capped(cap_offset: Int) -> Bool {
+  let datum = sanitise_datum(#"", 1)
+  let mint = merge(
+    from_asset(t_gs_policy, constants.global_state_asset_name, 1),
+    sanitise_mint(),
+  )
+  global_state_mint_validator.mint(
+    t_mint_tx0,
+    t_mint_index0,
+    t_gs_script_hash,
+    t_datum_size(datum) + cap_offset,
+    builtin.constr_data(0, []),
+    t_gs_policy,
+    t_mint_tx([t_nonce_input()], [t_mint_output(datum)], mint),
+  )
+}
+
+test datum_cap_genesis_accepts_a_datum_at_the_cap() {
+  genesis_capped(0)
+}
+
+test datum_cap_genesis_rejects_a_datum_over_the_cap() {
+  !genesis_capped(-1)
 }

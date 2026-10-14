@@ -47,7 +47,17 @@ Output the GlobalState NFT with an inline `GlobalStateDatum` at `global_state_pr
 (unparameterised; the GlobalState mint takes its hash as `global_state_proxy_hash` and rejects any
 other payment credential). Datum **field 0**, `global_state_script_credential_hash`, is the hash of
 `global_state_logic.global_state_logic` applied with this deployment's parameters; it must be 28 bytes and
-differ from the admin, the minting authority and the proxy. Output each root at its corresponding
+differ from the admin, the minting authority and the proxy. Apply the same
+`max_global_state_datum_bytes` (recommended 8192) to the mint and the logic; the serialised genesis
+datum must fit under it, and later actions that grow the datum are refused beyond it. Nothing on chain
+ties the two values together: assert in the deployment script that they are equal and positive. A
+logic cap below the genesis datum's size would refuse every write that grows the datum (adding
+trusted entities, larger security info, setting the member root, raising the supply cap, and burns
+that lengthen `mintable_amount`'s encoding) until a rotation, which `LockUpgrades` makes impossible.
+Before locking, check it with a write that grows the datum, such as adding and then removing a trusted
+entity; a same-size write passes whatever the cap. In operation, keep headroom below the cap: a datum
+sitting exactly at it refuses even a burn that adds a byte to `mintable_amount`, until the admin
+shrinks it. Output each root at its corresponding
 list spend validator address. The list mint validators cannot verify those destination addresses,
 and nothing on chain can bind field 0 to the compiled logic hash, so compare the applied hashes,
 field 0 and output addresses **before signing**. Each list's `Init` rejects a GlobalState output of

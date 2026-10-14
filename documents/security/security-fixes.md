@@ -749,8 +749,8 @@ it has been skipped:
    can never be spent again, so every lovelace left on it — along with the GlobalState NFT itself —
    is locked forever. This is the one place the accepted ADA-withdrawal behaviour of
    [§7](#7-the-globalstate-utxos-ada-balance-was-unconstrained) is not merely harmless but useful.
-2. **Pause** — needs a live `can_pause` power user, so it must happen while the operator list is
-   still populated.
+2. **Pause** (skip if already paused — a pause that does not flip the flag is rejected) — needs a
+   live `can_pause` power user, so it must happen while the operator list is still populated.
 3. **Empty the denylist** (`RemoveFromDenylist` per entry, `is_admin` power user).
 4. **Empty the power-users list** (`RemovePowerUser` per entry, admin) — last, because steps 2 and 3
    consume power-user nodes.
@@ -907,7 +907,8 @@ adding the constant perturbs nothing that does not use it.
 
 Findings from the 2026-08-28 audit that were reviewed and judged not to warrant a code change. They
 are recorded here so a future reader does not have to re-derive the reasoning — and so that a future
-*change* in any of these areas is a conscious one.
+*change* in any of these areas is a conscious one. Entries marked "partly changed" were revisited
+later; each says what changed and when.
 
 ### The transfer withdraw-0 is satisfiable with no parties
 
@@ -945,7 +946,18 @@ GlobalState UTxO and resubmitted if it goes stale. Removing the race entirely ne
 to emergency semantics, such as admin-only unpause or direct deactivation without a paused
 pre-state, and was not chosen.
 
-### Datum size: the three caps do not add up to a joint bound
+### Datum size: the three caps do not add up to a joint bound (F09, issue #15) — partly changed
+
+**Changed (2026-10-14):** a joint bound now exists. `max_global_state_datum_bytes`, a parameter of
+both the GlobalState mint and the GlobalState logic (recommended 8192), caps the serialised datum,
+appended fields included, at genesis and on every GlobalState action: one check runs before the
+action dispatch, so a future branch cannot forget it. A write passes if it fits the cap **or** does
+not grow the datum, so a datum left over the cap (for example by a logic with a higher cap) can always be
+shrunk. The exception is excess held in fields a later logic appended: this logic cannot remove them.
+The mint and logic values are not tied together on chain; the deployment script must check them.
+The per-field caps stay: they still bound a single entry. Pinned by the `datum_cap_*` tests in
+`validators/global_state.ak` and `validators/global_state_logic_tests.ak`. The original assessment
+follows.
 
 `max_trusted_entities` (64), `max_trusted_entity_metadata_bytes` (512 B) and
 `max_security_info_bytes` (4096 B) are enforced independently, and nothing checks their sum. At the

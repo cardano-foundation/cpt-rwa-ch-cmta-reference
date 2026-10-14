@@ -132,13 +132,15 @@ is carried in the GlobalState datum as opaque `Data` and is not parsed by any va
 populating it correctly — and keeping it consistent with the register — is an off-chain duty of the
 issuer and registrar.
 
-Keep it, and the trusted-entity list, **small**. The three datum caps in
+Keep it, and the trusted-entity list, **small**. Besides the per-field caps in
 [`lib/constants.ak`](lib/constants.ak) (64 entities, 512 B of metadata each, 4096 B of
-`security_info`) are enforced independently and nothing bounds their sum, which at the maxima would
-be far larger than a transaction. Nothing can get stuck — the oversized transaction is simply
-rejected by the ledger, and any spend may shrink a field again — but the GlobalState UTxO is spent
-by every mint, burn and admin action, and an inflated datum eats the room a mint needs for its KYC
-proofs (≈ 370 B per attested destination).
+`security_info`), the whole datum (as Plutus serialises it, appended fields included) is bounded by the deployment
+parameter `max_global_state_datum_bytes` (recommended: 8192). It is checked at genesis and on every
+GlobalState action, mints and burns included. A write that does not grow the datum always passes, so
+a datum over the cap can always be shrunk. Keep headroom: at the cap, even a burn that adds a byte to
+`mintable_amount` is refused until the datum shrinks. The GlobalState UTxO is
+spent by every mint, burn and admin action, and its datum takes room a mint needs for its KYC proofs
+(≈ 370 B per attested destination).
 
 Denylist entry metadata is also free-form `Data`, but each new entry is capped at 512 B once
 CBOR-serialised. Larger case files, legal records, or evidence should live off-chain and be
@@ -345,13 +347,13 @@ exact order the blueprint (`plutus.json`) declares them; apply top to bottom.
 | # | Validator | Parameters (blueprint order) | Source |
 |---|---|---|---|
 | 0 | `global_state_proxy.global_state_proxy` (spend) | — | No parameters: its hash is the same for every deployment. |
-| 1 | `global_state.global_state_mint_validator` (mint) | `tx0`, `index0`, `global_state_proxy_hash` | The genesis UTxO you choose to spend; the hash of `global_state_proxy` (row 0). The NFT must be minted to that script address. |
+| 1 | `global_state.global_state_mint_validator` (mint) | `tx0`, `index0`, `global_state_proxy_hash`, `max_global_state_datum_bytes` | The genesis UTxO you choose to spend; the hash of `global_state_proxy` (row 0). The NFT must be minted to that script address; the datum-size cap (recommended 8192, **same value as row 7** — nothing on chain ties the two). |
 | 2 | `power_users.mint` | `global_state_policy_id`, `init_input_out_ref` | Row 1; a genesis UTxO reserved for this list. |
 | 3 | `power_users.power_users_validator` (spend) | `global_state_policy_id`, `power_users_linked_list_policy_id` | Row 1; the hash of `power_users.mint` (row 2) — this is the **power-users policy ID**. |
 | 4 | `denylist.mint` | `global_state_policy_id`, `init_input_out_ref`, `power_user_list_script_hash` | Row 1; a genesis UTxO reserved for this list; the hash of `power_users_validator` (row 3, **spend** — not row 2's policy id). |
 | 5 | `denylist.denylist_validator` (spend) | `denylist_linked_list_policy_id` | The hash of `denylist.mint` (row 4) — this is the **denylist policy ID**. |
 | 6 | `minting_logic_script.minting_logic_validator` | `global_state_policy_id` | Row 1. Its only parameter. |
-| 7 | `global_state_logic.global_state_logic` (withdraw) | `security_asset_name`, `issuance_policy_id`, `global_state_policy_id`, `power_user_list_script_hash` | Operator choice; the hash of `minting_logic_validator` (row 6) — the **issuance policy ID**, i.e. the security token's policy ID; row 1; the hash of `power_users_validator` (row 3). Its hash goes into GlobalState datum **field 0** at genesis. |
+| 7 | `global_state_logic.global_state_logic` (withdraw) | `security_asset_name`, `issuance_policy_id`, `global_state_policy_id`, `power_user_list_script_hash`, `max_global_state_datum_bytes` | Operator choice; the hash of `minting_logic_validator` (row 6) — the **issuance policy ID**, i.e. the security token's policy ID; row 1; the hash of `power_users_validator` (row 3); the datum-size cap (same value as row 1; a rotated-in logic may choose another). Its hash goes into GlobalState datum **field 0** at genesis. |
 | 8 | `transfer_logic_script.transfer_logic_validator` | `security_asset_name`, `global_state_policy_id`, `expected_issuance_policy_id`, `denylist_script_hash` | Operator choice; row 1; the hash of `minting_logic_validator` (row 6); the hash of `denylist_validator` (row 5). |
 | 9 | `third_party_transfer_logic_script.third_party_transfer_logic_validator` | `security_asset_name`, `global_state_policy_id`, `expected_issuance_policy_id`, `denylist_script_hash`, `power_user_list_script_hash` | Operator choice; row 1; row 6's hash; row 5's hash; row 3's hash. (The power-users policy id is read from the GlobalState datum at run time, not compiled in.) |
 | 10 | `minting_authority.minting_authority_validator` | `security_asset_name`, `global_state_policy_id`, `registry_policy_id`, `power_users_linked_list_policy_id`, `minting_logic_script_credential_hash`, `expected_issuance_policy_id`, `denylist_script_hash`, `power_user_list_script_hash` | Operator choice; row 1; Prerequisites; row 2's hash; row 6's hash; row 6's hash again (**must be identical to the previous value** — see below); row 5's hash; row 3's hash. |

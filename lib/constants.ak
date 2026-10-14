@@ -30,11 +30,11 @@ pub const global_state_cs_registry_node_index = 6
 // Datum growth caps (defence in depth)
 // ============================================================================
 // Each bound is enforced both at genesis (`sanitise_initial_datum`) and on
-// every spend branch able to grow the corresponding field. All three are
-// tunable at compile time and sit far below the ~16 KiB transaction size
-// limit: they exist to keep a single GlobalState datum from growing large
-// enough to threaten the continuing control UTxO's own inclusion in a future
-// transaction, not to reflect any specific operational ceiling.
+// every spend branch able to grow the corresponding field. They bound single
+// entries only: at their maxima the datum would still serialise to ~40 KB,
+// past the ~16 KiB transaction limit. The joint bound is the
+// `max_global_state_datum_bytes` parameter of the GlobalState mint and logic
+// (F09).
 
 // Maximum number of entries the trusted-entity list may hold.
 pub const max_trusted_entities = 64

@@ -17,11 +17,12 @@ use constants
 use global_state_logic as v_logic
 use global_state_proxy as v_proxy
 use tests/global_state_fixtures.{
-  rotated, t_admin, t_data_of_raw_length, t_datum, t_dl_ll_policy, t_gs_logic,
-  t_gs_policy, t_gs_script_hash, t_many_entities, t_metadata_len_at_cap,
-  t_metadata_len_over_cap, t_minting_script, t_new_gs_logic, t_out_ref, t_output,
-  t_pu_ll_policy, t_reference_script, t_root32, t_security_info_len_at_cap,
-  t_security_info_len_over_cap, t_tx, t_vkey_10,
+  rotated, t_admin, t_data_of_raw_length, t_datum, t_datum_size, t_dl_ll_policy,
+  t_gs_logic, t_gs_policy, t_gs_script_hash, t_many_entities, t_max_datum_bytes,
+  t_metadata_len_at_cap, t_metadata_len_over_cap, t_minting_script,
+  t_new_gs_logic, t_out_ref, t_output, t_pu_ll_policy, t_reference_script,
+  t_root32, t_security_info_len_at_cap, t_security_info_len_over_cap, t_tx,
+  t_vkey_10,
 }
 use types/global_state.{
   AddTrustedEntity, DeactivateContract, GlobalStateDatum,
@@ -116,6 +117,7 @@ fn run_logic(
     t_issuance_policy,
     t_gs_policy,
     t_pu_script_hash,
+    t_max_datum_bytes,
     redeemer,
     Script(logic),
     tx,
@@ -2266,6 +2268,7 @@ test logic_accepts_register_credential() {
     t_issuance_policy,
     t_gs_policy,
     t_pu_script_hash,
+    t_max_datum_bytes,
     builtin.constr_data(0, []),
     RegisterCredential { credential: Script(t_gs_logic), deposit: Never },
     lock_tx(),
@@ -2278,6 +2281,7 @@ test logic_rejects_unregister_credential() {
     t_issuance_policy,
     t_gs_policy,
     t_pu_script_hash,
+    t_max_datum_bytes,
     builtin.constr_data(0, []),
     UnregisterCredential { credential: Script(t_gs_logic), refund: Never },
     lock_tx(),
@@ -2779,5 +2783,283 @@ test an_action_cannot_drop_an_appended_field() {
       appended(t_datum(False, False)),
       GlobalStateDatum { ..t_datum(False, False), requires_sender_kyc: True },
     ),
+  )
+}
+
+// ── Aggregate datum cap (F09) ────────────────────────────────────────────────
+// Every action refuses an output that both exceeds `max_global_state_datum_bytes`
+// and is larger than the input (one check, before the action dispatch). Each pair runs the same passing
+// transaction with the cap set exactly at the output's size, then one byte
+// below it, so only the aggregate cap can reject the second.
+
+fn run_logic_capped(
+  cap: Int,
+  redeemer: GlobalStateSpendRedeemer,
+  tx: Transaction,
+) -> Bool {
+  v_logic.global_state_logic.withdraw(
+    t_sec_name,
+    t_issuance_policy,
+    t_gs_policy,
+    t_pu_script_hash,
+    cap,
+    redeemer,
+    Script(t_gs_logic),
+    tx,
+  )
+}
+
+fn cap_case(
+  cap_offset: Int,
+  input_datum: GlobalStateDatum,
+  output_datum: GlobalStateDatum,
+  redeemer: GlobalStateSpendRedeemer,
+) -> Bool {
+  run_logic_capped(
+    t_datum_size(output_datum) + cap_offset,
+    redeemer,
+    t_tx(input_datum, output_datum, [t_admin]),
+  )
+}
+
+fn security_info_case(cap_offset: Int) -> Bool {
+  let input_datum = t_datum(False, False)
+  let new_info: Data = builtin.constr_data(0, [builtin.i_data(7)])
+  cap_case(
+    cap_offset,
+    input_datum,
+    GlobalStateDatum { ..input_datum, security_info: new_info },
+    modify_security_info_redeemer(new_info),
+  )
+}
+
+fn add_entity_case(cap_offset: Int) -> Bool {
+  let input_datum = t_tel_datum()
+  cap_case(
+    cap_offset,
+    input_datum,
+    GlobalStateDatum {
+      ..input_datum,
+      trusted_entity_vkeys: [
+        Pair(t_vkey_10, builtin.i_data(1)),
+        Pair(t_vkey_20, builtin.i_data(2)),
+        Pair(t_vkey_30, builtin.i_data(3)),
+      ],
+    },
+    add_trusted_entity_redeemer(t_vkey_20, builtin.i_data(2)),
+  )
+}
+
+fn update_entity_case(cap_offset: Int) -> Bool {
+  let input_datum = t_tel_datum()
+  cap_case(
+    cap_offset,
+    input_datum,
+    GlobalStateDatum {
+      ..input_datum,
+      trusted_entity_vkeys: [
+        Pair(t_vkey_20, builtin.i_data(1000)),
+        Pair(t_vkey_30, builtin.i_data(3)),
+      ],
+    },
+    update_trusted_entity_redeemer(t_vkey_10, t_vkey_20, builtin.i_data(1000)),
+  )
+}
+
+test datum_cap_modify_security_info_accepts_an_output_at_the_cap() {
+  security_info_case(0)
+}
+
+test datum_cap_modify_security_info_rejects_an_output_over_the_cap() {
+  !security_info_case(-1)
+}
+
+test datum_cap_add_trusted_entity_accepts_an_output_at_the_cap() {
+  add_entity_case(0)
+}
+
+test datum_cap_add_trusted_entity_rejects_an_output_over_the_cap() {
+  !add_entity_case(-1)
+}
+
+test datum_cap_update_trusted_entity_accepts_an_output_at_the_cap() {
+  update_entity_case(0)
+}
+
+test datum_cap_update_trusted_entity_rejects_an_output_over_the_cap() {
+  !update_entity_case(-1)
+}
+
+// RemoveTrustedEntity shrinks the datum, so the cap never blocks it.
+test datum_cap_does_not_block_removing_a_trusted_entity() {
+  let input_datum = t_tel_datum()
+  cap_case(
+    -100,
+    input_datum,
+    GlobalStateDatum {
+      ..input_datum,
+      trusted_entity_vkeys: [Pair(t_vkey_30, builtin.i_data(3))],
+    },
+    remove_trusted_entity_redeemer(t_vkey_10),
+  )
+}
+
+fn member_root_case(cap_offset: Int) -> Bool {
+  let input_datum = t_datum(False, False)
+  cap_case(
+    cap_offset,
+    input_datum,
+    GlobalStateDatum { ..input_datum, member_root_hash: t_root32 },
+    update_member_root_hash_redeemer(t_root32),
+  )
+}
+
+test datum_cap_update_member_root_hash_accepts_an_output_at_the_cap() {
+  member_root_case(0)
+}
+
+test datum_cap_update_member_root_hash_rejects_an_output_over_the_cap() {
+  !member_root_case(-1)
+}
+
+fn mintable_case(cap_offset: Int) -> Bool {
+  let input_datum = t_datum(False, False)
+  cap_case(
+    cap_offset,
+    input_datum,
+    GlobalStateDatum { ..input_datum, mintable_amount: 1_000_000_000_000_000 },
+    set_mintable_amount_redeemer(1_000_000_000_000_000),
+  )
+}
+
+test datum_cap_set_mintable_amount_accepts_an_output_at_the_cap() {
+  mintable_case(0)
+}
+
+test datum_cap_set_mintable_amount_rejects_an_output_over_the_cap() {
+  !mintable_case(-1)
+}
+
+// Outgoing rotation: the successor may change other fields, but the datum it
+// inherits must respect the outgoing logic's cap.
+fn rotation_case(cap_offset: Int) -> Bool {
+  let output_datum = GlobalStateDatum {
+    ..t_rotated_datum(),
+    security_info: builtin.constr_data(0, [builtin.i_data(7)]),
+  }
+  run_logic_capped(
+    t_datum_size(output_datum) + cap_offset,
+    rotate_gs_redeemer(t_new_gs_logic),
+    t_rotate_tx(output_datum),
+  )
+}
+
+test datum_cap_rotation_accepts_an_output_at_the_cap() {
+  rotation_case(0)
+}
+
+test datum_cap_rotation_rejects_an_output_over_the_cap() {
+  !rotation_case(-1)
+}
+
+// A datum already over the cap can be shrunk by a capped branch, even when
+// the result is still over it: the write does not grow the datum.
+test datum_cap_accepts_shrinking_a_datum_that_stays_over_the_cap() {
+  let input_datum = GlobalStateDatum {
+    ..t_datum(False, False),
+    security_info: t_data_of_raw_length(1000),
+  }
+  let new_info: Data = builtin.constr_data(0, [builtin.i_data(7)])
+  let output_datum = GlobalStateDatum { ..input_datum, security_info: new_info }
+  run_logic_capped(
+    t_datum_size(output_datum) - 1,
+    modify_security_info_redeemer(new_info),
+    t_tx(input_datum, output_datum, [t_admin]),
+  )
+}
+
+// A same-size write is not growth, so it passes over the cap too.
+test datum_cap_accepts_a_same_size_write_over_the_cap() {
+  let input_datum = t_tel_datum()
+  cap_case(
+    -1,
+    input_datum,
+    GlobalStateDatum {
+      ..input_datum,
+      trusted_entity_vkeys: [
+        Pair(t_vkey_20, builtin.i_data(20)),
+        Pair(t_vkey_30, builtin.i_data(3)),
+      ],
+    },
+    update_trusted_entity_redeemer(t_vkey_10, t_vkey_20, builtin.i_data(20)),
+  )
+}
+
+// Fields appended by a later logic count towards the cap: the same write
+// passes with the cap at the typed output's size plus the trailing field,
+// and fails with the cap at the typed size alone.
+fn appended_case(extra: Int) -> Bool {
+  let input_datum = t_datum(False, False)
+  let new_info: Data = builtin.constr_data(0, [builtin.i_data(7)])
+  let output_datum = GlobalStateDatum { ..input_datum, security_info: new_info }
+  let output_raw = appended(output_datum)
+  run_logic_capped(
+    t_datum_size(output_datum) + extra,
+    modify_security_info_redeemer(new_info),
+    kyc_tx_raw(appended(input_datum), output_raw),
+  )
+}
+
+test datum_cap_counts_appended_fields() {
+  let output_raw = appended(
+    GlobalStateDatum {
+      ..t_datum(False, False),
+      security_info: builtin.constr_data(0, [builtin.i_data(7)]),
+    },
+  )
+  let extra = bytearray.length(builtin.serialise_data(output_raw)) - t_datum_size(
+    GlobalStateDatum {
+      ..t_datum(False, False),
+      security_info: builtin.constr_data(0, [builtin.i_data(7)]),
+    },
+  )
+  and {
+    extra > 0,
+    appended_case(extra),
+    !appended_case(extra - 1),
+  }
+}
+
+// A burn through MintSecurity raises `mintable_amount` (0 -> 100 takes one
+// more CBOR byte), so it is capped like every other write.
+fn burn_case(cap_offset: Int) -> Bool {
+  let input_datum = GlobalStateDatum {
+    ..t_datum(False, False),
+    mintable_amount: 0,
+  }
+  let output_datum = GlobalStateDatum { ..input_datum, mintable_amount: 100 }
+  run_logic_capped(
+    t_datum_size(output_datum) + cap_offset,
+    mintsecurity_redeemer(),
+    t_mintsecurity_tx(input_datum, output_datum, -100, [t_admin]),
+  )
+}
+
+test datum_cap_burn_accepts_an_output_at_the_cap() {
+  burn_case(0)
+}
+
+test datum_cap_burn_rejects_an_output_over_the_cap() {
+  !burn_case(-1)
+}
+
+// The cap is checked for every action, but a write that leaves the size alone
+// always passes: a pause on a datum already over the cap is not blocked.
+test datum_cap_does_not_block_a_pause_over_the_cap() {
+  let tx = t_pause_tx(t_pu_node_at(Script(t_pu_script_hash)))
+  run_logic_capped(
+    t_datum_size(t_pause_datum(True)) - 1,
+    t_pause_redeemer(),
+    tx,
   )
 }

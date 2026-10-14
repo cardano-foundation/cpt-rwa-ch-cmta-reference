@@ -185,3 +185,15 @@ pub const t_new_gs_logic: ByteArray =
 pub fn rotated(datum: GlobalStateDatum, logic: ByteArray) -> GlobalStateDatum {
   GlobalStateDatum { ..datum, global_state_script_credential_hash: logic }
 }
+
+// ── Aggregate datum cap (F09) ────────────────────────────────────────────────
+
+/// `max_global_state_datum_bytes` for every fixture: the recommended
+/// deployment value (8 KiB).
+pub const t_max_datum_bytes: Int = 8192
+
+/// The CBOR-serialised size of a GlobalState datum, as the cap measures it.
+pub fn t_datum_size(datum: GlobalStateDatum) -> Int {
+  let data: Data = datum
+  bytearray.length(builtin.serialise_data(data))
+}
