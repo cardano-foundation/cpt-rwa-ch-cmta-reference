@@ -21,10 +21,10 @@ use types/global_state.{
   PauseTransfers, RemoveTrustedEntity, RotateAdmin, RotateGlobalStateScript,
   RotateMintingScript, SetMintableAmount, SetRequiresReceiverKyc,
   SetRequiresSenderKyc, UpdateMemberRootHash, UpdateTrustedEntity,
-  decode_global_state, idx_admin_credential_hash, idx_deactivated,
-  idx_minting_script_credential_hash, idx_power_user_linked_list_policy_id,
-  set_admin_credential_hash, set_deactivated,
-  set_global_state_script_credential_hash, set_member_root_hash,
+  decode_global_state, decode_global_state_core, idx_admin_credential_hash,
+  idx_deactivated, idx_minting_script_credential_hash,
+  idx_power_user_linked_list_policy_id, set_admin_credential_hash,
+  set_deactivated, set_global_state_script_credential_hash, set_member_root_hash,
   set_mintable_amount, set_minting_script_credential_hash,
   set_requires_receiver_kyc, set_requires_sender_kyc, set_security_info,
   set_transfers_paused, set_trusted_entity_vkeys, set_upgrades_locked,
@@ -62,9 +62,10 @@ use utils.{must_be_signed_by_credential, must_run_script_withdrawal}
 //      `SetMintableAmount`.
 //   3. MintSecurity keeps the supply-cap accounting, and every other action
 //      rejects security-token mints and movements.
-//   4. The datum's 15 known fields keep their order, types and constructor 0,
-//      inline: the minting proxy and the power-users and denylist lists decode
-//      all of them and can never be redeployed. Trailing fields may be added.
+//   4. The frozen core (fields 0–4, `GlobalStateCore`) keeps its order, types
+//      and constructor 0, inline: the proxy, the minting proxy and the
+//      power-users and denylist lists read it and can never be redeployed.
+//      Fields 5+ are the installed logic's to reshape.
 //   5. The logic's own hash is never accepted as the admin, the minting
 //      authority or an operator: every GlobalState transaction carries this
 //      withdrawal, and `must_be_signed_by_credential` accepts a withdrawal as
@@ -234,10 +235,13 @@ validator global_state_logic(
             let output_fields = builtin.unconstr_fields(
               global_state_output_datum,
             )
-            // The frozen readers (minting proxy, power-users and denylist lists)
-            // decode all 15 known fields with their types; whatever the new logic
-            // wants, they must still be able to read the result.
-            let output_datum = decode_global_state(global_state_output_datum)
+            // The permanent readers (minting proxy, power-users and denylist
+            // lists) read only the frozen core, fields 0–4, with their types;
+            // whatever layout the new logic gives the rest, they must still be
+            // able to read it. Everything after the core is the new logic's.
+            let output_datum = decode_global_state_core(
+              global_state_output_datum,
+            )
             let unchanged = fn(idx) {
               utils.safe_list_at(output_fields, idx) == utils.safe_list_at(
                 input_fields,
@@ -267,7 +271,7 @@ validator global_state_logic(
               new_global_state_script_hash != input_datum.minting_script_credential_hash,
               new_global_state_script_hash != input_datum.admin_credential_hash,
               output_datum.global_state_script_credential_hash == new_global_state_script_hash,
-              // What the frozen readers act on is not the rotation's to change.
+              // The rest of the core is not the rotation's to change.
               // `deactivated` and the admin keep their own rules, the power-users
               // list is fixed for life, and the minting authority has its own
               // rotation.

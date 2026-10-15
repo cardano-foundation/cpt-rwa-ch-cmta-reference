@@ -30,7 +30,8 @@ use types/global_state.{
   PauseTransfers, RemoveTrustedEntity, RotateAdmin, RotateGlobalStateScript,
   RotateMintingScript, SetMintableAmount, SetRequiresReceiverKyc,
   SetRequiresSenderKyc, TrustedEntityMetadata, UpdateMemberRootHash,
-  UpdateTrustedEntity, idx_mintable_amount, set_security_info,
+  UpdateTrustedEntity, gs_core_field_count, idx_deactivated, idx_mintable_amount,
+  set_security_info,
 }
 use types/power_users.{PowerUser}
 use utils
@@ -2552,17 +2553,17 @@ test rotate_gs_logic_fails_when_the_minting_script_changes() {
 
 // A retyped known field would make the frozen readers trap for good.
 test rotate_gs_logic_fails_when_the_output_is_not_readable() fail {
+  // Frozen core (2026-10-15): the tail is the successor's to retype, so the
+  // unreadable output is now one whose CORE cannot be read — here constructor
+  // 1, which only the outgoing core decode catches (fields 1–4 are pinned by
+  // `unchanged` anyway). The proxy would trap on it forever.
   let raw: Data = t_rotated_datum()
-  let fields = utils.replace_data_field(
-    builtin.unconstr_fields(raw),
-    idx_mintable_amount,
-    builtin.b_data(#"00"),
-  )
+  let fields = builtin.unconstr_fields(raw)
   outgoing(
     t_new_gs_logic,
     with_raw_output(
       t_rotate_tx(t_rotated_datum()),
-      builtin.constr_data(0, fields),
+      builtin.constr_data(1, fields),
     ),
   )
 }
@@ -3061,5 +3062,83 @@ test datum_cap_does_not_block_a_pause_over_the_cap() {
     t_datum_size(t_pause_datum(True)) - 1,
     t_pause_redeemer(),
     tx,
+  )
+}
+
+// ── Frozen core: the outgoing logic leaves the tail to its successor ─────────
+
+fn rotated_core_with_tail(tail: List<Data>) -> Data {
+  let raw: Data = t_rotated_datum()
+  builtin.constr_data(
+    0,
+    list.concat(
+      list.take(builtin.unconstr_fields(raw), gs_core_field_count),
+      tail,
+    ),
+  )
+}
+
+// A successor may give the datum a different shape after the core — here 10
+// fields, the tail retyped — and the outgoing logic hands over.
+test rotate_gs_logic_outgoing_allows_a_reshaped_tail() {
+  outgoing(
+    t_new_gs_logic,
+    with_raw_output(
+      t_rotate_tx(t_rotated_datum()),
+      rotated_core_with_tail(
+        [
+          builtin.b_data(#"aa"),
+          builtin.list_data([]),
+          builtin.i_data(-1),
+          builtin.constr_data(3, []),
+          builtin.map_data([]),
+        ],
+      ),
+    ),
+  )
+}
+
+// A v1 tail field retyped (mintable_amount as bytes) is the successor's call.
+test rotate_gs_logic_outgoing_allows_a_retyped_tail_field() {
+  let raw: Data = t_rotated_datum()
+  let fields = utils.replace_data_field(
+    builtin.unconstr_fields(raw),
+    idx_mintable_amount,
+    builtin.b_data(#"00"),
+  )
+  outgoing(
+    t_new_gs_logic,
+    with_raw_output(
+      t_rotate_tx(t_rotated_datum()),
+      builtin.constr_data(0, fields),
+    ),
+  )
+}
+
+// The core alone, with no tail at all, is still a datum the permanent
+// readers can read.
+test rotate_gs_logic_outgoing_allows_the_core_alone() {
+  outgoing(
+    t_new_gs_logic,
+    with_raw_output(t_rotate_tx(t_rotated_datum()), rotated_core_with_tail([])),
+  )
+}
+
+// A core field retyped would make the permanent readers trap for good. (Fields
+// 1–4 are also pinned by `unchanged`, so this is not evidence for the decoder
+// — `rotate_gs_logic_fails_when_the_output_is_not_readable` is.)
+test rotate_gs_logic_fails_when_a_core_field_is_retyped() fail {
+  let raw: Data = t_rotated_datum()
+  let fields = utils.replace_data_field(
+    builtin.unconstr_fields(raw),
+    idx_deactivated,
+    builtin.i_data(0),
+  )
+  outgoing(
+    t_new_gs_logic,
+    with_raw_output(
+      t_rotate_tx(t_rotated_datum()),
+      builtin.constr_data(0, fields),
+    ),
   )
 }

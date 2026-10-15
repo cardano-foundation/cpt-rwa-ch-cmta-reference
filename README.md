@@ -275,19 +275,24 @@ The GlobalState admin has three distinct upgrade paths, plus control over the su
   datum field 0 (`global_state_script_credential_hash`) and requires that credential's withdraw-0;
   every GlobalState rule lives in the script field 0 names. Rotation rewrites field 0 and must run
   **both** logics in one transaction: the current one checks the admin signature, the lock, that the
-  new hash is not the admin's or the minting authority's, and that the fields the never-redeployed
-  readers act on (`deactivated`, admin, power-users list, minting authority) are unchanged and the
-  datum still decodes for them; the new one must run its own withdraw-0 — proving its script is
+  new hash is not the admin's or the minting authority's, and that the datum's frozen core (below)
+  still decodes and is unchanged apart from field 0; the new one must run its own withdraw-0 — proving its script is
   producible and its stake credential registered — and checks the datum it is about to govern
   (this version accepts exactly the input with field 0 rewritten). **The new logic governs every
   later GlobalState action, the supply cap included** — rotating to a permissive script hands
   GlobalState to anyone, which is stronger than a permissive minting authority. Rotate only to a
   reviewed build of this repository, verified against the blueprint. The NFT never moves, and
-  readers find GlobalState by its NFT, never its address. The datum is **append-only**: a new logic
-  may add fields after the existing 15 — every reader, including the minting proxy and the list
-  validators that can never be upgraded, ignores trailing fields — but must never remove, reorder
-  or retype one, since those readers decode all 15 with their types. The invariants every
-  replacement logic must keep are listed in `validators/global_state_logic.ak`.
+  readers find GlobalState by its NFT, never its address. The datum has a **frozen core and a free
+  tail**. Fields 0–4 (logic hash, `deactivated`, admin, power-users list id, minting authority) are
+  the only fields the scripts that can never be redeployed read after genesis; they keep their
+  position and type forever. Fields 5+ belong to the installed logic: a new logic may drop, reorder,
+  retype or append them (within `max_global_state_datum_bytes`). The replaceable readers (minting
+  authority, transfer and third-party logic) decode the v1 tail, and would trap on or silently misread
+  a different one, so before installing a logic that changes the tail, first rotate them to versions
+  that accept **both** the current and the new layout: the authority through `RotateMintingScript`,
+  then the transfer scripts through the new authority's `UpgradeRegistryNode`, then the GlobalState
+  logic — all before `LockUpgrades`. The invariants every replacement logic must keep are listed in
+  `validators/global_state_logic.ak`.
 
 `LockUpgrades` is an admin-signed, one-way GlobalState action that closes **all four** for later
 transactions — after it, `mintable_amount` moves only through mint and burn and the GlobalState
@@ -632,9 +637,12 @@ dependent transaction after the preceding output is available.
    one-shot inputs and mint the GlobalState NFT, power-users root NFT and denylist root NFT
    together. The GlobalState mint validator rejects genesis unless both root policies mint in this
    same transaction. Put the GlobalState NFT at `global_state_proxy` (the mint validator enforces
-   this) with an inline datum whose **field 0 is the hash of `global_state_logic`**, followed by
-   the admin credential, supply cap, list policy IDs, KYC flags, trusted entity keys, network ID,
-   initial minting-authority hash and `upgrades_locked = False`. Put each root at its own list
+   this) with an inline `GlobalStateDatum` in exactly this field order: the frozen core — 0 the hash of
+   `global_state_logic`, 1 `deactivated = False`, 2 the admin credential, 3 the power-users list
+   policy ID, 4 the initial minting-authority hash — then the v1 tail: 5 `transfers_paused = False`,
+   6 the supply cap, 7 the denylist policy ID, 8 `security_info`, 9 the trusted entity keys,
+   10 `member_root_hash`, 11/12 the sender/receiver KYC flags, 13 the network ID and
+   14 `upgrades_locked = False`. Put each root at its own list
    spend validator. Each list's `Init` rejects a GlobalState datum that does not name it. Verify
    the two list addresses and field 0 off-chain before signing; the mint validators cannot pin
    them at genesis.

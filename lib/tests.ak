@@ -9,6 +9,7 @@ use cardano/transaction.{
 }
 use constants
 use denylist/absence.{covers_key}
+use types/global_state
 use utils
 
 // Faithful mirror of the CIP-113 programmable-token registry node datum shape:
@@ -265,7 +266,7 @@ test covers_key_fails_when_target_above_link() fail {
 /// Append two extra trailing fields to the datum of every input and reference
 /// input that carries the GlobalState NFT — the shape a FUTURE GlobalState
 /// version may produce. The non-upgradeable readers (minting proxy, denylist,
-/// power-users) must keep accepting it; see `decode_global_state`.
+/// power-users) must keep accepting it; see `decode_global_state_core`.
 pub fn with_trailing_gs_fields(
   tx: Transaction,
   gs_policy: ByteArray,
@@ -296,5 +297,91 @@ pub fn with_trailing_gs_fields(
     ..tx,
     inputs: list.map(tx.inputs, extend),
     reference_inputs: list.map(tx.reference_inputs, extend),
+  }
+}
+
+/// Replace everything after the frozen core (fields 0–4) of the GlobalState
+/// datum, in every input and reference input carrying the NFT, with a tail of
+/// a DIFFERENT shape: five fields of other types, so the datum has 10 fields
+/// and fields 5–9 no longer decode as the v1 layout. The shape a later
+/// GlobalState logic may produce; the permanent readers (minting proxy,
+/// power-users, denylist) read only the core and must keep accepting it.
+pub fn with_reshaped_gs_tail(
+  tx: Transaction,
+  gs_policy: ByteArray,
+) -> Transaction {
+  let reshape = fn(input: Input) {
+    if quantity_of(
+      input.output.value,
+      gs_policy,
+      constants.global_state_asset_name,
+    ) == 1 {
+      expect InlineDatum(raw) = input.output.datum
+      let reshaped = builtin.constr_data(
+        0,
+        list.concat(
+          list.take(
+            builtin.unconstr_fields(raw),
+            global_state.gs_core_field_count,
+          ),
+          [
+            builtin.b_data(#"aa"),
+            builtin.list_data([]),
+            builtin.i_data(-1),
+            builtin.constr_data(3, []),
+            builtin.map_data([]),
+          ],
+        ),
+      )
+      Input {
+        ..input,
+        output: Output { ..input.output, datum: InlineDatum(reshaped) },
+      }
+    } else {
+      input
+    }
+  }
+  Transaction {
+    ..tx,
+    inputs: list.map(tx.inputs, reshape),
+    reference_inputs: list.map(tx.reference_inputs, reshape),
+  }
+}
+
+/// Set the GlobalState datum's `deactivated` (core field 1) to `Constr(2, [])`
+/// -- neither False nor True -- in every input and reference input carrying the
+/// NFT. A lenient Bool read (`unconstr_index == 1`) takes it as "not
+/// deactivated" and fails open; the core decoder must trap.
+pub fn with_malformed_gs_deactivated(
+  tx: Transaction,
+  gs_policy: ByteArray,
+) -> Transaction {
+  let malform = fn(input: Input) {
+    if quantity_of(
+      input.output.value,
+      gs_policy,
+      constants.global_state_asset_name,
+    ) == 1 {
+      expect InlineDatum(raw) = input.output.datum
+      let bad = builtin.constr_data(
+        0,
+        utils.replace_data_field(
+          builtin.unconstr_fields(raw),
+          global_state.idx_deactivated,
+          builtin.constr_data(2, []),
+        ),
+      )
+      Input {
+        ..input,
+        output: Output { ..input.output, datum: InlineDatum(bad) },
+      }
+    } else {
+      input
+    }
+  }
+  Transaction {
+    ..tx,
+    inputs: list.map(tx.inputs, malform),
+    reference_inputs: list.map(tx.reference_inputs, malform),
   }
 }

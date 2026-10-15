@@ -270,14 +270,15 @@ rotation back on an emulator or preprod. Then spend GlobalState with `RotateGlob
 new_global_state_script_hash }` (constructor index 14) as the redeemer of **both** withdrawals —
 the current logic (old field 0) and the new one — signed by the admin. The continuing output stays at
 the proxy with the same non-ADA value; its datum has field 0 set to the new hash. The current logic
-requires `deactivated`, the admin, the power-users list policy and the minting-authority hash to be
-unchanged and the datum to still decode as the 15-field `GlobalStateDatum` (the minting proxy and
-both lists decode it and can never be redeployed); everything else is the new logic's to accept.
+requires the frozen core (fields 0–4: logic hash, `deactivated`, admin, power-users list policy,
+minting-authority hash) to still decode, with constructor 0, and fields 1–4 to be unchanged; the
+proxy, the minting proxy and both lists read only the core and can never be redeployed. Everything
+after the core is the new logic's to accept, including a completely different layout.
 This version, as the new logic, accepts exactly the input datum with field 0 rewritten. The new hash
 must differ from the admin and the minting authority. No security token may be minted, burned or
-spent in the same transaction. The datum is append-only: decode the first 15 fields and ignore any
-after them, as `decode_global_state` does on chain — a later logic may add fields, and a reader that
-insists on exactly 15 would stop working for that token.
+spent in the same transaction. Off-chain readers should read the core (fields 0–4) by position and the rest according to the
+installed logic's layout: a later logic may reshape everything after field 4. The v1 layout is
+`GlobalStateDatum`; `decode_global_state_core` is the on-chain core reader.
 
 `LockUpgrades` irreversibly closes the authority-rotation, registry-upgrade and GlobalState-logic-rotation
 paths, and admin changes to the supply cap, for **later** transactions. A registry upgrade bundled into the same transaction can still read the

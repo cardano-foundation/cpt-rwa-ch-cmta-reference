@@ -19,7 +19,7 @@ use types/denylist.{
   SpendRedeemer, StateTransition,
 }
 use types/global_state.{
-  GlobalStateDatum, genesis_global_state, gs_datum_from_ref_input,
+  GlobalStateDatum, genesis_global_state, gs_core_from_ref_input,
 }
 use types/power_users.{PowerUser}
 use utils.{must_be_signed_by_credential, quantity_of_policy_id}
@@ -36,7 +36,7 @@ fn power_user_from_refs(
   power_user_node_ref_input_index: Int,
   power_user_list_script_hash: ByteArray,
 ) -> (ByteArray, PowerUser) {
-  let gs = gs_datum_from_ref_input(
+  let gs = gs_core_from_ref_input(
     self.reference_inputs,
     global_state_ref_input_index,
     global_state_policy_id,
@@ -171,12 +171,12 @@ validator mint(
         // lists — and makes this branch what its name suggests: cleanup, not a
         // kill switch.
         //
-        // Read with `gs_datum_from_ref_input`, NOT `active_admin_from_ref_input`:
+        // Read with `gs_core_from_ref_input`, NOT `active_admin_from_ref_input`:
         // the latter traps on a deactivated protocol, which is exactly the
         // state this branch now requires. The GlobalState UTxO can no longer be
         // spent once deactivated, but it is still readable as a reference
         // input, so the admin credential remains available here.
-        let gs = gs_datum_from_ref_input(
+        let gs = gs_core_from_ref_input(
           self.reference_inputs,
           global_state_ref_input_index,
           global_state_policy_id,
@@ -786,10 +786,28 @@ test denylist_remove_rejects_a_29_byte_key() {
 }
 
 // Non-upgradeable: must keep reading a GlobalState datum a future version
-// extended with trailing fields (see decode_global_state).
+// extended with trailing fields (see decode_global_state_core).
 test denylist_insert_accepts_a_global_state_with_trailing_fields() {
   t_run_denylist_add(
     t_key_28,
     tests.with_trailing_gs_fields(t_dl_insert_tx(t_key_28), t_gs_policy),
+  )
+}
+
+// Frozen core: the sanctions path keeps working when a later logic reshapes
+// every field after 0–4.
+test denylist_insert_accepts_a_global_state_with_a_reshaped_tail() {
+  t_run_denylist_add(
+    t_key_28,
+    tests.with_reshaped_gs_tail(t_dl_insert_tx(t_key_28), t_gs_policy),
+  )
+}
+
+// The sanctions path must treat a malformed `deactivated` as an error, never
+// as "live".
+test denylist_insert_rejects_a_malformed_deactivated_flag() fail {
+  t_run_denylist_add(
+    t_key_28,
+    tests.with_malformed_gs_deactivated(t_dl_insert_tx(t_key_28), t_gs_policy),
   )
 }

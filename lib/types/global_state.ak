@@ -1,8 +1,10 @@
 use aiken/builtin
 use aiken/collection/list
 use cardano/address.{Address, Script}
-use cardano/assets.{from_asset, quantity_of}
-use cardano/transaction.{InlineDatum, Input, Output, OutputReference}
+use cardano/assets.{Value, from_asset, quantity_of}
+use cardano/transaction.{
+  Datum, InlineDatum, Input, NoDatum, Output, OutputReference,
+}
 use constants
 use utils
 
@@ -44,13 +46,17 @@ pub type GlobalStateLocation {
 /// the wrong one — the tripwire test `gs_getters_read_correct_fields` exists to
 /// turn that into a build failure.
 ///
-/// APPEND-ONLY across logic versions. A later GlobalState logic (reached
-/// through `RotateGlobalStateScript`) may add fields AFTER these 15 — every
-/// reader decodes through `decode_global_state`, which ignores trailing fields,
-/// so the validators that can never be upgraded keep working. Never remove,
-/// reorder or retype one of these 15: the minting proxy and the power-users and
-/// denylist lists decode all of them, with their types.
+/// FROZEN CORE, FREE TAIL. Fields 0–4 are the `GlobalStateCore`: the only
+/// fields the scripts that can never be redeployed (the GlobalState proxy, the
+/// minting proxy, the power-users and denylist lists) read after genesis. They
+/// keep their position and type forever. Fields 5+ belong to whichever
+/// GlobalState logic is installed: a later logic (reached through
+/// `RotateGlobalStateScript`) may drop, reorder, retype or append them. The
+/// replaceable readers (minting authority, transfer and third-party logic)
+/// decode this v1 layout in full and must be rotated to readers of the new
+/// layout BEFORE a logic that changes the tail is installed.
 pub type GlobalStateDatum {
+  // ── FROZEN CORE (0–4) — read by the permanent scripts; see `GlobalStateCore` ──
   // Credential hash of the GlobalState LOGIC script (a withdraw validator,
   // `global_state_logic` in validators/global_state_logic.ak). FIELD 0 FOREVER: the
   // permanent spend proxy (`global_state_proxy`) that holds the NFT reads only
@@ -61,40 +67,14 @@ pub type GlobalStateDatum {
   // GlobalState transaction carries this withdrawal, and
   // `must_be_signed_by_credential` accepts a withdrawal as a signature.
   global_state_script_credential_hash: ByteArray,
-  //If true, no transfer can be executed
-  transfers_paused: Bool,
   // If true, the protocol is deactivated and no action can be executed
   // This flag is irreversible and can only be set to true. It is meant to be used in case of decimissioning the protocol or in case of a critical bug that requires the protocol to be deactivated.
   // Can only be set if transfers are paused. Once set to true, it cannot be reverted back to false.
   deactivated: Bool,
-  //Remaining supply HEADROOM, not total supply. Decreases when tokens are
-  //minted, increases when tokens are burnt. The admin may also set it to
-  //an absolute value via `SetMintableAmount` until `upgrades_locked`.
-  mintable_amount: Int,
   //Key-hash of the protocol administrator. Rotatable via RotateAdmin action.
   admin_credential_hash: ByteArray,
   //PowerUsers linked list minting policy
   power_user_linked_list_policy_id: ByteArray,
-  //Denylist linked list minting policy (presence = sanctioned)
-  denylist_linked_list_policy_id: ByteArray,
-  //Regulation (eg. BaFin) compliancy info, not directly used in the contracts
-  security_info: Data,
-  //Trusted Entity List — sorted ascending by vkey. Key = 32-byte Ed25519 vkey
-  //used to verify KYC proofs. Value = free-form metadata (operator-defined).
-  trusted_entity_vkeys: Pairs<ByteArray, TrustedEntityMetadata>,
-  /// Root hash of the MPF membership tree (32 bytes); empty = no members yet
-  member_root_hash: ByteArray,
-  // Whether KYC is required for sending transfers.
-  requires_sender_kyc: Bool,
-  // Whether KYC is required for receiving transfers.
-  requires_receiver_kyc: Bool,
-  // Network this deployment targets
-  // Bound into every KYC proof payload to prevent cross-network
-  // replay. Set once at genesis and IMMUTABLE under this logic: every branch
-  // carries it forward unchanged, so no v1 action can alter it. A replacement
-  // logic installed by `RotateGlobalStateScript` could (the rotation pins only
-  // the fields the frozen readers act on).
-  network_id: Int,
   // Credential hash of the currently-active minting authority script (see
   // validators/minting_authority.ak). `minting_logic_script.ak` — the
   // permanent, CIP-113-registered proxy every registry node's
@@ -135,6 +115,33 @@ pub type GlobalStateDatum {
   // After granting or rotating any role, assert that an operation exercising
   // it without that operator's signature is REJECTED.
   minting_script_credential_hash: ByteArray,
+  // ── LOGIC-OWNED TAIL (5+) — v1 layout; a later logic may reshape it ──────────
+  //If true, no transfer can be executed
+  transfers_paused: Bool,
+  //Remaining supply HEADROOM, not total supply. Decreases when tokens are
+  //minted, increases when tokens are burnt. The admin may also set it to
+  //an absolute value via `SetMintableAmount` until `upgrades_locked`.
+  mintable_amount: Int,
+  //Denylist linked list minting policy (presence = sanctioned)
+  denylist_linked_list_policy_id: ByteArray,
+  //Regulation (eg. BaFin) compliancy info, not directly used in the contracts
+  security_info: Data,
+  //Trusted Entity List — sorted ascending by vkey. Key = 32-byte Ed25519 vkey
+  //used to verify KYC proofs. Value = free-form metadata (operator-defined).
+  trusted_entity_vkeys: Pairs<ByteArray, TrustedEntityMetadata>,
+  /// Root hash of the MPF membership tree (32 bytes); empty = no members yet
+  member_root_hash: ByteArray,
+  // Whether KYC is required for sending transfers.
+  requires_sender_kyc: Bool,
+  // Whether KYC is required for receiving transfers.
+  requires_receiver_kyc: Bool,
+  // Network this deployment targets
+  // Bound into every KYC proof payload to prevent cross-network
+  // replay. Set once at genesis and IMMUTABLE under this logic: every branch
+  // carries it forward unchanged, so no v1 action can alter it. A replacement
+  // logic installed by `RotateGlobalStateScript` could (the rotation pins only
+  // the fields the frozen readers act on).
+  network_id: Int,
   // ONE-WAY upgrade lock. While False (the genesis value) all four paths
   // below are open; once set True by `LockUpgrades` it can never be cleared — no
   // branch writes it back, and every branch reproduces the datum wholesale,
@@ -172,31 +179,31 @@ pub type GlobalStateDatum {
 
 pub const idx_global_state_script_credential_hash = 0
 
-pub const idx_transfers_paused = 1
+pub const idx_deactivated = 1
 
-pub const idx_deactivated = 2
+pub const idx_admin_credential_hash = 2
 
-pub const idx_mintable_amount = 3
+pub const idx_power_user_linked_list_policy_id = 3
 
-pub const idx_admin_credential_hash = 4
+pub const idx_minting_script_credential_hash = 4
 
-pub const idx_power_user_linked_list_policy_id = 5
+pub const idx_transfers_paused = 5
 
-pub const idx_denylist_linked_list_policy_id = 6
+pub const idx_mintable_amount = 6
 
-pub const idx_security_info = 7
+pub const idx_denylist_linked_list_policy_id = 7
 
-pub const idx_trusted_entity_vkeys = 8
+pub const idx_security_info = 8
 
-pub const idx_member_root_hash = 9
+pub const idx_trusted_entity_vkeys = 9
 
-pub const idx_requires_sender_kyc = 10
+pub const idx_member_root_hash = 10
 
-pub const idx_requires_receiver_kyc = 11
+pub const idx_requires_sender_kyc = 11
 
-pub const idx_network_id = 12
+pub const idx_requires_receiver_kyc = 12
 
-pub const idx_minting_script_credential_hash = 13
+pub const idx_network_id = 13
 
 pub const idx_upgrades_locked = 14
 
@@ -410,10 +417,12 @@ pub fn set_minting_script_credential_hash(
 }
 
 /// Resolves GlobalState from wherever the caller says it is, authenticates it
-/// via the GS NFT, and returns its parsed inline datum.
+/// via the GS NFT, and returns its parsed inline datum in the full v1 layout.
+/// FOR THE REPLACEABLE READERS ONLY: a permanent script must use
+/// `gs_core_from_output` / `gs_core_from_ref_input`, or it breaks the first
+/// time a later logic reshapes the tail.
 ///
-/// Use this instead of `gs_datum_from_ref_input` in any validator that merely
-/// READS the datum. Pinning such a validator to reference inputs forbids every
+/// Use this in any validator that merely READS the datum. Pinning such a validator to reference inputs forbids every
 /// transaction that must also spend GlobalState — see `GlobalStateLocation`.
 ///
 /// Fails (UPLC error) if: index out of range, NFT missing, datum non-inline,
@@ -431,24 +440,6 @@ pub fn gs_datum_from_location(
       utils.safe_list_at(reference_inputs, global_state_ref_input_index).output
   }
   gs_datum_from_output(gs_output, global_state_policy_id)
-}
-
-/// Resolves the GS reference input at `ref_index`, authenticates it via the GS
-/// NFT, and returns its parsed inline datum. Helper for validators (power_users,
-/// denylist) that read protocol state from the GS datum instead of holding a
-/// compile-time owner parameter.
-///
-/// Fails (UPLC error) if: index out of range, NFT missing, datum non-inline,
-/// or datum shape invalid.
-pub fn gs_datum_from_ref_input(
-  reference_inputs: List<Input>,
-  ref_index: Int,
-  global_state_policy_id: ByteArray,
-) -> GlobalStateDatum {
-  gs_datum_from_output(
-    utils.safe_list_at(reference_inputs, ref_index).output,
-    global_state_policy_id,
-  )
 }
 
 /// Authenticates a UTxO as the real GlobalState and returns its datum.
@@ -503,15 +494,16 @@ pub fn genesis_global_state(
 pub const gs_field_count = 15
 
 /// Decode a GlobalState datum, IGNORING any fields after the first
-/// `gs_field_count`. The single strict-decode choke point for every reader.
+/// `gs_field_count`. The strict-decode choke point for the v1 readers.
 ///
-/// Why lenient: the datum's shape must be able to GROW. A later GlobalState
-/// logic (reached through `RotateGlobalStateScript`) may append fields, and the
-/// validators that can never be upgraded — the minting proxy, the denylist and
-/// power-users lists — must keep reading such a datum. A plain
-/// `expect gs: GlobalStateDatum = raw` rejects ANY extra field (measured), so
-/// they would break for good. The rule this buys is APPEND-ONLY: never remove,
-/// reorder or retype one of these 15.
+/// The v1 reader, used by this version's replaceable scripts (the GlobalState
+/// logic, minting authority, transfer and third-party logic). The permanent
+/// scripts use `decode_global_state_core` instead.
+///
+/// Why lenient: a later GlobalState logic may append fields while keeping the
+/// v1 tail, and a plain `expect gs: GlobalStateDatum = raw` rejects ANY extra
+/// field (measured). A logic that reshapes the tail instead needs these readers
+/// rotated first; see `GlobalStateDatum`.
 ///
 /// Nothing is lost by ignoring the tail: the datum is authenticated by the
 /// NFT and only ever written by genesis (strictly sanitised) and by GlobalState
@@ -523,6 +515,62 @@ pub fn decode_global_state(raw: Data) -> GlobalStateDatum {
   let known = list.take(builtin.snd_pair(constr), gs_field_count)
   expect gs: GlobalStateDatum = builtin.constr_data(0, known)
   gs
+}
+
+/// The frozen core of every GlobalState datum: fields 0–4, the only fields the
+/// permanent scripts read after genesis. A later GlobalState logic may reshape
+/// everything after them, never these.
+pub type GlobalStateCore {
+  global_state_script_credential_hash: ByteArray,
+  deactivated: Bool,
+  admin_credential_hash: ByteArray,
+  power_user_linked_list_policy_id: ByteArray,
+  minting_script_credential_hash: ByteArray,
+}
+
+/// Number of fields in `GlobalStateCore`.
+pub const gs_core_field_count = 5
+
+/// Decode only the frozen core of a GlobalState datum, IGNORING every field
+/// after it — whatever its number, order or types. The decoder for every
+/// permanent script. Still strict where it reads: the constructor must be 0,
+/// all five core fields must exist, and each must have its type (a typed
+/// `expect`, never `utils.data_to_bool`, which would read a malformed flag as
+/// False and fail open on `deactivated`).
+pub fn decode_global_state_core(raw: Data) -> GlobalStateCore {
+  let constr = builtin.un_constr_data(raw)
+  expect builtin.fst_pair(constr) == 0
+  let core = list.take(builtin.snd_pair(constr), gs_core_field_count)
+  expect gs: GlobalStateCore = builtin.constr_data(0, core)
+  gs
+}
+
+/// `gs_datum_from_output` for the permanent scripts: authenticates the UTxO by
+/// the GlobalState NFT and decodes only the frozen core.
+pub fn gs_core_from_output(
+  gs_output: Output,
+  global_state_policy_id: ByteArray,
+) -> GlobalStateCore {
+  expect
+    quantity_of(
+      gs_output.value,
+      global_state_policy_id,
+      constants.global_state_asset_name,
+    ) == 1
+  expect InlineDatum(gs_raw) = gs_output.datum
+  decode_global_state_core(gs_raw)
+}
+
+/// Resolves a GlobalState reference input for the permanent scripts (core only).
+pub fn gs_core_from_ref_input(
+  reference_inputs: List<Input>,
+  ref_index: Int,
+  global_state_policy_id: ByteArray,
+) -> GlobalStateCore {
+  gs_core_from_output(
+    utils.safe_list_at(reference_inputs, ref_index).output,
+    global_state_policy_id,
+  )
 }
 
 /// Read the admin credential from an authenticated GlobalState reference
@@ -539,7 +587,7 @@ pub fn active_admin_from_ref_input(
   ref_index: Int,
   global_state_policy_id: ByteArray,
 ) -> ByteArray {
-  let gs = gs_datum_from_ref_input(
+  let gs = gs_core_from_ref_input(
     reference_inputs,
     ref_index,
     global_state_policy_id,
@@ -846,7 +894,7 @@ test gs_setters_round_trip() {
   }
 }
 
-// ── decode_global_state: append-only datum, lenient readers ──────────────────
+// ── decode_global_state: the v1 reader, lenient on appended fields ───────────
 
 fn layout_with_tail(tail: List<Data>) -> Data {
   let raw: Data = test_layout_datum()
@@ -859,7 +907,8 @@ test decode_global_state_reads_the_exact_layout() {
 }
 
 // A future version's appended fields are ignored, and the 15 known ones read
-// exactly as before — what keeps the non-upgradeable readers alive.
+// exactly as before — what keeps the v1 replaceable readers working when a
+// later logic only appends.
 test decode_global_state_ignores_trailing_fields() {
   decode_global_state(
     layout_with_tail([builtin.i_data(1), builtin.b_data(#"ff")]),
@@ -878,7 +927,7 @@ test decode_global_state_rejects_another_constructor() fail {
 }
 
 // Leniency covers the TAIL only: a wrong type in a known field still traps
-// (here mintable_amount, index 3, as bytes).
+// (here mintable_amount, as bytes).
 test decode_global_state_rejects_a_wrong_type_in_a_known_field() fail {
   let raw: Data = test_layout_datum()
   let fields = utils.replace_data_field(
@@ -887,4 +936,143 @@ test decode_global_state_rejects_a_wrong_type_in_a_known_field() fail {
     builtin.b_data(#"00"),
   )
   decode_global_state(builtin.constr_data(0, fields)) == test_layout_datum()
+}
+
+// ── decode_global_state_core: frozen core, free tail ─────────────────────────
+
+fn test_layout_core() -> GlobalStateCore {
+  let d = test_layout_datum()
+  GlobalStateCore {
+    global_state_script_credential_hash: d.global_state_script_credential_hash,
+    deactivated: d.deactivated,
+    admin_credential_hash: d.admin_credential_hash,
+    power_user_linked_list_policy_id: d.power_user_linked_list_policy_id,
+    minting_script_credential_hash: d.minting_script_credential_hash,
+  }
+}
+
+fn core_with_tail(tail: List<Data>) -> Data {
+  let raw: Data = test_layout_datum()
+  builtin.constr_data(
+    0,
+    list.concat(
+      list.take(builtin.unconstr_fields(raw), gs_core_field_count),
+      tail,
+    ),
+  )
+}
+
+fn core_with_field(idx: Int, value: Data) -> Data {
+  let raw: Data = test_layout_datum()
+  builtin.constr_data(
+    0,
+    utils.replace_data_field(builtin.unconstr_fields(raw), idx, value),
+  )
+}
+
+// The core is the front of the v1 layout: positions match the record.
+test decode_global_state_core_reads_the_core_of_a_v1_datum() {
+  let raw: Data = test_layout_datum()
+  decode_global_state_core(raw) == test_layout_core()
+}
+
+test decode_global_state_core_accepts_the_core_alone() {
+  decode_global_state_core(core_with_tail([])) == test_layout_core()
+}
+
+// A tail of another length and other types — what a later logic may write.
+test decode_global_state_core_ignores_a_reshaped_tail() {
+  decode_global_state_core(
+    core_with_tail(
+      [
+        builtin.b_data(#"aa"),
+        builtin.list_data([]),
+        builtin.i_data(-1),
+        builtin.constr_data(3, []),
+        builtin.map_data([]),
+      ],
+    ),
+  ) == test_layout_core()
+}
+
+test decode_global_state_core_rejects_a_short_core() fail {
+  let raw: Data = test_layout_datum()
+  decode_global_state_core(
+    builtin.constr_data(0, list.take(builtin.unconstr_fields(raw), 4)),
+  ) == test_layout_core()
+}
+
+test decode_global_state_core_rejects_another_constructor() fail {
+  let raw: Data = test_layout_datum()
+  decode_global_state_core(builtin.constr_data(1, builtin.unconstr_fields(raw))) == test_layout_core()
+}
+
+// `deactivated` must be a real Bool: an Int — or a constructor that is neither
+// False (0) nor True (1) — traps rather than reading as "not deactivated".
+test decode_global_state_core_rejects_deactivated_as_an_int() fail {
+  decode_global_state_core(core_with_field(idx_deactivated, builtin.i_data(0))) == test_layout_core()
+}
+
+test decode_global_state_core_rejects_deactivated_as_another_constructor() fail {
+  decode_global_state_core(
+    core_with_field(idx_deactivated, builtin.constr_data(2, [])),
+  ) == test_layout_core()
+}
+
+test decode_global_state_core_rejects_a_retyped_admin() fail {
+  decode_global_state_core(
+    core_with_field(idx_admin_credential_hash, builtin.i_data(1)),
+  ) == test_layout_core()
+}
+
+test decode_global_state_core_rejects_a_retyped_minting_authority() fail {
+  decode_global_state_core(
+    core_with_field(idx_minting_script_credential_hash, builtin.i_data(1)),
+  ) == test_layout_core()
+}
+
+// The core resolver is the authentication choke point of the permanent
+// scripts: no NFT, or a datum that is not inline, traps.
+fn test_core_output(value: Value, datum: Datum) -> Output {
+  Output {
+    address: Address {
+      payment_credential: Script(#"00"),
+      stake_credential: None,
+    },
+    value,
+    datum,
+    reference_script: None,
+  }
+}
+
+test gs_core_from_output_reads_an_authenticated_global_state() {
+  let raw: Data = test_layout_datum()
+  gs_core_from_output(
+    test_core_output(
+      from_asset(#"aa", constants.global_state_asset_name, 1),
+      InlineDatum(raw),
+    ),
+    #"aa",
+  ) == test_layout_core()
+}
+
+test gs_core_from_output_rejects_a_utxo_without_the_nft() fail {
+  let raw: Data = test_layout_datum()
+  gs_core_from_output(
+    test_core_output(
+      from_asset(#"bb", constants.global_state_asset_name, 1),
+      InlineDatum(raw),
+    ),
+    #"aa",
+  ) == test_layout_core()
+}
+
+test gs_core_from_output_rejects_a_datum_that_is_not_inline() fail {
+  gs_core_from_output(
+    test_core_output(
+      from_asset(#"aa", constants.global_state_asset_name, 1),
+      NoDatum,
+    ),
+    #"aa",
+  ) == test_layout_core()
 }

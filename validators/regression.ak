@@ -50,6 +50,7 @@ use denylist as v_denylist
 use denylist/absence.{verify_denylist_absence}
 use minting_authority as v_minting_authority
 use power_users as v_power_users
+use tests
 use transfer_logic_script as v_transfer
 use types/denylist.{
   AddToDenylist, Deinit as DenylistDeinit, Denylist, Init as DenylistInit,
@@ -1085,7 +1086,7 @@ test denylist_init_rejects_a_missing_nonce() fail {
 // freeze the register with the token still reporting itself active.
 //
 // THE GUARD. `gs.deactivated?` is now the first conjunct of the branch, read
-// via `gs_datum_from_ref_input` (`active_admin_from_ref_input` traps on exactly
+// via `gs_core_from_ref_input` (`active_admin_from_ref_input` traps on exactly
 // the state the branch now requires). Retire the token first, then dismantle
 // its lists.
 
@@ -1107,6 +1108,30 @@ test denylist_deinit_succeeds_for_the_admin_after_deactivation() {
       mint: from_asset(denylist_policy, constants.linked_list_root_key, -1),
       extra_signatories: [admin],
     },
+  )
+}
+
+// Frozen core: Deinit's GlobalState read keeps working when a later logic
+// reshapes every field after 0–4.
+test denylist_deinit_accepts_a_global_state_with_a_reshaped_tail() {
+  v_denylist.mint.mint(
+    gs_policy,
+    oref(99),
+    pu_script_hash,
+    DenylistDeinit { global_state_ref_input_index: 0 },
+    denylist_policy,
+    tests.with_reshaped_gs_tail(
+      Transaction {
+        ..base_tx(),
+        inputs: [dl_root_input(0)],
+        reference_inputs: [
+          gs_utxo(0, 2_000_000, gs_datum(False, True, False, False)),
+        ],
+        mint: from_asset(denylist_policy, constants.linked_list_root_key, -1),
+        extra_signatories: [admin],
+      },
+      gs_policy,
+    ),
   )
 }
 
@@ -1661,7 +1686,8 @@ test mint_rejects_one_action_covering_both_credential_forms() fail {
 // ============================================================================
 
 /// A GlobalState-shaped datum with no GlobalState NFT traps in
-/// `global_state.gs_datum_from_output`, which every resolver funnels through.
+/// `global_state.gs_datum_from_output` (the v1 resolvers) and in
+/// `global_state.gs_core_from_output` (the permanent scripts' core resolver).
 /// The NFT is what
 /// makes GlobalState authentic, and that check is genuinely load-bearing:
 /// without it a forged GlobalState could forge `transfers_paused` and the
