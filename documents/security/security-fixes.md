@@ -903,6 +903,30 @@ adding the constant perturbs nothing that does not use it.
 
 ---
 
+## 14. Registry fields 3 and 4 accepted any script (F08)
+
+At registration and on `UpgradeRegistryNode` the minting authority only checked that registry fields
+3 and 4 were *some* script credential. The base layer authorises a seizure by the field-4 script's
+withdraw-0 alone, with no owner consent, so a swapped pair or a foreign script there would have let
+anyone seize: with this deployment's transfer logic in field 4, every seizure passes on pause,
+denylist and KYC alone.
+
+**Changed (2026-10-15):** `minting_authority_validator` takes two more parameters,
+`transfer_logic_script_hash` and `third_party_transfer_logic_script_hash`, and both registration
+branches and `UpgradeRegistryNode` require fields 3 and 4 to equal exactly `Script` of them. The two
+must differ. Re-pointing either field now means `RotateMintingScript` to an authority built with the
+new hash first, then `UpgradeRegistryNode`. Only the minting authority's hash changes, so a
+deployment that has not locked upgrades can adopt the fix by rotation; nothing permanent is
+redeployed. Rotation does not re-check the node already registered: after rotating, read the live
+node and confirm field 3 is `Script` of the transfer logic and field 4 `Script` of the seizure logic;
+if not, run `UpgradeRegistryNode` before `LockUpgrades`.
+
+**Pinned by** the `registration_*` and `upgrade_*` tests in the F08 section of
+`validators/minting_authority.ak` (swapped scripts, a foreign transfer or seizure script, the
+transfer script in both fields) and
+`an_authority_built_with_one_hash_for_both_scripts_refuses_registration`; each pin was
+mutation-checked.
+
 ## Acknowledged, and deliberately not changed
 
 Findings from the 2026-08-28 audit that were reviewed and judged not to warrant a code change. They

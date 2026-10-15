@@ -91,7 +91,8 @@ pub type MintingAuthorityWithdrawRedeemer {
   /// What it does NOT constrain is our deployment's own invariants — it
   /// happily lets `global_state_cs` be re-pointed away from our GlobalState
   /// and `unfracking_logic_script` be switched on — so those are re-asserted
-  /// here.
+  /// here, and fields 3 and 4 must name exactly the transfer and seizure
+  /// scripts the authority was built with (F08).
   UpgradeRegistryNode {
     /// Index into `self.inputs` — this token's registry node, being spent.
     registry_node_input_index: Int,

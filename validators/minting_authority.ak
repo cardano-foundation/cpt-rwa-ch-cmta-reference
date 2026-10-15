@@ -68,8 +68,10 @@ use utils.{must_be_signed_by_credential}
 ///   4. THE PROTOCOL MUST NOT BE `deactivated`. Deactivation is the terminal
 ///      decommissioning switch and is meant to be absolute.
 ///   5. REGISTRATION STRUCTURE: the node must name this deployment's proxy,
-///      forbid unfracking, and pin this deployment's GlobalState — AND the
-///      node's own registry NFT must be minted in the same transaction.
+///      name exactly the transfer and seizure scripts this authority was
+///      built with (F08 — also on every `UpgradeRegistryNode`), forbid
+///      unfracking, and pin this deployment's GlobalState — AND the node's
+///      own registry NFT must be minted in the same transaction.
 ///
 ///      That last clause is what makes registration a once-only event, and
 ///      it is load-bearing, not cosmetic. Requiring merely that SOME registry
@@ -132,6 +134,24 @@ validator minting_authority_validator(
   /// signs for. Requiring the node to still live at the list's script address
   /// is what makes revocation stick.
   power_user_list_script_hash: ByteArray,
+  /// F08: the hash of `transfer_logic_script.transfer_logic_validator` that
+  /// registry field 3 must name, at registration and on every upgrade.
+  ///
+  /// CIP-113 leaves fields 3 and 4 free, and the base layer authorises a
+  /// seizure by the field-4 script's withdraw-0 alone — no owner consent, no
+  /// signature. Accepting any script there would let a swapped pair, or a
+  /// foreign script, turn seizure into something anyone can do. These two
+  /// parameters make the authority's own build the single source of truth.
+  /// Re-pointing either field therefore means rotating to an authority built
+  /// with the new hash first (`RotateMintingScript`), then
+  /// `UpgradeRegistryNode`. Not circular: neither transfer script depends on
+  /// this validator, which is compiled last.
+  transfer_logic_script_hash: ByteArray,
+  /// F08: the hash of
+  /// `third_party_transfer_logic_script.third_party_transfer_logic_validator`
+  /// that registry field 4 must name. Must differ from
+  /// `transfer_logic_script_hash`. See that parameter.
+  third_party_transfer_logic_script_hash: ByteArray,
 ) {
   withdraw(
     redeemer: MintingAuthorityWithdrawRedeemer,
@@ -228,6 +248,8 @@ validator minting_authority_validator(
           minting_logic_script_credential_hash,
           expected_issuance_policy_id,
           security_asset_name,
+          transfer_logic_script_hash,
+          third_party_transfer_logic_script_hash,
           self,
         )
         // Decode GlobalState ONCE — same shape as the MintBurn call site
@@ -278,7 +300,8 @@ validator minting_authority_validator(
           // The admin authorises the registration itself — CIP-113 binds the
           // node's key to the proxy but leaves its transfer-logic fields
           // free, so this signature is what stops a stranger registering the
-          // token with permissive rules.
+          // token, and the F08 pin holds even the admin to this deployment's
+          // transfer and seizure scripts.
           must_be_signed_by_credential(self, admin_credential_hash)?,
           // ...and the mint half passes exactly the checks every later mint
           // gets, so a genesis mint is auditable on the same terms.
@@ -350,27 +373,17 @@ validator minting_authority_validator(
         // threads `next` unchanged through an in-place field update — this
         // deployment relies on that verified base-layer guarantee rather
         // than re-checking it.
-        // Registry fields 3 and 4 must stay SCRIPT credentials — same
-        // requirement and rationale as `verify_registration_structure`'s
-        // field-3/4 checks: a `VerificationKey` here would leave
-        // `transfer_logic_script` / `third_party_transfer_logic_script`
-        // unable to ever execute as transfer logic, silently disabling the
-        // compliance gates every later transfer relies on. CIP-113 allows
-        // both fields to change on update, so nothing else stands in the
-        // way of an upgrade re-pointing them at a non-script credential.
-        expect Some(out_transfer_logic_data) = list.at(
-          out_fields,
-          constants.transfer_logic_script_registry_node_index,
-        )
-        expect out_transfer_logic: Credential = out_transfer_logic_data
-        expect Script(_) = out_transfer_logic
-
-        expect Some(out_third_party_logic_data) = list.at(
-          out_fields,
-          constants.third_party_transfer_logic_script_registry_node_index,
-        )
-        expect out_third_party_logic: Credential = out_third_party_logic_data
-        expect Script(_) = out_third_party_logic
+        // F08: the continuing node must name exactly the transfer and
+        // seizure scripts this authority was built with — CIP-113 lets both
+        // fields change on update, so this is the only place an upgrade is
+        // held to them. Re-pointing either field means rotating to an
+        // authority built with the new hash first.
+        expect
+          names_pinned_transfer_scripts(
+            out_fields,
+            transfer_logic_script_hash,
+            third_party_transfer_logic_script_hash,
+          )
 
         // Re-assert the two fields the base layer leaves mutable but this
         // deployment treats as permanent.
@@ -423,6 +436,8 @@ validator minting_authority_validator(
           minting_logic_script_credential_hash,
           expected_issuance_policy_id,
           security_asset_name,
+          transfer_logic_script_hash,
+          third_party_transfer_logic_script_hash,
           self,
         )
         let gs_datum = gs_datum_from_location(
@@ -603,6 +618,8 @@ fn verify_registration_structure(
   minting_logic_script_credential_hash: ByteArray,
   expected_issuance_policy_id: ByteArray,
   security_asset_name: ByteArray,
+  transfer_logic_script_hash: ByteArray,
+  third_party_transfer_logic_script_hash: ByteArray,
   self: Transaction,
 ) -> ByteArray {
   // DEPLOYMENT SANITY, asserted once at registration because it can never
@@ -639,26 +656,14 @@ fn verify_registration_structure(
   )
   expect quantity_of(self.mint, registry_policy_id, node_asset_name) == 1
 
-  // Registry fields 3 and 4 must be SCRIPT credentials. CIP-113 leaves both
-  // fields free-form, but this deployment's transfer-side compliance can
-  // only run if `registry_spend`'s withdraw-0 mechanism has an actual script
-  // to invoke — a `VerificationKey` here would leave
-  // `transfer_logic_script` / `third_party_transfer_logic_script` unable to
-  // ever execute as transfer logic, silently disabling the compliance gates
-  // every later transfer relies on.
-  expect Some(transfer_logic_data) = list.at(
-    node_fields,
-    constants.transfer_logic_script_registry_node_index,
-  )
-  expect transfer_logic: Credential = transfer_logic_data
-  expect Script(_) = transfer_logic
-
-  expect Some(third_party_logic_data) = list.at(
-    node_fields,
-    constants.third_party_transfer_logic_script_registry_node_index,
-  )
-  expect third_party_logic: Credential = third_party_logic_data
-  expect Script(_) = third_party_logic
+  // F08: registry fields 3 and 4 must name exactly this deployment's
+  // transfer and seizure scripts. See `names_pinned_transfer_scripts`.
+  expect
+    names_pinned_transfer_scripts(
+      node_fields,
+      transfer_logic_script_hash,
+      third_party_transfer_logic_script_hash,
+    )
 
   // Unfracking is left FORBIDDEN (`empty_vkey` is CIP-113's
   // least-permission value; no ledger transaction can carry a withdrawal
@@ -679,6 +684,38 @@ fn verify_registration_structure(
   expect node_global_state_cs == global_state_policy_id
 
   issuance_policy_id
+}
+
+/// F08: registry fields 3 and 4 name exactly the transfer and seizure scripts
+/// this authority was built with.
+///
+/// Checking only that each field is SOME script let a swapped pair, or any
+/// foreign script, through. Under the base layer a seizure is authorised by
+/// the field-4 script's withdraw-0 alone, so with this deployment's transfer
+/// logic in field 4 anyone could seize. A `VerificationKey` in either field is
+/// refused too, as before. Traps on any mismatch.
+fn names_pinned_transfer_scripts(
+  node_fields: List<Data>,
+  transfer_logic_script_hash: ByteArray,
+  third_party_transfer_logic_script_hash: ByteArray,
+) -> Bool {
+  // An authority built with one hash in both slots would pin the very swap
+  // this check exists to prevent.
+  expect transfer_logic_script_hash != third_party_transfer_logic_script_hash
+  expect Some(transfer_logic_data) = list.at(
+    node_fields,
+    constants.transfer_logic_script_registry_node_index,
+  )
+  expect transfer_logic: Credential = transfer_logic_data
+  expect Some(third_party_logic_data) = list.at(
+    node_fields,
+    constants.third_party_transfer_logic_script_registry_node_index,
+  )
+  expect third_party_logic: Credential = third_party_logic_data
+  and {
+    transfer_logic == Script(transfer_logic_script_hash),
+    third_party_logic == Script(third_party_transfer_logic_script_hash),
+  }
 }
 
 /// The mint/burn authority — ported from minting_logic_script.ak's original,
@@ -1443,6 +1480,14 @@ fn clean_dest_action() -> MintingLogicDestinationAction {
 }
 
 fn run_withdraw(redeemer: MintingAuthorityWithdrawRedeemer, tx: Transaction) {
+  // F08: the authority pins the transfer and seizure scripts it accepts in the
+  // registry. The upgrade tests model the documented procedure: the authority
+  // was first rotated to a build pinned to the NEW transfer script, and
+  // `UpgradeRegistryNode` then re-points the node to it.
+  let pinned_transfer_logic_hash = when redeemer is {
+    UpgradeRegistryNode { .. } -> test_new_transfer_logic_hash
+    _ -> test_transfer_logic_hash
+  }
   minting_authority_validator.withdraw(
     test_security_asset_name,
     test_gs_policy_id,
@@ -1452,6 +1497,8 @@ fn run_withdraw(redeemer: MintingAuthorityWithdrawRedeemer, tx: Transaction) {
     test_issuance_policy_id,
     test_denylist_script_hash,
     test_pu_script_hash,
+    pinned_transfer_logic_hash,
+    test_third_party_logic_hash,
     redeemer,
     Script(test_authority_hash),
     tx,
@@ -2801,6 +2848,8 @@ test publish_accepts_credential_registration() {
     test_issuance_policy_id,
     test_denylist_script_hash,
     test_pu_script_hash,
+    test_transfer_logic_hash,
+    test_third_party_logic_hash,
     builtin.constr_data(0, []),
     RegisterCredential {
       credential: Script(test_authority_hash),
@@ -2828,6 +2877,8 @@ test publish_rejects_credential_deregistration() {
     test_issuance_policy_id,
     test_denylist_script_hash,
     test_pu_script_hash,
+    test_transfer_logic_hash,
+    test_third_party_logic_hash,
     builtin.constr_data(0, []),
     UnregisterCredential {
       credential: Script(test_authority_hash),
@@ -2899,6 +2950,8 @@ fn run_withdraw_with_protected_security_name(
     test_issuance_policy_id,
     test_denylist_script_hash,
     test_pu_script_hash,
+    test_transfer_logic_hash,
+    test_third_party_logic_hash,
     redeemer,
     Script(test_authority_hash),
     tx,
@@ -2956,6 +3009,149 @@ test burn_rejects_an_operator_that_is_the_global_state_logic() {
       ..tx,
       inputs: [gs_input_with_logic(test_pu_credential_hash)],
       withdrawals: [Pair(Script(test_pu_credential_hash), 0)],
+    },
+  )
+}
+
+// ── F08: registry fields 3 and 4 are pinned to this authority's build ──────
+//
+// Every case below differs from its positive control only in fields 3 and 4.
+// Registration resolves through `make_register_structural_tx`, the upgrade
+// through `make_upgrade_tx`; `run_withdraw` builds the upgrade authority with
+// the NEW transfer script, as the documented upgrade procedure does.
+
+fn registry_node_naming(
+  transfer_logic: Credential,
+  third_party_logic: Credential,
+) -> Output {
+  let node = TestRegistryNode {
+    key: test_issuance_policy_id,
+    next: #"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    minting_logic_script: Script(test_proxy_hash),
+    transfer_logic_script: transfer_logic,
+    third_party_transfer_logic_script: third_party_logic,
+    unfracking_logic_script: VerificationKey(#""),
+    global_state_cs: test_gs_policy_id,
+  }
+  Output { ..make_registry_ref_input().output, datum: InlineDatum(node) }
+}
+
+fn register_naming(transfer_logic: Credential, third_party_logic: Credential) {
+  run_withdraw(
+    register_structural_redeemer(),
+    Transaction {
+      ..make_register_structural_tx(zero, [test_admin_hash]),
+      outputs: [registry_node_naming(transfer_logic, third_party_logic)],
+    },
+  )
+}
+
+fn upgrade_naming(transfer_logic: Credential, third_party_logic: Credential) {
+  run_withdraw(
+    upgrade_redeemer(),
+    make_upgrade_tx(
+      registry_node_naming(transfer_logic, third_party_logic),
+      make_gs_ref_input(),
+      [test_admin_hash],
+    ),
+  )
+}
+
+// A script hash this deployment never built.
+const test_foreign_script_hash: ByteArray =
+  #"bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22"
+
+test registration_accepts_the_pinned_transfer_and_seizure_scripts() {
+  register_naming(
+    Script(test_transfer_logic_hash),
+    Script(test_third_party_logic_hash),
+  )
+}
+
+// The swap that made seizure permissionless: the transfer logic, which checks
+// no operator, would authorise every seizure from field 4.
+test registration_rejects_swapped_transfer_and_seizure_scripts() fail {
+  register_naming(
+    Script(test_third_party_logic_hash),
+    Script(test_transfer_logic_hash),
+  )
+}
+
+test registration_rejects_a_transfer_script_the_authority_was_not_built_with() fail {
+  register_naming(
+    Script(test_foreign_script_hash),
+    Script(test_third_party_logic_hash),
+  )
+}
+
+test registration_rejects_a_seizure_script_the_authority_was_not_built_with() fail {
+  register_naming(
+    Script(test_transfer_logic_hash),
+    Script(test_foreign_script_hash),
+  )
+}
+
+test registration_rejects_the_transfer_script_as_the_seizure_script() fail {
+  register_naming(
+    Script(test_transfer_logic_hash),
+    Script(test_transfer_logic_hash),
+  )
+}
+
+test upgrade_accepts_the_pinned_transfer_and_seizure_scripts() {
+  upgrade_naming(
+    Script(test_new_transfer_logic_hash),
+    Script(test_third_party_logic_hash),
+  )
+}
+
+test upgrade_rejects_swapped_transfer_and_seizure_scripts() fail {
+  upgrade_naming(
+    Script(test_third_party_logic_hash),
+    Script(test_new_transfer_logic_hash),
+  )
+}
+
+// Re-pointing needs an authority built with the new script first: this one
+// was built with `test_new_transfer_logic_hash`, so the old script is refused.
+test upgrade_rejects_a_transfer_script_the_authority_was_not_built_with() fail {
+  upgrade_naming(
+    Script(test_transfer_logic_hash),
+    Script(test_third_party_logic_hash),
+  )
+}
+
+test upgrade_rejects_a_seizure_script_the_authority_was_not_built_with() fail {
+  upgrade_naming(
+    Script(test_new_transfer_logic_hash),
+    Script(test_foreign_script_hash),
+  )
+}
+
+// An authority built with one hash in both slots would pin the swap itself, so
+// it refuses every registration, even a node that matches its pins.
+test an_authority_built_with_one_hash_for_both_scripts_refuses_registration() fail {
+  minting_authority_validator.withdraw(
+    test_security_asset_name,
+    test_gs_policy_id,
+    test_registry_policy_id,
+    test_pu_policy_id,
+    test_proxy_hash,
+    test_issuance_policy_id,
+    test_denylist_script_hash,
+    test_pu_script_hash,
+    test_transfer_logic_hash,
+    test_transfer_logic_hash,
+    register_structural_redeemer(),
+    Script(test_authority_hash),
+    Transaction {
+      ..make_register_structural_tx(zero, [test_admin_hash]),
+      outputs: [
+        registry_node_naming(
+          Script(test_transfer_logic_hash),
+          Script(test_transfer_logic_hash),
+        ),
+      ],
     },
   )
 }

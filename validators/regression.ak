@@ -695,6 +695,8 @@ fn run_authority(
     issuance_policy,
     denylist_script_hash,
     pu_script_hash,
+    transfer_hash,
+    third_party_hash,
     redeemer,
     Script(authority_hash),
     tx,

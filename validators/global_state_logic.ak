@@ -35,19 +35,20 @@ use utils.{must_be_signed_by_credential, must_run_script_withdrawal}
 // ============================================================================
 // GlobalState logic (withdraw-0, named by datum field 0)
 // ============================================================================
-// NOTE: All values in the utxo must be preserved by this validator.
-// INVARIANT: the global_state NFT never leaves the proxy. Every branch —
-// `RotateGlobalStateScript` included — preserves
-// `global_state_output.address == own_input.output.address`; a new branch MUST
-// do the same.
+// NOTE: all non-ADA value in the UTxO is preserved; lovelace is free (§7).
+// INVARIANT: the global_state NFT never leaves the proxy. The UTxO checks —
+// full address, NFT, non-ADA value, no reference script — run ONCE, before the
+// action dispatch, so every branch (`RotateGlobalStateScript` included) is held
+// to them by construction. Keep them there; a branch cannot opt out.
 //
-// INVARIANT: non-Mint branches MUST reject concurrent security-token mints.
-// Together with the minting_logic_script input-branch check, this is what
-// makes `mintable_amount` a binding supply cap on operators: the only way to
-// mint a security token in steady state is through MintSecurity, which
-// decrements `mintable_amount`. The cap itself is admin-settable via
-// `SetMintableAmount` until `upgrades_locked` — that branch writes the field
-// but, like every non-Mint branch, cannot mint alongside the write.
+// INVARIANT: every action except MintSecurity rejects security-token mints,
+// burns and movements, also checked once before the dispatch. Together with
+// the minting_logic_script input-branch check, this is what makes
+// `mintable_amount` a binding supply cap on operators: the only way to mint a
+// security token in steady state is through MintSecurity, which decrements
+// `mintable_amount`. The cap itself is admin-settable via `SetMintableAmount`
+// until `upgrades_locked` — that branch writes the field but, like every
+// non-Mint branch, cannot mint alongside the write.
 //
 // ADMIN: admin credential hash now lives in the input datum (field
 // `admin_credential_hash`). No compile-time owner parameter. Rotation via the
@@ -172,7 +173,7 @@ validator global_state_logic(
       output_size <= bytearray.length(builtin.serialise_data(input_datum_data)),
     }
 
-    // All branches share these address/NFT preservation invariants.
+    // The GlobalState UTxO checks every action is held to (hoisted below).
     let address_preserved = global_state_output.address == own_input.output.address
     // ensuring the nft is preserved is what enforces that the same global state UTxO is carried forward after the spend.
     let nft_preserved = quantity_of(
@@ -188,17 +189,13 @@ validator global_state_logic(
     // make every transaction touching it heavier.
     let no_reference_script = global_state_output.reference_script == None
 
-    // Non-MintSecurity branches reject concurrent security mint (preserves
-    // supply-cap integrity across all non-cap-aware admin flows).
-    let no_concurrent_security_mint = quantity_of(
-      self.mint,
-      issuance_policy_id,
-      security_asset_name,
-    ) == 0
-
-    // Non-MintSecurity branches additionally forbid the security token from
-    // moving through the transaction at all — not merely from being minted or
-    // burned. Every validator that reads GlobalState as a SPENT input
+    // Every action except MintSecurity rejects a concurrent security mint or
+    // burn: that is what keeps the supply cap binding across all the
+    // non-cap-aware admin flows (on SetMintableAmount, a mint riding along on
+    // the cap write would never be decremented from it).
+    //
+    // They also forbid the security token from moving through the
+    // transaction at all — not merely from being minted or burned. Every validator that reads GlobalState as a SPENT input
     // (transfer, seizure, registry upgrade, the proxy) sees the PRE-state
     // datum, so without this guard a `can_pause` power user could
     // pause-and-transfer, or an admin could flip a KYC flag, remove a trusted
@@ -210,21 +207,46 @@ validator global_state_logic(
     // exempt: it is the one branch that legitimately mints, burns, and
     // otherwise moves the token.
     //
-    // Only the INPUTS are scanned. Every branch that composes this also
-    // composes `no_concurrent_security_mint` (nothing minted or burned under
-    // the security asset), and the ledger conserves value — every unit in an
-    // output comes from an input or from the mint field — so with no unit
-    // spent and none minted, no output can carry the token either. Scanning
-    // the outputs as well would only re-prove ledger conservation.
-    let no_security_token_spent = list.all(
-      self.inputs,
-      fn(input) {
-        quantity_of(input.output.value, issuance_policy_id, security_asset_name) == 0
-      },
-    )
+    // Only the INPUTS are scanned. Together with the mint check (nothing
+    // minted or burned under the security asset) and ledger value
+    // conservation — every unit in an output comes from an input or from the
+    // mint field — no output can carry the token either. Scanning the outputs
+    // as well would only re-prove ledger conservation.
+    //
+    // A function, so MintSecurity — the most frequent action, which never
+    // needs it — does not pay for the input scan.
+    let security_token_untouched = fn() {
+      and {
+        quantity_of(self.mint, issuance_policy_id, security_asset_name) == 0,
+        list.all(
+          self.inputs,
+          fn(input) {
+            quantity_of(
+              input.output.value,
+              issuance_policy_id,
+              security_asset_name,
+            ) == 0
+          },
+        ),
+      }
+    }
+    let is_mint_security = when redeemer.action is {
+      MintSecurity { .. } -> True
+      _ -> False
+    }
 
     and {
       datum_within_cap,
+      // The GlobalState UTxO checks, once for every action (see the header).
+      address_preserved,
+      nft_preserved,
+      value_preserved,
+      no_reference_script,
+      // Every action except MintSecurity leaves the security token alone.
+      or {
+        is_mint_security,
+        security_token_untouched(),
+      },
       when redeemer.action is {
         RotateGlobalStateScript { new_global_state_script_hash } ->
           // Both logics run in a rotation. Which side THIS run is comes from the
@@ -249,12 +271,6 @@ validator global_state_logic(
               )
             }
             and {
-              no_concurrent_security_mint,
-              no_security_token_spent,
-              address_preserved,
-              nft_preserved,
-              value_preserved,
-              no_reference_script,
               // The one-way upgrade lock closes this path too.
               !input_datum.upgrades_locked,
               must_be_signed_by_credential(
@@ -293,12 +309,6 @@ validator global_state_logic(
             // afterwards. A later version replaces this check with its own.
             and {
               new_global_state_script_hash == own_hash,
-              no_concurrent_security_mint,
-              no_security_token_spent,
-              address_preserved,
-              nft_preserved,
-              value_preserved,
-              no_reference_script,
               builtin.equals_data(
                 set_global_state_script_credential_hash(input_fields, own_hash),
                 global_state_output_datum,
@@ -329,10 +339,6 @@ validator global_state_logic(
               and {
                 //Remaining amount must NOT be negative
                 remaining_amount >= 0,
-                address_preserved,
-                nft_preserved,
-                value_preserved,
-                no_reference_script,
                 builtin.equals_data(
                   expected_output_datum,
                   global_state_output_datum,
@@ -356,12 +362,6 @@ validator global_state_logic(
                 transfers_paused,
               )
               and {
-                no_concurrent_security_mint,
-                no_security_token_spent,
-                address_preserved,
-                nft_preserved,
-                value_preserved,
-                no_reference_script,
                 // The flag must flip (F11): a no-op write would only churn the
                 // GlobalState UTxO reference and stale the admin's transactions.
                 transfers_paused != input_datum.transfers_paused,
@@ -384,12 +384,6 @@ validator global_state_logic(
                 new_security_info,
               )
               and {
-                no_concurrent_security_mint,
-                no_security_token_spent,
-                address_preserved,
-                nft_preserved,
-                value_preserved,
-                no_reference_script,
                 // Datum growth cap — see `constants.max_security_info_bytes`.
                 bytearray.length(builtin.serialise_data(new_security_info)) <= constants.max_security_info_bytes,
                 //Must be signed by the current admin (from input datum)
@@ -420,12 +414,6 @@ validator global_state_logic(
                 updated_entities,
               )
               and {
-                no_concurrent_security_mint,
-                no_security_token_spent,
-                address_preserved,
-                nft_preserved,
-                value_preserved,
-                no_reference_script,
                 must_be_signed_by_credential(
                   self,
                   input_datum.admin_credential_hash,
@@ -456,12 +444,6 @@ validator global_state_logic(
                 updated_entities,
               )
               and {
-                no_concurrent_security_mint,
-                no_security_token_spent,
-                address_preserved,
-                nft_preserved,
-                value_preserved,
-                no_reference_script,
                 has_key,
                 must_be_signed_by_credential(
                   self,
@@ -501,12 +483,6 @@ validator global_state_logic(
                 updated_entities,
               )
               and {
-                no_concurrent_security_mint,
-                no_security_token_spent,
-                address_preserved,
-                nft_preserved,
-                value_preserved,
-                no_reference_script,
                 old_exists,
                 new_clash_ok,
                 bytearray.length(new_vkey) == 32,
@@ -528,12 +504,6 @@ validator global_state_logic(
                 enabled,
               )
               and {
-                no_concurrent_security_mint,
-                no_security_token_spent,
-                address_preserved,
-                nft_preserved,
-                value_preserved,
-                no_reference_script,
                 must_be_signed_by_credential(
                   self,
                   input_datum.admin_credential_hash,
@@ -550,12 +520,6 @@ validator global_state_logic(
                 enabled,
               )
               and {
-                no_concurrent_security_mint,
-                no_security_token_spent,
-                address_preserved,
-                nft_preserved,
-                value_preserved,
-                no_reference_script,
                 must_be_signed_by_credential(
                   self,
                   input_datum.admin_credential_hash,
@@ -573,12 +537,6 @@ validator global_state_logic(
               )
               let new_root_len = bytearray.length(new_member_root_hash)
               and {
-                no_concurrent_security_mint,
-                no_security_token_spent,
-                address_preserved,
-                nft_preserved,
-                value_preserved,
-                no_reference_script,
                 // Keep the membership root well-formed: empty or a 32-byte digest;
                 // any other length makes `mpf.from_root` trap on every transfer.
                 or {
@@ -601,12 +559,6 @@ validator global_state_logic(
                 new_admin_credential_hash,
               )
               and {
-                no_concurrent_security_mint,
-                no_security_token_spent,
-                address_preserved,
-                nft_preserved,
-                value_preserved,
-                no_reference_script,
                 bytearray.length(new_admin_credential_hash) == 28,
                 // Never this logic's own hash: its withdrawal is in every
                 // GlobalState transaction and would sign for the admin.
@@ -631,12 +583,6 @@ validator global_state_logic(
                 new_minting_script_credential_hash,
               )
               and {
-                no_concurrent_security_mint,
-                no_security_token_spent,
-                address_preserved,
-                nft_preserved,
-                value_preserved,
-                no_reference_script,
                 bytearray.length(new_minting_script_credential_hash) == 28,
                 // Never this logic's own hash: MintSecurity alone would then
                 // satisfy the minting proxy, skipping every authority rule.
@@ -667,12 +613,6 @@ validator global_state_logic(
                 True,
               )
               and {
-                no_concurrent_security_mint,
-                no_security_token_spent,
-                address_preserved,
-                nft_preserved,
-                value_preserved,
-                no_reference_script,
                 // One-way: refuse to re-lock, so the action is never a silent
                 // no-op and the transition True->True cannot be used to churn the
                 // UTxO. Nothing anywhere sets this field back to False — every
@@ -695,14 +635,6 @@ validator global_state_logic(
                 new_mintable_amount,
               )
               and {
-                // Load-bearing here, not just hygiene: without it a mint could ride
-                // along on a cap write and never be decremented from the cap.
-                no_concurrent_security_mint,
-                no_security_token_spent,
-                address_preserved,
-                nft_preserved,
-                value_preserved,
-                no_reference_script,
                 new_mintable_amount >= 0,
                 // The one-way upgrade lock makes the cap final as well.
                 !input_datum.upgrades_locked,
@@ -719,12 +651,6 @@ validator global_state_logic(
             DeactivateContract -> {
               let expected_output_datum = set_deactivated(input_fields, True)
               and {
-                no_concurrent_security_mint,
-                no_security_token_spent,
-                address_preserved,
-                nft_preserved,
-                value_preserved,
-                no_reference_script,
                 //Can only deactivate from a paused state (mirrors CMTAT
                 //`deactivateContract`, which requires the contract be paused first).
                 input_datum.transfers_paused,

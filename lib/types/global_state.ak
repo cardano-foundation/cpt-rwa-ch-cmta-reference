@@ -657,9 +657,9 @@ pub type GlobalStateSpendAction {
   /// recorded on-chain as accepted at the exact moment they happen — nothing
   /// is hidden, only foreclosed one transaction later than a naive reading of
   /// "already locked/rotated/deactivated" would suggest. What none of this
-  /// reopens is token movement: that path is closed independently, by
-  /// `no_security_token_spent` in the GlobalState logic, which every
-  /// non-MintSecurity branch composes regardless of which field it touches.
+  /// reopens is token movement: that path is closed independently, by the
+  /// GlobalState logic's security-token guard, applied once before the action
+  /// dispatch to every action except MintSecurity, whichever field it touches.
   LockUpgrades
   /// One-way decommissioning switch. Sets `deactivated = True`. Requires the
   /// contract to already be paused and the admin to sign. Irreversible: no

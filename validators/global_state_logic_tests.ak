@@ -430,7 +430,7 @@ test deactivate_fails_when_output_not_marked_deactivated() {
   )
 }
 
-// ── DeactivateContract — no_security_token_spent ─────────────────────────
+// ── DeactivateContract — security-token guard ───────────────────────────
 //
 // `with_security_token_input`/`with_security_token_output` are defined below,
 // alongside the MintSecurity fixtures — Aiken resolves top-level bindings
@@ -527,9 +527,10 @@ fn mintsecurity_redeemer() -> GlobalStateSpendRedeemer {
   }
 }
 
-// ── no_security_token_spent — shared fixtures ───────────────────────────────
+// ── Security-token guard — shared fixtures ──────────────────────────────────
 //
-// Every non-MintSecurity branch composes `no_security_token_spent`. These
+// Every action except MintSecurity is held to the security-token guard
+// (`security_token_untouched`, applied once before the dispatch). These
 // helpers append one extra input, or one extra output, carrying the security
 // token to an otherwise-unmodified transaction — reused by every branch's
 // guard tests below, and by the MintSecurity positive control that proves
@@ -543,7 +544,7 @@ fn t_security_token_value() -> Value {
 }
 
 /// An extra input carrying one unit of the security token, parked in a plain
-/// wallet — proves `no_security_token_spent` rejects the token appearing
+/// wallet — proves the security-token guard rejects the token appearing
 /// as an INPUT, independent of which branch or datum is under test.
 fn t_security_token_input() -> Input {
   Input {
@@ -706,7 +707,7 @@ test live_contract_still_allows_mint() {
   )
 }
 
-/// MintSecurity is deliberately EXEMPT from `no_security_token_spent` — it
+/// MintSecurity is deliberately EXEMPT from the security-token guard — it
 /// is the one branch that legitimately mints, burns, and otherwise moves the
 /// token. On top of the ordinary mint-delta this transaction ALSO carries an
 /// unrelated security-token input and output — exactly the shape every other
@@ -900,7 +901,7 @@ test pause_fails_when_the_power_user_node_is_in_a_wallet() fail {
   )
 }
 
-// ── PauseTransfers — no_security_token_spent ─────────────────────────────
+// ── PauseTransfers — security-token guard ───────────────────────────────
 
 test pause_succeeds_when_security_token_absent_from_tx() {
   // Positive control paired with the two negatives below — same fixture as
@@ -1401,7 +1402,7 @@ test remove_trusted_entity_cannot_smuggle_another_field_change() {
   )
 }
 
-// ── RemoveTrustedEntity — no_security_token_spent ────────────────────────
+// ── RemoveTrustedEntity — security-token guard ──────────────────────────
 
 test remove_trusted_entity_succeeds_when_security_token_absent_from_tx() {
   let input_datum = t_tel_datum()
@@ -1691,7 +1692,7 @@ test set_requires_sender_kyc_cannot_smuggle_another_field_change() {
   )
 }
 
-// ── SetRequiresSenderKyc — no_security_token_spent ───────────────────────
+// ── SetRequiresSenderKyc — security-token guard ─────────────────────────
 
 test set_requires_sender_kyc_succeeds_when_security_token_absent_from_tx() {
   let input_datum = t_datum(False, False)
@@ -1883,7 +1884,7 @@ test update_member_root_hash_accepts_clearing_back_to_empty() {
   )
 }
 
-// ── UpdateMemberRootHash — no_security_token_spent ───────────────────────
+// ── UpdateMemberRootHash — security-token guard ─────────────────────────
 
 test update_member_root_hash_succeeds_when_security_token_absent_from_tx() {
   let input_datum = t_datum(False, False)

@@ -86,9 +86,12 @@ Add a power-user node with `can_mint = True` if the registration will also issue
 The admin grants the role through the power-users list. Keep a reference to the new node for mint
 transactions. A structural-only registration does not need a minter role.
 
-Insert this token's CIP-113 registry node with `key` derived from the permanent **proxy** hash,
-the applied transfer and third-party logic **script** credentials, the deployment's GlobalState
-policy ID, and the disabled unfracking credential. The admin signs. The proxy's withdraw redeemer
+Insert this token's CIP-113 registry node with `key` = the issuance policy ID derived from the
+permanent **proxy** hash (README, What the derived parameters must equal), fields 3 and 4 = exactly
+the transfer and third-party logic script credentials the minting authority was built with
+(`transfer_logic_script_hash`, `third_party_transfer_logic_script_hash`; anything else, or the two
+swapped, is rejected — F08), the deployment's GlobalState policy ID, and the disabled unfracking
+credential. The admin signs. The proxy's withdraw redeemer
 is `GlobalStateReferenced { global_state_ref_input_index }` for the usual structural-only shape;
 the authority's is:
 
@@ -314,7 +317,10 @@ a withdrawal as a signature, so such a role would be exercisable by anyone. All 
 on chain — the admin and minting authority when written, an operator wherever its role is used
 (pause, mint/burn, seizure, sanctions) — so a misconfigured role fails closed; still avoid granting one.
 
-To change transfer or third-party logic, update this token's CIP-113 registry node with
+To change transfer or third-party logic, first `RotateMintingScript` to a minting authority built
+with the new script hash (register its stake credential), because the continuing node must name
+exactly the scripts the active authority was built with (F08). Then update this token's CIP-113
+registry node with
 `UpgradeRegistryNode { registry_node_input_index, registry_node_output_index,
 global_state_location }` on the minting authority withdrawal. The admin signs. The authority
 pins the node to this issuance policy, retains this deployment's GlobalState and disabled
