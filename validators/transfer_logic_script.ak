@@ -24,7 +24,7 @@ use types/global_state.{
   gs_datum_from_location,
 }
 use types/kyc_proof.{
-  Attestation, AttestationProof, KycProof, Membership, MembershipProof,
+  Cip30Attestation, Cip30AttestationProof, KycProof, Membership, MembershipProof,
 }
 use types/transfer_logic_script.{
   TransferLogicScriptAction, TransferLogicScriptDestinationAction,
@@ -297,40 +297,57 @@ const t_dest_stake: ByteArray =
   #"0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b"
 
 // ── Genuine KYC-attestation fixtures ──────────────────────────────────────────
-// Produced by `scripts/kyc-test-vectors.mjs` (fixed seed, reproducible; same
-// key pair as `lib/kyc/verify.ak`'s `test_issuer_vkey`). Used by the
-// end-to-end positive controls below, which require an ACTUAL Ed25519
-// signature — a proof that always fails (`dummy_proof`) cannot exercise the
-// accept path.
+// The end-to-end positive controls below need an ACTUAL Ed25519 signature — a
+// proof that always fails (`dummy_proof`) cannot exercise the accept path.
 
-// Public half of the fixed-seed issuer key. Add this to a TEL to make the two
+// Public half of the fixed-seed test issuer key (same key pair as
+// `lib/kyc/verify.ak`'s `test_issuer_vkey`). Add it to a TEL to make the
 // vectors below verify.
 const t_kyc_issuer_vkey: ByteArray =
   #"03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8"
 
 // t_transfer_tx's own validity_range upper bound is PositiveInfinity, which
-// verify_attestation_proof always rejects (Finite required); the positive
+// verify_payload always rejects (Finite required); the positive
 // controls below use `t_transfer_tx_with_tel` instead, which sets a Finite
 // upper bound of t_kyc_tx_upper — strictly below the 100_000_000 ms
-// valid_until_ms baked into the payloads below.
+// valid_until_ms baked into the claims below.
 const t_kyc_tx_upper: Int = 50_000_000
 
-// Genuine attestation for t_sender_stake as a VerificationKey credential
-// (matches how `t_token_utxo` constructs the stake credential), tier User,
-// valid_until_ms = 100_000_000 (encoded at payload bytes 29-36), for
-// t_issuance_policy on network 1.
-const t_sender_kyc_payload: ByteArray =
-  #"0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a010000000005f5e100eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee0100"
+// Genuine CIP-30 parts from scripts/cip30-test-vectors.mjs. Each signs a
+// 67-byte claim for t_sender_stake / t_dest_stake as a VerificationKey
+// credential (matching how `t_token_utxo` builds the stake credential), tier
+// User, valid_until_ms = 100_000_000, for t_issuance_policy on network 1. The
+// hashed (Ledger-style) receiver proof is byte-identical to what Emurgo's
+// cardano-message-signing produces (scripts/cip30-emurgo-fixture.cjs).
+fn t_sender_cip30() -> Cip30AttestationProof {
+  Cip30AttestationProof {
+    protected_header: #"a201276761646472657373581d6027e38d0e19e3434e33fbd001d3fe04b5b76763f88acd625e0d770b43",
+    payload: #"0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a010000000005f5e100eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee0100",
+    hashed: False,
+    signature: #"f3be430bf286c18ea284134558c3caab3f01d121041063c286b245ccf3c4adcef5da4d4c6ec7e8f6543978dd90cdc57b84668fdb4345a6e26ac42839d61a1700",
+    issuer_vkey: t_kyc_issuer_vkey,
+  }
+}
 
-const t_sender_kyc_signature: ByteArray =
-  #"476dfda4292d4be32e012d3afb29fe863082af61d84a9fa9951bb6a835557acc3ba6db9685d828f10371bea53658911c3516a20907662e37c8ddc61cb2fb8a0d"
+fn t_dest_cip30() -> Cip30AttestationProof {
+  Cip30AttestationProof {
+    protected_header: #"a201276761646472657373581d6027e38d0e19e3434e33fbd001d3fe04b5b76763f88acd625e0d770b43",
+    payload: #"0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b010000000005f5e100eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee0100",
+    hashed: False,
+    signature: #"088eb18a610edf95c77503162ae1b0c182f13aa53fd4fe228eef83d80cb356a37e6f0e87e159b8e54f9ba5f514311ab1a6f4e762316d748ede075fec4ed69503",
+    issuer_vkey: t_kyc_issuer_vkey,
+  }
+}
 
-// Same, for t_dest_stake.
-const t_dest_kyc_payload: ByteArray =
-  #"0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b010000000005f5e100eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee0100"
-
-const t_dest_kyc_signature: ByteArray =
-  #"cd6a9d7957c6c9ddd3c10e99fea92d55e2ba7a391037783b19c19045c627532827cf6b7b9e668039a5d60231cc23d077ab37d58d3297299a67d8c6a0ef9b4409"
+fn t_dest_cip30_hashed() -> Cip30AttestationProof {
+  Cip30AttestationProof {
+    protected_header: #"a201276761646472657373581d6027e38d0e19e3434e33fbd001d3fe04b5b76763f88acd625e0d770b43",
+    payload: #"0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b010000000005f5e100eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee0100",
+    hashed: True,
+    signature: #"5d58da53a2e9124361f505582c475514a4ea1f83b2378137dda2280869a1eb356cfcc35019a6546894758ed1448b746760c678da75e179e36315f5a1ef6d8a03",
+    issuer_vkey: t_kyc_issuer_vkey,
+  }
+}
 
 type TRegNode {
   key: ByteArray,
@@ -473,9 +490,11 @@ fn t_sender_input(stake_hash: ByteArray, amount: Int) -> Input {
 }
 
 fn dummy_proof() -> KycProof {
-  Attestation {
-    kyc_proof: AttestationProof {
+  Cip30Attestation {
+    cip30_proof: Cip30AttestationProof {
+      protected_header: #"",
       payload: #"",
+      hashed: False,
       signature: #"",
       issuer_vkey: #"",
     },
@@ -622,16 +641,8 @@ fn t_gs_ref_input_with_tel(
   }
 }
 
-/// A KYC proof carrying a genuine Ed25519 attestation, signed by the fixed-seed
-/// issuer key whose public half is `t_kyc_issuer_vkey`.
-fn t_genuine_proof(payload: ByteArray, signature: ByteArray) -> KycProof {
-  Attestation {
-    kyc_proof: AttestationProof {
-      payload,
-      signature,
-      issuer_vkey: t_kyc_issuer_vkey,
-    },
-  }
+fn t_cip30_proof(proof: Cip30AttestationProof) -> KycProof {
+  Cip30Attestation { cip30_proof: proof }
 }
 
 fn t_source_action_with_proof(proof: KycProof) -> TransferLogicScriptAction {
@@ -654,7 +665,7 @@ fn t_dest_action_with_proof(
 /// reference input, so a genuine attestation can find its issuer, and (b)
 /// gives the transaction a FINITE validity upper bound (`t_kyc_tx_upper`) —
 /// `t_transfer_tx`'s own upper bound is PositiveInfinity, which
-/// `verify_attestation_proof` always rejects (it requires a Finite bound
+/// `verify_payload` always rejects (it requires a Finite bound
 /// no later than the attestation's `valid_until_ms`).
 fn t_transfer_tx_with_tel(
   req_sender: Bool,
@@ -855,38 +866,37 @@ test transfer_rejected_when_receiver_kyc_required_and_proof_invalid() {
 // `verify_kyc_proof` that always returns False would pass every test above
 // too. These run the FULL validator with a genuine Ed25519 attestation.
 
-test transfer_succeeds_when_sender_kyc_required_and_proof_is_genuine() {
-  let trusted_keys = t_tel_with(t_kyc_issuer_vkey)
+test transfer_succeeds_with_cip30_sender_proof() {
   let source_action = t_source_action_with_proof(
-    t_genuine_proof(t_sender_kyc_payload, t_sender_kyc_signature),
+    t_cip30_proof(t_sender_cip30()),
   )
   run_transfer(
     t_redeemer_with(source_action, t_dest_action()),
-    t_transfer_tx_with_tel(True, False, trusted_keys),
+    t_transfer_tx_with_tel(True, False, t_tel_with(t_kyc_issuer_vkey)),
   )
 }
 
-/// The receiver-side twin: `requires_receiver_kyc = True`, a genuine
-/// attestation for `t_dest_stake`, sender KYC not required.
-test transfer_succeeds_when_receiver_kyc_required_and_proof_is_genuine() {
-  let trusted_keys = t_tel_with(t_kyc_issuer_vkey)
+test transfer_succeeds_with_cip30_receiver_proof() {
+  let dest_action = t_dest_action_with_proof(t_cip30_proof(t_dest_cip30()))
+  run_transfer(
+    t_redeemer_with(t_source_action(), dest_action),
+    t_transfer_tx_with_tel(False, True, t_tel_with(t_kyc_issuer_vkey)),
+  )
+}
+
+test transfer_succeeds_with_hashed_cip30_receiver_proof() {
   let dest_action = t_dest_action_with_proof(
-    t_genuine_proof(t_dest_kyc_payload, t_dest_kyc_signature),
+    t_cip30_proof(t_dest_cip30_hashed()),
   )
   run_transfer(
     t_redeemer_with(t_source_action(), dest_action),
-    t_transfer_tx_with_tel(False, True, trusted_keys),
+    t_transfer_tx_with_tel(False, True, t_tel_with(t_kyc_issuer_vkey)),
   )
 }
 
-/// Positive-control pairing: the EXACT same genuine proof as
-/// `transfer_succeeds_when_sender_kyc_required_and_proof_is_genuine`, but the
-/// GlobalState's TEL does not contain the issuer vkey. Pins that acceptance
-/// above depends on TEL membership, not merely on the signature being
-/// well-formed.
-test transfer_rejected_when_genuine_proof_but_issuer_not_in_tel() {
+test transfer_rejects_cip30_proof_from_untrusted_issuer() {
   let source_action = t_source_action_with_proof(
-    t_genuine_proof(t_sender_kyc_payload, t_sender_kyc_signature),
+    t_cip30_proof(t_sender_cip30()),
   )
   !run_transfer(
     t_redeemer_with(source_action, t_dest_action()),
@@ -894,17 +904,11 @@ test transfer_rejected_when_genuine_proof_but_issuer_not_in_tel() {
   )
 }
 
-test transfer_rejects_swapped_genuine_attestation_proofs() {
-  let trusted_keys = t_tel_with(t_kyc_issuer_vkey)
-  let source_action = t_source_action_with_proof(
-    t_genuine_proof(t_dest_kyc_payload, t_dest_kyc_signature),
-  )
-  let dest_action = t_dest_action_with_proof(
-    t_genuine_proof(t_sender_kyc_payload, t_sender_kyc_signature),
-  )
+test transfer_rejects_swapped_cip30_holder_claims() {
+  let source_action = t_source_action_with_proof(t_cip30_proof(t_dest_cip30()))
   !run_transfer(
-    t_redeemer_with(source_action, dest_action),
-    t_transfer_tx_with_tel(True, True, trusted_keys),
+    t_redeemer_with(source_action, t_dest_action()),
+    t_transfer_tx_with_tel(True, False, t_tel_with(t_kyc_issuer_vkey)),
   )
 }
 

@@ -23,7 +23,7 @@ use types/global_state.{
   gs_datum_from_location,
 }
 use types/kyc_proof.{
-  Attestation, AttestationProof, KycProof, Membership, MembershipProof,
+  Cip30Attestation, Cip30AttestationProof, KycProof, Membership, MembershipProof,
 }
 use types/power_users.{PowerUser}
 use types/third_party_transfer_logic_script.{
@@ -489,9 +489,11 @@ fn p_seized_input() -> Input {
 }
 
 fn p_dummy_proof() -> KycProof {
-  Attestation {
-    kyc_proof: AttestationProof {
+  Cip30Attestation {
+    cip30_proof: Cip30AttestationProof {
+      protected_header: #"",
       payload: #"",
+      hashed: False,
       signature: #"",
       issuer_vkey: #"",
     },

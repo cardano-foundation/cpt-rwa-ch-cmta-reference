@@ -19,7 +19,7 @@ use types/global_state.{
   GlobalStateDatum, GlobalStateReferenced, GlobalStateSpent, decode_global_state,
   gs_datum_from_location,
 }
-use types/kyc_proof.{Attestation, AttestationProof}
+use types/kyc_proof.{Cip30Attestation, Cip30AttestationProof}
 use types/minting_authority.{
   MintBurn, MintingAuthorityWithdrawRedeemer, MintingLogicDestinationAction,
   RegisterMint, RegisterStructural, UpgradeRegistryNode,
@@ -1424,9 +1424,11 @@ fn make_withdraw_tx(
 // Structurally invalid KYC proof — only reachable when receiver KYC is
 // required, where it must make the destination check fail.
 fn dummy_proof() {
-  Attestation {
-    kyc_proof: AttestationProof {
+  Cip30Attestation {
+    cip30_proof: Cip30AttestationProof {
+      protected_header: #"",
       payload: #"",
+      hashed: False,
       signature: #"",
       issuer_vkey: #"",
     },

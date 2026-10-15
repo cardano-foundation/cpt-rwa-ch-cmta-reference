@@ -57,7 +57,7 @@ use types/denylist.{
   RemoveFromDenylist, StateTransition as DenylistStateTransition,
 }
 use types/global_state.{GlobalStateDatum, GlobalStateReferenced}
-use types/kyc_proof.{Attestation, AttestationProof, KycProof}
+use types/kyc_proof.{Cip30Attestation, Cip30AttestationProof, KycProof}
 use types/minting_authority.{
   MintBurn, MintingAuthorityWithdrawRedeemer, MintingLogicDestinationAction,
 }
@@ -633,9 +633,11 @@ fn base_tx() -> Transaction {
 }
 
 fn dummy_proof() -> KycProof {
-  Attestation {
-    kyc_proof: AttestationProof {
+  Cip30Attestation {
+    cip30_proof: Cip30AttestationProof {
+      protected_header: #"",
       payload: #"",
+      hashed: False,
       signature: #"",
       issuer_vkey: #"",
     },

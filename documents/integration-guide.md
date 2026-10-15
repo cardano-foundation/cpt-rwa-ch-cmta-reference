@@ -149,10 +149,11 @@ checked only when `requires_sender_kyc` or `requires_receiver_kyc` is true. The 
 while paused or deactivated. See the actual schemas in
 [`types/transfer_logic_script.ak`](../lib/types/transfer_logic_script.ak).
 
-### Construct an attestation proof
+### The KYC claim
 
-For a `KycProof` of type `Attestation`, an issuer whose 32-byte Ed25519 vkey is in GlobalState's
-`trusted_entity_vkeys` signs exactly this 67-byte payload:
+An attestation (`KycProof` variant `Cip30Attestation`, below) is an issuer's signature over exactly
+this 67-byte claim; the issuer's 32-byte Ed25519 vkey must be in GlobalState's
+`trusted_entity_vkeys`:
 
 ```text
 credential_hash(28) | tier(1) | valid_until_ms(8, big-endian) |
@@ -161,10 +162,9 @@ issuance_policy_id(28) | network_id(1) | credential_type(1)
 
 Use credential type `0x00` for a verification-key stake credential or `0x01` for a script stake
 credential, and a nonzero tier. The transaction validity range must have a finite upper bound no
-later than `valid_until_ms`. Put the payload, raw 64-byte Ed25519 signature and issuer vkey in
-`AttestationProof { payload, signature, issuer_vkey }`. The deterministic
-[`scripts/kyc-test-vectors.mjs`](../scripts/kyc-test-vectors.mjs) shows a Node `crypto.sign(null,
-payload, key)` construction with test data. Its fixed seed is a fixture, **not** an issuer key.
+later than `valid_until_ms`. The signature must be over the CIP-30 COSE `Sig_structure` wrapping
+the claim (next section). A raw Ed25519 signature over the bare claim is **not** accepted — that
+format was removed on 2026-10-15.
 
 The alternative `Membership` proof uses an MPF leaf with key
 `credential_type(1) | credential_hash(28)` and value
@@ -172,6 +172,79 @@ The alternative `Membership` proof uses an MPF leaf with key
 [`membership_leaf_key` and `membership_leaf_value`](../lib/kyc/verify.ak) as the encoding reference
 and publish its tree root through `UpdateMemberRootHash`. Revoking a tree leaf does not invalidate
 an independently issued attestation before that attestation expires.
+
+### Construct an attestation (CIP-30)
+
+`Cip30Attestation` lets an **already trusted issuer** sign the 67-byte claim with any CIP-30
+wallet, hardware wallets included. A backend issuer needs no wallet: it can sign the same
+`Sig_structure` bytes directly with its key (see the end of this section). The issuer's 32-byte public key must be in GlobalState's
+`trusted_entity_vkeys`; a holder signing their own claim grants nothing. The transaction builder
+never needs the issuer's private key.
+
+**Keep issuer keys dedicated to issuance.** The validator does not look at the COSE headers
+(address, algorithm, kid): the trusted key *is* the authorisation, and the claim binds holder,
+policy, network and expiry. So *any* `signData` by a trusted key over a valid claim — or, in
+hashed mode, over the BLAKE2b-224 of one — counts as an attestation. Never connect an issuer
+wallet to other dApps, and treat the tool that builds the claim as trusted: in hashed mode a
+Ledger shows only the hash, so the device cannot confirm what is being attested.
+
+Build the claim as described above, then ask the issuer's wallet to sign it:
+
+```js
+const api = await window.cardano[walletName].enable();
+// The address whose payment key (or stake key, for a reward address) IS the vkey registered in
+// trusted_entity_vkeys. Do not rely on getChangeAddress(): multi-address/HD wallets derive a
+// different key per address, and a change address can rotate — every proof would then fail as
+// "untrusted issuer".
+const addressHex = issuerAddressHex;
+const claimHex = buildKycPayload({ /* see "The KYC claim" */ });   // 67 bytes
+const { signature, key } = await api.signData(addressHex, claimHex);
+```
+
+`signature` is a hex CBOR `COSE_Sign1`, `key` a hex CBOR `COSE_Key`. Extract four parts **off
+chain** (any CBOR library):
+
+| Redeemer field | Where it comes from |
+|---|---|
+| `protected_header` | `COSE_Sign1[0]` — the bytes *inside* the protected bstr, verbatim, never re-encoded |
+| `hashed` | the unprotected map (`COSE_Sign1[1]`) entry `"hashed"`; absent means `False` |
+| `signature` | `COSE_Sign1[3]` (64 bytes) |
+| `issuer_vkey` | `COSE_Key` label `-2` (32 bytes) |
+| `payload` | **always your own 67-byte claim** — not `COSE_Sign1[2]` |
+
+`COSE_Sign1` may be wrapped in CBOR tag 18. In hashed mode (`hashed: true`, which Ledger
+requires) `COSE_Sign1[2]` holds `blake2b_224(claim)`, not the claim; check off chain that it equals
+the hash of the claim you asked to be signed, and put the claim itself in `payload`. If the wallet
+returns a detached (`nil`) payload, treat it the same way.
+
+Before submitting, check off chain that `issuer_vkey` is in `trusted_entity_vkeys`; a key mismatch
+otherwise surfaces only as a rejected transaction. None of this extraction is trusted. The validator rebuilds the COSE `Sig_structure`
+`["Signature1", protected_header, h'', claim or blake2b_224(claim)]` and verifies the issuer's
+Ed25519 signature over it, so a wrong extraction can only make the proof fail. Bounds: the protected
+header must be 1–255 bytes (wallets produce ≈ 40–60).
+
+```aiken
+Cip30Attestation {
+  cip30_proof: Cip30AttestationProof {
+    protected_header, payload, hashed, signature, issuer_vkey,
+  },
+}
+```
+
+At the Plutus Data boundary this is `Constr(1, [Constr(0, [B(protected_header), B(payload),
+Bool(hashed), B(signature), B(issuer_vkey)])])` (`Bool` is `Constr 0 []` / `Constr 1 []`;
+`Membership` is `Constr(0, …)` — the indices moved when the raw `Attestation` was removed).
+
+**Backend issuers (no wallet).** Sign the bytes the validator rebuilds,
+`["Signature1", protected_header, h'', claim]` as CBOR, with the issuer's Ed25519 key, and submit
+`hashed: False`. The protected header is not interpreted on chain beyond its length (1–255 bytes);
+a minimal standard header is `a10127` (`{1: -8}`, alg EdDSA), which keeps the proof ≈ 40 bytes
+smaller than a wallet's.
+[`scripts/cip30-test-vectors.mjs`](../scripts/cip30-test-vectors.mjs) reproducibly generates genuine
+vectors with a fixed **test-only** seed, unhashed and hashed.
+[`scripts/cip30-emurgo-fixture.cjs`](../scripts/cip30-emurgo-fixture.cjs) rebuilds the hashed
+vectors with Emurgo's `cardano-message-signing` 1.1.0 (`hash_payload()`) and yields byte-identical
+signatures — an independent check of the CIP-8 hashing and of the `Sig_structure` encoding.
 
 ## Mint, burn and forced transfer
 

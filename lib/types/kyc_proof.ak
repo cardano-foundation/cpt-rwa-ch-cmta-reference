@@ -1,10 +1,11 @@
 use aiken/merkle_patricia_forestry.{Proof} as mpf
 
-/// A KYC proof is a short-lived Ed25519 signature from a trusted issuer
-/// attesting that a specific user is KYC'd for a specific security token on a
-/// specific network, valid until a specific moment.
+/// A KYC attestation is a short-lived claim, signed by a trusted issuer through
+/// CIP-30 `signData` (see `Cip30AttestationProof`), that a specific user is
+/// KYC'd for a specific security token on a specific network, valid until a
+/// specific moment.
 ///
-/// Payload layout (exactly 67 bytes, big-endian ordering where applicable):
+/// Claim (payload) layout (exactly 67 bytes, big-endian ordering where applicable):
 ///
 ///     Bytes  0 – 27  : user_pkh          (28)  — binds proof to a specific sender
 ///     Byte      28   : user_kyc_tier     (1)   — 0x00 invalid; 0x01 User;
@@ -27,24 +28,40 @@ use aiken/merkle_patricia_forestry.{Proof} as mpf
 /// credential sharing its hash, and the holder register cannot tell the two
 /// apart — a `registerführende Stelle` identification defect.
 ///
-/// Signature: 64-byte raw Ed25519 over the payload.
 /// Issuer vkey: 32-byte raw Ed25519 vkey — directly indexes
-///   `GlobalStateDatum.trusted_entity_vkeys`.
-pub type AttestationProof {
-  payload: ByteArray,
-  signature: ByteArray,
-  issuer_vkey: ByteArray,
-}
-
+///   `GlobalStateDatum.trusted_entity_vkeys`. The signature is a 64-byte
+///   Ed25519 signature over the COSE `Sig_structure` wrapping the claim; a
+///   raw signature over the bare claim is NOT accepted (removed 2026-10-15).
 pub type MembershipProof {
   pkh: ByteArray,
   valid_until_ms: Int,
   mpf_proof: Proof,
 }
 
+/// A trusted issuer's CIP-30 `signData` result, with its parts extracted OFF
+/// chain (see the integration guide). Nothing here is trusted: the verifier
+/// rebuilds the COSE `Sig_structure` from these parts and checks the issuer's
+/// Ed25519 signature over it, so a wrong extraction can only fail closed.
+pub type Cip30AttestationProof {
+  /// The COSE_Sign1 protected header, the exact bytes inside its bstr. Not
+  /// parsed on chain — the signature covers it.
+  protected_header: ByteArray,
+  /// The 67-byte KYC claim — ALWAYS the claim, also when `hashed`.
+  payload: ByteArray,
+  /// CIP-8 `hashed` (unprotected header; e.g. Ledger): the wallet signed
+  /// `blake2b_224(payload)` instead of the claim itself.
+  hashed: Bool,
+  signature: ByteArray,
+  /// 32-byte issuer key; must be in GlobalState's `trusted_entity_vkeys`.
+  issuer_vkey: ByteArray,
+}
+
+/// Upper bound on `protected_header` (real wallets produce ~40–60 bytes).
+pub const max_protected_header_length: Int = 255
+
 pub type KycProof {
-  Attestation { kyc_proof: AttestationProof }
   Membership { membership_proof: MembershipProof }
+  Cip30Attestation { cip30_proof: Cip30AttestationProof }
 }
 
 pub const payload_length: Int = 67

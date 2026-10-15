@@ -390,15 +390,15 @@ exact order the blueprint (`plutus.json`) declares them; apply top to bottom.
 
 Five validators are withdraw-0 scripts, i.e. they run as zero-value withdrawals rather than as the
 spending or minting script of any UTxO: `global_state_logic` (every GlobalState action — the proxy
-holding the NFT requires it), `transfer_logic_validator` (~6.1 KB, every transfer),
-`third_party_transfer_logic_validator` (~6.7 KB, every seizure), `minting_authority_validator`
-(~8.4 KB, every mint and burn) and the minting proxy `minting_logic_validator` (~1.1 KB, also every
+holding the NFT requires it), `transfer_logic_validator` (~6.8 KB, every transfer),
+`third_party_transfer_logic_validator` (~7.1 KB, every seizure), `minting_authority_validator`
+(~9.3 KB, every mint and burn) and the minting proxy `minting_logic_validator` (~1.0 KB, also every
 mint and burn — the proxy's withdraw-0 is what the CIP-113 registry node invokes, and it in turn
-requires the authority's). The four large ones (`global_state_logic` is ~6.2 KB and runs in every
+requires the authority's). The four large ones (`global_state_logic` is ~6.4 KB and runs in every
 mint and burn too) must be published once as reference-script UTxOs and
 supplied via reference inputs — not inlined (a transaction is capped at 16 KiB); the proxy is small
 enough to inline but is simplest to publish alongside them. The two list `mint` validators
-(~4.7–5.2 KB) should in practice be treated the same way.
+(~5.2–5.8 KB) should in practice be treated the same way.
 
 All five withdraw-0 scripts need their **stake credential registered** on chain before the first
 transaction that names them in `withdrawals` — see step 2 of [Initialising a token](#initialising-a-token).
@@ -546,12 +546,20 @@ binding axis**.
   adds ≈ 0.10 M mem / 33 M CPU — the node is authenticated once per run of adjacent parties citing
   it; a party citing a different node pays the full authentication, ≈ 0.15 M mem / 45 M CPU. The
   dedupe check adds a small quadratic term that matters only beyond ~20 parties per side.
-* **Attestation KYC** adds ≈ 0.06 M mem / 74 M CPU per vetted party (one Ed25519 verification);
-  membership (MPF) proofs are cheaper.
+* **Attestation KYC** (a trusted issuer signs the claim through CIP-30 `signData`, including
+  Ledger's CIP-8 hashed mode) adds ≈ 0.08 M mem / 82 M CPU per vetted party: the transaction builder
+  extracts the COSE parts off chain, and the validator only rebuilds the COSE `Sig_structure` and
+  verifies one Ed25519 signature (plus one BLAKE2b-224 when hashed). Membership (MPF) proofs are
+  cheaper. A raw Ed25519 signature over the bare claim was supported until 2026-10-15 and is no
+  longer accepted; it cost ≈ 20 K mem / 7.5 M CPU and ≈ 47 bytes less per proof. An earlier
+  revision parsed the full COSE objects on chain at +3.5 KB per script and ≈ 300 K mem / 92 M CPU
+  per proof; the lean form checks everything that matters for authorisation and nothing else (see
+  the integration guide).
 * **Forced transfer** ≈ 0.60 M mem / 0.18 G CPU with one destination, ≈ 0.10 M mem / 32 M CPU per
   further destination sharing a node.
-* **Redeemer size** ≈ 32 B per party without KYC, ≈ 370 B per party with attestation proofs — the
-  16 KiB transaction limit binds near 40 attested parties.
+* **Redeemer size** ≈ 32 B per party without KYC, ≈ 420 B per party with an attestation proof
+  made by a wallet (its protected header, ≈ 45 B, names the signing address). A backend issuer that
+  signs with a minimal 3-byte header saves ≈ 40 B per proof.
 
 `aiken bench -m "transfer_logic_script.{..}" --max-size 40` scales linearly in `n` on both benches
 (`transfer_cost_by_party_count`: `n` senders + `n` destinations, denylist-only, root-only covering
@@ -565,16 +573,19 @@ node; `seizure_cost_by_destination_count`: one seized input, `n` destinations, d
 | 16 | 4,182,808 | 1,524,533,481 | 2,319,498 | 833,344,312 |
 
 > **Conservative maxima, at 25% of the budget:** ordinary transfer ≤ 13 unique parties per side
-> denylist-only, ≤ 9 per side with attestation KYC on both sides; seizure ≤ 23 destinations
+> denylist-only, ≤ 9 per side with attestation KYC on both sides (measured with the removed raw
+> format; each attestation now costs ≈ 20 K mem more, so re-measure before relying on 9); seizure ≤ 23 destinations
 > denylist-only, ≤ 16 with receiver KYC. Split larger distributions; keep parties that share a
 > covering node adjacent in the action lists — they follow input/output order.
 
 ## KYC proof formats
 
-Both proof types bind the same five things: **who** (credential hash), **which credential form**
+Both proof types (attestation and membership) bind the same five things: **who** (credential hash), **which credential form**
 (key or script), **how long** (TTL), **which token** (issuance policy ID) and **which network**.
 
-**Attestation** — a 67-byte payload, raw Ed25519-signed by a key in `trusted_entity_vkeys`:
+**Attestation** (`Cip30Attestation`) — a 67-byte claim, signed through CIP-30 `signData` (an
+Ed25519 signature over the COSE `Sig_structure` wrapping the claim, or its BLAKE2b-224 hash) by a
+key in `trusted_entity_vkeys`. A raw Ed25519 signature over the bare claim is not accepted:
 
 | Bytes | Field | Width |
 |---|---|---|
