@@ -19,7 +19,7 @@
 use aiken/builtin
 use aiken/collection/list
 use aiken/primitive/bytearray
-use cardano/address.{Address, Inline, Script, VerificationKey}
+use cardano/address.{Address, Credential, Inline, Script, VerificationKey}
 use cardano/assets.{
   PolicyId, Value, from_asset, from_lovelace, merge, quantity_of,
 }
@@ -35,7 +35,7 @@ use tests/global_state_fixtures.{
   t_security_info_len_at_cap, t_security_info_len_over_cap, t_tx, t_vkey_10,
 }
 use types/global_state.{GlobalStateDatum, TrustedEntityMetadata}
-use utils.{quantity_of_policy_id}
+use utils.{must_run_script_withdrawal, quantity_of_policy_id}
 
 // ============================================================================
 // Sanitisation helpers (used by mint validator at genesis)
@@ -157,6 +157,8 @@ fn sanitise_initial_datum(datum: GlobalStateDatum, self_mint: Value) -> Bool {
 //   proxy is unparameterised, so its hash is known before genesis with no
 //   circular dependency; the logic it delegates to is named by datum field 0.
 // - The initial datum is well-formed (basic field checks + trusted entity vkey list is sorted and has no duplicates + power user ll and denylist ll roots are minted).
+// - The GlobalState logic named by datum field 0 runs in this transaction (its
+//   withdraw-0), so a field 0 that cannot run never lands.
 // - The serialised initial datum fits `max_global_state_datum_bytes` (F09).
 // The stake part of the address is left free; choose it deliberately — every
 // logic action preserves the full address afterwards, so it is permanent.
@@ -202,9 +204,20 @@ validator global_state_mint_validator(
       output_parameters.address.payment_credential == Script(
         global_state_proxy_hash,
       ),
-      // The proxy refuses to delegate to itself anyway; refusing it here keeps
-      // a genesis that could never be spent from landing at all.
+      // The proxy refuses to delegate to itself anyway; refusing it here is
+      // clearer than a genesis whose first spend fails.
       output_datum.global_state_script_credential_hash != global_state_proxy_hash,
+      // The logic field 0 names must RUN here, as it will on every later
+      // action: a typo, an unregistered stake credential or a build for
+      // another GlobalState policy fails genesis instead of leaving a
+      // GlobalState nothing can ever spend (rotation itself needs the current
+      // logic to run). This proves the script runs, not that it is the right
+      // one: re-derive its hash from source and every parameter before signing
+      // genesis.
+      must_run_script_withdrawal(
+        self,
+        output_datum.global_state_script_credential_hash,
+      ),
       //Initial datum is well-formed (sort, no duplicates, correct field widths,
       //LL root NFTs also minted in this tx).
       sanitise_initial_datum(output_datum, self.mint),
@@ -459,6 +472,8 @@ fn t_mint_tx(
     inputs,
     outputs,
     mint,
+    // The logic the genesis datum names (field 0) runs, as genesis requires.
+    withdrawals: [Pair(Script(t_gs_logic), 0)],
   }
 }
 
@@ -635,6 +650,23 @@ test global_state_mint_fails_when_field_0_is_the_proxy() {
   )
 }
 
+// The proxy check alone: field 0's withdrawal, which genesis requires, is
+// present, so only the distinctness from the proxy refuses this datum.
+test global_state_mint_fails_when_field_0_is_the_proxy_even_if_it_runs() {
+  let mint = merge(
+    from_asset(t_gs_policy, constants.global_state_asset_name, 1),
+    sanitise_mint(),
+  )
+  let output = t_mint_output(rotated(sanitise_datum(#"", 1), t_gs_script_hash))
+  !run_mint(
+    t_gs_policy,
+    Transaction {
+      ..t_mint_tx([t_nonce_input()], [output], mint),
+      withdrawals: [Pair(Script(t_gs_script_hash), 0)],
+    },
+  )
+}
+
 test sanitise_rejects_a_short_global_state_logic() {
   !sanitise_initial_datum(
     rotated(sanitise_datum(#"", 1), #"9a9a"),
@@ -684,4 +716,31 @@ test datum_cap_genesis_accepts_a_datum_at_the_cap() {
 
 test datum_cap_genesis_rejects_a_datum_over_the_cap() {
   !genesis_capped(-1)
+}
+
+// ── Genesis: the field-0 logic must run ──────────────────────────────────────
+// Positive control: `global_state_mint_succeeds_with_nonce_and_sanitised_datum`,
+// which differs from these only in its withdrawals.
+
+fn genesis_withdrawing(withdrawals: Pairs<Credential, Int>) -> Bool {
+  let datum = sanitise_datum(#"", 1)
+  let mint = merge(
+    from_asset(t_gs_policy, constants.global_state_asset_name, 1),
+    sanitise_mint(),
+  )
+  run_mint(
+    t_gs_policy,
+    Transaction {
+      ..t_mint_tx([t_nonce_input()], [t_mint_output(datum)], mint),
+      withdrawals,
+    },
+  )
+}
+
+test global_state_mint_fails_without_the_global_state_logic_withdrawal() {
+  !genesis_withdrawing([])
+}
+
+test global_state_mint_fails_when_only_another_script_withdraws() {
+  !genesis_withdrawing([Pair(Script(t_new_gs_logic), 0)])
 }

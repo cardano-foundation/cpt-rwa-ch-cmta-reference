@@ -54,7 +54,8 @@ fn power_user_from_refs(
   )
   // Never the GlobalState logic named in field 0: its withdrawal would sign
   // for the operator. Today it cannot appear here — it needs GlobalState
-  // SPENT, and this reads GlobalState as a reference input, which the ledger
+  // SPENT (or, once, minted at genesis, before any GlobalState exists to
+  // read), and this reads GlobalState as a reference input, which the ledger
   // keeps disjoint from the inputs — but that is a ledger rule, not ours.
   expect power_user_credential_hash != gs.global_state_script_credential_hash
   (power_user_credential_hash, power_user_data)

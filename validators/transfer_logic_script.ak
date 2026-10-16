@@ -313,12 +313,12 @@ const t_kyc_issuer_vkey: ByteArray =
 // valid_until_ms baked into the claims below.
 const t_kyc_tx_upper: Int = 50_000_000
 
-// Genuine CIP-30 parts from scripts/cip30-test-vectors.mjs. Each signs a
+// Genuine CIP-30 parts, generated off-repository with a public TEST seed. Each signs a
 // 67-byte claim for t_sender_stake / t_dest_stake as a VerificationKey
 // credential (matching how `t_token_utxo` builds the stake credential), tier
 // User, valid_until_ms = 100_000_000, for t_issuance_policy on network 1. The
-// hashed (Ledger-style) receiver proof is byte-identical to what Emurgo's
-// cardano-message-signing produces (scripts/cip30-emurgo-fixture.cjs).
+// hashed (Ledger-style) receiver proof was cross-checked against Emurgo's
+// cardano-message-signing when generated: byte-identical.
 fn t_sender_cip30() -> Cip30AttestationProof {
   Cip30AttestationProof {
     protected_header: #"a201276761646472657373581d6027e38d0e19e3434e33fbd001d3fe04b5b76763f88acd625e0d770b43",

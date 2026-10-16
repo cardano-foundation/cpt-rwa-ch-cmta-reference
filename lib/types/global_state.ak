@@ -669,9 +669,9 @@ pub type GlobalStateSpendAction {
   /// mint/burn (MintSecurity can no longer run).
   DeactivateContract
   /// Sets `mintable_amount` to an ABSOLUTE value. Admin-signed only, and
-  /// closed by `LockUpgrades`. The value must lie in
-  /// `[0, constants.max_mintable_amount]` — that bound limits what this
-  /// action writes, not the field (burns may still lift it higher).
+  /// closed by `LockUpgrades`. Any non-negative value: there is no upper
+  /// bound, so off-chain readers must decode it as an arbitrary-precision
+  /// integer.
   ///
   /// The field is remaining headroom, not total supply: setting it below the
   /// supply already minted is allowed and simply means "no further minting".
@@ -692,12 +692,14 @@ pub type GlobalStateSpendAction {
   /// Runs on BOTH logics in one transaction. The current one (the input's
   /// field 0) checks the admin signature, the one-way lock, credential
   /// distinctness, that the output still decodes for the frozen readers with
-  /// their fields untouched, and that the new logic's withdraw-0 is present.
-  /// The new one (the output's field 0) runs because the proxy-to-be requires
-  /// nothing yet — the current logic demands it — and checks the datum it is
-  /// handed is one it can govern. That withdrawal is the anti-brick proof: a
-  /// hash whose script nobody can produce, or whose stake credential is not
-  /// registered, cannot run, so the rotation cannot land.
+  /// their fields untouched, and that the new logic runs with this same
+  /// redeemer. The new one (the output's field 0) runs because the current
+  /// logic demands it, and checks the datum it is handed is one it can govern.
+  /// That run rules out a hash whose script nobody can produce, an
+  /// unregistered stake credential, and a script that cannot decode a
+  /// GlobalState rotation — but not a script that ignores its redeemer, so the
+  /// new hash must still be re-derived from source and every parameter before
+  /// signing.
   ///
   /// Admin-signed and closed by `LockUpgrades`, like `RotateMintingScript`, and
   /// with the same trust: until the lock, the admin chooses the code. Rotating
@@ -707,6 +709,10 @@ pub type GlobalStateSpendAction {
   RotateGlobalStateScript { new_global_state_script_hash: ByteArray }
 }
 
+/// The redeemer of every `global_state_logic` withdraw-0. A rotation passes
+/// the SAME value to the current and the new logic — the current one compares
+/// them, index included. At genesis only `global_state_output_index` is read
+/// (it names the GlobalState output); the action is ignored.
 pub type GlobalStateSpendRedeemer {
   global_state_output_index: Int,
   action: GlobalStateSpendAction,

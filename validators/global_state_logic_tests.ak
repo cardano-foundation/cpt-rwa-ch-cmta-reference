@@ -10,9 +10,12 @@ use aiken/collection/pairs
 use aiken/primitive/bytearray
 use aiken_design_patterns/linked_list.{Element, Node}
 use cardano/address.{Address, Credential, Script, VerificationKey}
-use cardano/assets.{Value, from_asset, from_lovelace, merge}
+use cardano/assets.{Value, from_asset, from_lovelace, merge, zero}
 use cardano/certificate.{RegisterCredential, UnregisterCredential}
-use cardano/transaction.{InlineDatum, Input, Mint, NoDatum, Output, Transaction}
+use cardano/transaction.{
+  InlineDatum, Input, Mint, NoDatum, Output, ScriptPurpose, Transaction,
+  Withdraw,
+}
 use constants
 use global_state_logic as v_logic
 use global_state_proxy as v_proxy
@@ -2336,6 +2339,13 @@ fn both_withdrawals() -> Pairs<Credential, Int> {
   [Pair(Script(t_gs_logic), 0), Pair(Script(t_new_gs_logic), 0)]
 }
 
+// Both logics run with the same rotation redeemer, as the outgoing side
+// requires.
+fn rotation_redeemers(new: ByteArray) -> Pairs<ScriptPurpose, Data> {
+  let r: Data = rotate_gs_redeemer(new)
+  [Pair(Withdraw(Script(t_gs_logic)), r), Pair(Withdraw(Script(new)), r)]
+}
+
 fn t_rotate_tx_from(
   input_datum: GlobalStateDatum,
   output_datum: GlobalStateDatum,
@@ -2344,6 +2354,7 @@ fn t_rotate_tx_from(
   Transaction {
     ..t_tx(input_datum, output_datum, signatories),
     withdrawals: both_withdrawals(),
+    redeemers: rotation_redeemers(t_new_gs_logic),
   }
 }
 
@@ -2488,6 +2499,46 @@ test rotate_gs_logic_fails_on_a_short_hash() {
     withdrawals: [Pair(Script(t_gs_logic), 0), Pair(Script(#"2b2b"), 0)],
   }
   !outgoing(#"2b2b", tx)
+}
+
+// The four guards above, each isolated: the target's withdrawal is present and
+// it runs with the same rotation redeemer, so the redeemer binding passes and
+// the guard under test is the only check that fails.
+fn t_consistent_rotate_tx(new: ByteArray) -> Transaction {
+  Transaction {
+    ..t_rotate_tx(rotated(t_datum(False, False), new)),
+    withdrawals: [Pair(Script(t_gs_logic), 0), Pair(Script(new), 0)],
+    redeemers: rotation_redeemers(new),
+  }
+}
+
+// Control: the fixture is a valid rotation when the target is.
+test rotate_gs_logic_succeeds_with_the_consistent_fixture() {
+  outgoing(t_new_gs_logic, t_consistent_rotate_tx(t_new_gs_logic))
+}
+
+test rotate_to_the_current_logic_fails_with_its_own_redeemer() {
+  let r: Data = rotate_gs_redeemer(t_gs_logic)
+  let tx = Transaction {
+    ..t_rotate_tx(
+      GlobalStateDatum { ..t_datum(False, False), mintable_amount: 999_999_999 },
+    ),
+    withdrawals: [Pair(Script(t_gs_logic), 0)],
+    redeemers: [Pair(Withdraw(Script(t_gs_logic)), r)],
+  }
+  !outgoing(t_gs_logic, tx)
+}
+
+test rotate_gs_logic_fails_to_the_minting_script_with_its_redeemer() {
+  !outgoing(t_minting_script, t_consistent_rotate_tx(t_minting_script))
+}
+
+test rotate_gs_logic_fails_to_the_admin_with_its_redeemer() {
+  !outgoing(t_admin, t_consistent_rotate_tx(t_admin))
+}
+
+test rotate_gs_logic_fails_on_a_short_hash_with_its_redeemer() {
+  !outgoing(#"2b2b", t_consistent_rotate_tx(#"2b2b"))
 }
 
 test rotate_gs_logic_fails_when_field_0_is_not_the_named_logic() {
@@ -3141,5 +3192,123 @@ test rotate_gs_logic_fails_when_a_core_field_is_retyped() fail {
       t_rotate_tx(t_rotated_datum()),
       builtin.constr_data(0, fields),
     ),
+  )
+}
+
+// ── Rotation: the new logic must run with the rotation redeemer ──────────────
+// Positive control: `rotate_gs_logic_succeeds_when_admin_signs`. A script that
+// cannot decode a GlobalState rotation (a mis-pasted withdraw-0) is refused.
+
+test rotate_gs_logic_fails_when_the_new_logic_runs_with_another_redeemer() {
+  let other: Data = deactivate_redeemer()
+  !outgoing(
+    t_new_gs_logic,
+    Transaction {
+      ..t_rotate_tx(t_rotated_datum()),
+      redeemers: [Pair(Withdraw(Script(t_new_gs_logic)), other)],
+    },
+  )
+}
+
+test rotate_gs_logic_fails_when_the_new_logic_redeemer_names_another_logic() {
+  !outgoing(
+    t_new_gs_logic,
+    Transaction {
+      ..t_rotate_tx(t_rotated_datum()),
+      redeemers: [
+        Pair(
+          Withdraw(Script(t_new_gs_logic)),
+          {
+            let r: Data = rotate_gs_redeemer(t_gs_logic)
+            r
+          },
+        ),
+      ],
+    },
+  )
+}
+
+test rotate_gs_logic_fails_without_a_redeemer_for_the_new_logic() {
+  !outgoing(
+    t_new_gs_logic,
+    Transaction { ..t_rotate_tx(t_rotated_datum()), redeemers: [] },
+  )
+}
+
+// ── Genesis: the logic named by field 0 runs once, as the NFT is minted ──────
+
+fn t_genesis_tx(output: Output) -> Transaction {
+  Transaction {
+    ..t_tx(t_datum(False, False), t_datum(False, False), []),
+    inputs: [],
+    outputs: [output],
+    mint: from_asset(t_gs_policy, constants.global_state_asset_name, 1),
+    withdrawals: [Pair(Script(t_gs_logic), 0)],
+  }
+}
+
+test logic_accepts_the_genesis_that_names_it() {
+  run_logic(
+    t_gs_logic,
+    deactivate_redeemer(),
+    t_genesis_tx(t_output(t_datum(False, False))),
+  )
+}
+
+// A build applied with another GlobalState policy id does not see the NFT this
+// genesis mints: it finds no GlobalState input and traps, so genesis fails.
+test logic_built_for_another_global_state_policy_fails_genesis() fail {
+  v_logic.global_state_logic.withdraw(
+    t_sec_name,
+    t_issuance_policy,
+    #"c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+    t_pu_script_hash,
+    t_max_datum_bytes,
+    deactivate_redeemer(),
+    Script(t_gs_logic),
+    t_genesis_tx(t_output(t_datum(False, False))),
+  )
+}
+
+test logic_genesis_rejects_a_datum_naming_another_logic() {
+  !run_logic(
+    t_new_gs_logic,
+    deactivate_redeemer(),
+    t_genesis_tx(t_output(t_datum(False, False))),
+  )
+}
+
+// The mint's cap and the logic's cap must both accept the genesis datum.
+test logic_genesis_rejects_a_datum_over_its_own_cap() {
+  let datum = t_datum(False, False)
+  !run_logic_capped(
+    t_datum_size(datum) - 1,
+    deactivate_redeemer(),
+    t_genesis_tx(t_output(datum)),
+  )
+}
+
+test logic_genesis_rejects_an_output_without_the_nft() {
+  let plain = Output {
+    ..t_output(t_datum(False, False)),
+    value: from_lovelace(2_000_000),
+  }
+  !run_logic(
+    t_gs_logic,
+    deactivate_redeemer(),
+    Transaction {
+      ..t_genesis_tx(t_output(t_datum(False, False))),
+      outputs: [plain, t_output(t_datum(False, False))],
+    },
+  )
+}
+
+// Without the NFT being minted the genesis branch is unreachable: with no
+// GlobalState input, this logic's withdrawal fails as before.
+test logic_without_global_state_or_genesis_fails() fail {
+  run_logic(
+    t_gs_logic,
+    deactivate_redeemer(),
+    Transaction { ..t_genesis_tx(t_output(t_datum(False, False))), mint: zero },
   )
 }

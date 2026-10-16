@@ -34,6 +34,17 @@ reference inputs or other witnesses. In particular, an index into `inputs` is no
 
 ## Bootstrap a token
 
+### 0. Before genesis
+
+Register the applied stake credential of `global_state_logic` (its `publish` handler accepts
+`RegisterCredential`): the genesis transaction runs its withdraw-0, and a withdrawal from an
+unregistered credential fails at ledger phase 1. Publish `global_state_logic` and both list `mint`
+validators as reference-script UTxOs too. Genesis runs those three and the GlobalState mint,
+≈ 19.3 KB of scripts, so they cannot all be inlined under the 16 KiB transaction limit. No
+transaction before genesis may spend one of the three reserved one-shot inputs, so exclude them
+from coin selection: their output references are baked into the mint parameters, and spending one
+means choosing a new input and re-applying every parameter that depends on it.
+
 ### 1. Mint GlobalState and both list roots together
 
 Spend the three reserved inputs in **one transaction**. Mint exactly one GlobalState NFT under
@@ -60,7 +71,13 @@ sitting exactly at it refuses even a burn that adds a byte to `mintable_amount`,
 shrinks it. Output each root at its corresponding
 list spend validator address. The list mint validators cannot verify those destination addresses,
 and nothing on chain can bind field 0 to the compiled logic hash, so compare the applied hashes,
-field 0 and output addresses **before signing**. Each list's `Init` rejects a GlobalState output of
+field 0 and output addresses **before signing**. The GlobalState mint does require the logic field
+0 names to run: add its withdrawal, with a `GlobalStateSpendRedeemer` whose
+`global_state_output_index` points at the GlobalState output (the action is ignored at genesis), so
+its stake credential must be registered first (§0). That proves the script runs and that its own
+`max_global_state_datum_bytes` accepts the genesis datum, not that it is the right script: rebuild
+`global_state_logic` from source at a pinned commit with every parameter and compare its hash with
+field 0 before signing. Each list's `Init` rejects a GlobalState output of
 this same transaction that names another list (`power_user_linked_list_policy_id` /
 `denylist_linked_list_policy_id`). That catches swapped ids and any genesis that initialises the
 real lists, but not a datum naming some other policy that mints in the transaction while the real
@@ -69,11 +86,10 @@ are distinct and equal the compiled list mint hashes. The datum's
 `minting_script_credential_hash` must identify the intended current minting authority, not the
 permanent proxy.
 
-### 2. Register the five withdrawal credentials
+### 2. Register the other four withdrawal credentials
 
-Register the applied stake credential of `global_state_logic` before the first GlobalState action
-(its hash is known before genesis, so registering it first is simplest). Then register the
-applied stake credentials for `minting_logic_validator` (proxy),
+With `global_state_logic` registered in §0, register the applied stake credentials for
+`minting_logic_validator` (proxy),
 `minting_authority_validator`, `transfer_logic_validator` and
 `third_party_transfer_logic_validator`. The first two **must** be registered before the CIP-113
 registry insert, because registration runs both withdraw-0 scripts. The latter two must be
@@ -243,11 +259,11 @@ Bool(hashed), B(signature), B(issuer_vkey)])])` (`Bool` is `Constr 0 []` / `Cons
 `hashed: False`. The protected header is not interpreted on chain beyond its length (1–255 bytes);
 a minimal standard header is `a10127` (`{1: -8}`, alg EdDSA), which keeps the proof ≈ 40 bytes
 smaller than a wallet's.
-[`scripts/cip30-test-vectors.mjs`](../scripts/cip30-test-vectors.mjs) reproducibly generates genuine
-vectors with a fixed **test-only** seed, unhashed and hashed.
-[`scripts/cip30-emurgo-fixture.cjs`](../scripts/cip30-emurgo-fixture.cjs) rebuilds the hashed
-vectors with Emurgo's `cardano-message-signing` 1.1.0 (`hash_payload()`) and yields byte-identical
-signatures — an independent check of the CIP-8 hashing and of the `Sig_structure` encoding.
+The genuine vectors in the test suites were generated off-repository with a fixed **test-only**
+seed, unhashed and hashed; the hashed ones were cross-checked against Emurgo's
+`cardano-message-signing` 1.1.0 (`hash_payload()`), which produced byte-identical signatures — an
+independent check of the CIP-8 hashing and of the `Sig_structure` encoding. To produce vectors of
+your own, sign the `Sig_structure` above with any Ed25519 library.
 
 ## Mint, burn and forced transfer
 
@@ -338,16 +354,21 @@ locate GlobalState by the NFT, never by address.
 To adjust the supply cap, spend GlobalState with `GlobalStateSpendRedeemer {
 global_state_output_index, action: SetMintableAmount { new_mintable_amount } }` (constructor
 index 13), signed by the admin. The continuing output must equal the input datum with only
-`mintable_amount` replaced by `new_mintable_amount`, which must lie in `[0, 2^63 − 1]`. The value
+`mintable_amount` replaced by `new_mintable_amount`, which must be non-negative; there is no upper
+bound, so decode it as an arbitrary-precision integer. The value
 is absolute remaining headroom, not a delta and not total supply. The transaction must not mint,
 burn or spend the security token, so a raise followed by a mint takes two transactions.
 
-To replace the GlobalState logic, apply and verify the new `global_state_logic` build against
-the blueprint, register its stake credential in an **earlier** transaction (registering and
-withdrawing in one transaction does not work), and dry-run the rotation, one `MintSecurity` and a
-rotation back on an emulator or preprod. Then spend GlobalState with `RotateGlobalStateScript {
-new_global_state_script_hash }` (constructor index 14) as the redeemer of **both** withdrawals —
-the current logic (old field 0) and the new one — signed by the admin. The continuing output stays at
+To replace the GlobalState logic, rebuild the new `global_state_logic` from source at a pinned
+commit with every parameter and check that its hash equals the `new_global_state_script_hash` you
+will sign — on chain, the current logic proves only that the new script runs with the rotation
+redeemer, not that it is a correct GlobalState logic. Register its stake credential in an
+**earlier** transaction (registering and withdrawing in one transaction does not work), and dry-run
+the rotation, one `MintSecurity` and a rotation back on an emulator or preprod. Then spend
+GlobalState, signed by the admin, with one `GlobalStateSpendRedeemer { global_state_output_index,
+action: RotateGlobalStateScript { new_global_state_script_hash } }` (action constructor index 14)
+as the redeemer of **both** withdrawals, the current logic's (old field 0) and the new one's: the
+current logic requires the two to be identical, index included. The continuing output stays at
 the proxy with the same non-ADA value; its datum has field 0 set to the new hash. The current logic
 requires the frozen core (fields 0–4: logic hash, `deactivated`, admin, power-users list policy,
 minting-authority hash) to still decode, with constructor 0, and fields 1–4 to be unchanged; the

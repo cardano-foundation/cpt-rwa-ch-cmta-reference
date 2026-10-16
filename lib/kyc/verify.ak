@@ -308,9 +308,8 @@ const test_security_policy_id: ByteArray =
 
 // 32-byte Ed25519 verification key representing the trusted issuer. This is
 // a GENUINE key, not a placeholder: it is the public half of the fixed-seed
-// test key pair (originally derived by the removed
-// `scripts/kyc-test-vectors.mjs`). The CIP-30 vectors below are genuine
-// signatures from this key.
+// test key pair. The CIP-30 vectors below are genuine signatures from this
+// key.
 const test_issuer_vkey: ByteArray =
   #"03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8"
 
@@ -960,11 +959,11 @@ test kyc_proof_routes_membership_variant_and_accepts_a_genuine_proof() {
   )
 }
 
-// Genuine CIP-30 parts from scripts/cip30-test-vectors.mjs (public TEST seed).
-// The hashed (Ledger-style) vectors are independently confirmed: Emurgo's
-// cardano-message-signing 1.1.0 (`hash_payload()` + its own Sig_structure,
-// scripts/cip30-emurgo-fixture.cjs) produces BYTE-IDENTICAL signatures —
-// Ed25519 is deterministic, so it built exactly the same signed bytes.
+// Genuine CIP-30 parts, generated off-repository with a public TEST seed. The
+// hashed (Ledger-style) vectors were cross-checked when generated: Emurgo's
+// cardano-message-signing 1.1.0 (`hash_payload()` + its own Sig_structure)
+// produced BYTE-IDENTICAL signatures — Ed25519 is deterministic, so it built
+// exactly the same signed bytes.
 
 fn run_cip30(proof: KycProof) -> Bool {
   verify_kyc_proof(
