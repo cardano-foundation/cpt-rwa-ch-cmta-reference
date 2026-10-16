@@ -50,13 +50,14 @@ use denylist as v_denylist
 use denylist/absence.{verify_denylist_absence}
 use minting_authority as v_minting_authority
 use power_users as v_power_users
+use tests
 use transfer_logic_script as v_transfer
 use types/denylist.{
   AddToDenylist, Deinit as DenylistDeinit, Denylist, Init as DenylistInit,
   RemoveFromDenylist, StateTransition as DenylistStateTransition,
 }
 use types/global_state.{GlobalStateDatum, GlobalStateReferenced}
-use types/kyc_proof.{Attestation, AttestationProof, KycProof}
+use types/kyc_proof.{Cip30Attestation, Cip30AttestationProof, KycProof}
 use types/minting_authority.{
   MintBurn, MintingAuthorityWithdrawRedeemer, MintingLogicDestinationAction,
 }
@@ -230,6 +231,7 @@ fn gs_datum(
   req_receiver: Bool,
 ) -> GlobalStateDatum {
   GlobalStateDatum {
+    global_state_script_credential_hash: #"9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a",
     transfers_paused: paused,
     deactivated,
     mintable_amount: 1_000_000_000,
@@ -631,9 +633,11 @@ fn base_tx() -> Transaction {
 }
 
 fn dummy_proof() -> KycProof {
-  Attestation {
-    kyc_proof: AttestationProof {
+  Cip30Attestation {
+    cip30_proof: Cip30AttestationProof {
+      protected_header: #"",
       payload: #"",
+      hashed: False,
       signature: #"",
       issuer_vkey: #"",
     },
@@ -691,6 +695,8 @@ fn run_authority(
     issuance_policy,
     denylist_script_hash,
     pu_script_hash,
+    transfer_hash,
+    third_party_hash,
     redeemer,
     Script(authority_hash),
     tx,
@@ -1041,7 +1047,10 @@ test denylist_init_succeeds_on_the_nonce_utxo() {
       ..base_tx(),
       inputs: [nonce_input(50)],
       mint: from_asset(denylist_policy, constants.linked_list_root_key, 1),
-      outputs: [dl_root_output(None)],
+      outputs: [
+        dl_root_output(None),
+        gs_output(2_000_000, gs_datum(False, False, False, False)),
+      ],
     },
   )
 }
@@ -1060,7 +1069,10 @@ test denylist_init_rejects_a_missing_nonce() fail {
       ..base_tx(),
       inputs: [],
       mint: from_asset(denylist_policy, constants.linked_list_root_key, 1),
-      outputs: [dl_root_output(None)],
+      outputs: [
+        dl_root_output(None),
+        gs_output(2_000_000, gs_datum(False, False, False, False)),
+      ],
     },
   )
 }
@@ -1078,7 +1090,7 @@ test denylist_init_rejects_a_missing_nonce() fail {
 // freeze the register with the token still reporting itself active.
 //
 // THE GUARD. `gs.deactivated?` is now the first conjunct of the branch, read
-// via `gs_datum_from_ref_input` (`active_admin_from_ref_input` traps on exactly
+// via `gs_core_from_ref_input` (`active_admin_from_ref_input` traps on exactly
 // the state the branch now requires). Retire the token first, then dismantle
 // its lists.
 
@@ -1100,6 +1112,30 @@ test denylist_deinit_succeeds_for_the_admin_after_deactivation() {
       mint: from_asset(denylist_policy, constants.linked_list_root_key, -1),
       extra_signatories: [admin],
     },
+  )
+}
+
+// Frozen core: Deinit's GlobalState read keeps working when a later logic
+// reshapes every field after 0–4.
+test denylist_deinit_accepts_a_global_state_with_a_reshaped_tail() {
+  v_denylist.mint.mint(
+    gs_policy,
+    oref(99),
+    pu_script_hash,
+    DenylistDeinit { global_state_ref_input_index: 0 },
+    denylist_policy,
+    tests.with_reshaped_gs_tail(
+      Transaction {
+        ..base_tx(),
+        inputs: [dl_root_input(0)],
+        reference_inputs: [
+          gs_utxo(0, 2_000_000, gs_datum(False, True, False, False)),
+        ],
+        mint: from_asset(denylist_policy, constants.linked_list_root_key, -1),
+        extra_signatories: [admin],
+      },
+      gs_policy,
+    ),
   )
 }
 
@@ -1654,7 +1690,8 @@ test mint_rejects_one_action_covering_both_credential_forms() fail {
 // ============================================================================
 
 /// A GlobalState-shaped datum with no GlobalState NFT traps in
-/// `global_state.gs_datum_from_output`, which every resolver funnels through.
+/// `global_state.gs_datum_from_output` (the v1 resolvers) and in
+/// `global_state.gs_core_from_output` (the permanent scripts' core resolver).
 /// The NFT is what
 /// makes GlobalState authentic, and that check is genuinely load-bearing:
 /// without it a forged GlobalState could forge `transfers_paused` and the
@@ -1873,5 +1910,76 @@ test negative_covering_index_traps_on_a_later_party() fail {
       destination_actions: [dst_action(2)],
     },
     tx,
+  )
+}
+
+// ── denylist Init — bound to the genesis GlobalState ─────────────────────────
+//
+// The GlobalState minted alongside must name THIS denylist; its id is
+// immutable afterwards, so a mismatch would leave sanctions unenforceable.
+
+fn run_denylist_init(outputs: List<Output>) -> Bool {
+  v_denylist.mint.mint(
+    gs_policy,
+    oref(50),
+    pu_script_hash,
+    DenylistInit { root_output_index: 0 },
+    denylist_policy,
+    Transaction {
+      ..base_tx(),
+      inputs: [nonce_input(50)],
+      mint: from_asset(denylist_policy, constants.linked_list_root_key, 1),
+      outputs,
+    },
+  )
+}
+
+test denylist_init_rejects_a_global_state_naming_another_denylist() {
+  !run_denylist_init(
+    [
+      dl_root_output(None),
+      gs_output(
+        2_000_000,
+        GlobalStateDatum {
+          ..gs_datum(False, False, False, False),
+          denylist_linked_list_policy_id: #"0101010101010101010101010101010101010101010101010101010101",
+        },
+      ),
+    ],
+  )
+}
+
+// No GlobalState created in this transaction: nothing to bind to, so genesis
+// cannot proceed (the lookup traps, hence `fail`).
+test denylist_init_rejects_without_a_genesis_global_state() fail {
+  run_denylist_init([dl_root_output(None)])
+}
+
+// ── a sanctions operator can never be the GlobalState logic ──────────────────
+//
+// The GlobalState logic's withdrawal would sign for an `is_admin` node whose
+// credential is its hash. The ledger's input/reference-input disjointness keeps
+// that withdrawal out of a sanctions transaction today; the denylist refuses
+// such a node anyway. The operator DOES sign here, so only that refusal can
+// reject it (it traps, hence `fail`).
+test denylist_insert_rejects_an_operator_that_is_the_global_state_logic() fail {
+  let tx = dl_insert_tx(
+    pu_node_input(1, power_user(True, False, False, False, False)),
+  )
+  run_denylist_add(
+    Transaction {
+      ..tx,
+      reference_inputs: [
+        gs_utxo(
+          0,
+          2_000_000,
+          GlobalStateDatum {
+            ..gs_datum(False, False, False, False),
+            global_state_script_credential_hash: pu_cred,
+          },
+        ),
+        pu_node_input(1, power_user(True, False, False, False, False)),
+      ],
+    },
   )
 }

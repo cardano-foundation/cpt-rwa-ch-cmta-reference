@@ -8,9 +8,10 @@ use cardano/transaction.{
   InlineDatum, Input, NoDatum, Output, OutputReference, Transaction,
 }
 use constants
+use tests
 use types/global_state.{
-  GlobalStateDatum, GlobalStateLocation, GlobalStateReferenced, GlobalStateSpent,
-  gs_datum_from_output,
+  GlobalStateCore, GlobalStateDatum, GlobalStateLocation, GlobalStateReferenced,
+  GlobalStateSpent, gs_core_from_output, idx_deactivated,
 }
 use utils.{must_run_script_withdrawal}
 
@@ -51,8 +52,9 @@ validator minting_logic_validator(global_state_policy_id: ByteArray) {
   ) {
     expect Script(own_hash) = credential
 
-    // Resolved INLINE rather than through `gs_datum_from_location`, which is
-    // the same logic and is what every other validator here calls.
+    // Resolved INLINE rather than through a shared location helper such as
+    // `gs_datum_from_location` (which also decodes the full v1 layout, where
+    // this script must read only the frozen core).
     //
     // This one file may not change its compiled bytes. Its hash is frozen into
     // every registry node this deployment has ever inserted, and the token's
@@ -62,6 +64,8 @@ validator minting_logic_validator(global_state_policy_id: ByteArray) {
     // (6defc595… -> b6e4e07a…): same behaviour, different UPLC. The redeemer
     // TYPE is shared, because a type name is not compiled; the resolution is
     // not. Do not "tidy" this into the helper without re-checking the hash.
+    // (Pre-launch, the frozen-core layout of 2026-10-15 did change this file's
+    // reads and hash; after launch it must never change again.)
     let gs_output: Output = when redeemer is {
       GlobalStateSpent { global_state_input_index } ->
         utils.safe_list_at(self.inputs, global_state_input_index).output
@@ -69,8 +73,10 @@ validator minting_logic_validator(global_state_policy_id: ByteArray) {
         utils.safe_list_at(self.reference_inputs, global_state_ref_input_index).output
     }
     // NFT presence is what makes this the real GlobalState rather than a
-    // datum an attacker fabricated to name an authority they control.
-    let gs_datum: GlobalStateDatum = gs_datum_from_output(
+    // datum an attacker fabricated to name an authority they control. Only the
+    // frozen core is read: this script can never be redeployed, so it must not
+    // depend on the part of the datum a later GlobalState logic may reshape.
+    let gs_datum: GlobalStateCore = gs_core_from_output(
       gs_output,
       global_state_policy_id,
     )
@@ -145,6 +151,7 @@ fn test_out_ref(ix: Int) -> OutputReference {
 
 fn make_gs_output(authority: ByteArray, deactivated: Bool) -> Output {
   let gs_datum = GlobalStateDatum {
+    global_state_script_credential_hash: #"9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a",
     transfers_paused: False,
     deactivated,
     mintable_amount: 1_000_000,
@@ -387,5 +394,61 @@ test publish_rejects_credential_deregistration() {
       refund: Never,
     },
     base_tx(),
+  )
+}
+
+// The proxy can never be upgraded, so it must keep reading a GlobalState datum
+// that a future version extended with trailing fields (see decode_global_state_core).
+test succeeds_when_global_state_has_trailing_fields() {
+  run_withdraw(
+    spent_redeemer(),
+    tests.with_trailing_gs_fields(
+      spent_tx(test_minting_authority_hash, Some(test_minting_authority_hash)),
+      test_gs_policy_id,
+    ),
+  )
+}
+
+// Frozen core: a later GlobalState logic may reshape every field after 0–4;
+// this permanent script reads only the core, so it keeps working.
+test succeeds_when_global_state_has_a_reshaped_tail() {
+  run_withdraw(
+    spent_redeemer(),
+    tests.with_reshaped_gs_tail(
+      spent_tx(test_minting_authority_hash, Some(test_minting_authority_hash)),
+      test_gs_policy_id,
+    ),
+  )
+}
+
+// `deactivated` must be a real Bool. `Constr(2, [])` is neither False nor
+// True; a lenient read (`builtin.unconstr_index(..) == 1`) would take it as
+// "not deactivated" and let a mint through — the core decoder traps instead.
+test fails_when_deactivated_is_not_a_bool() fail {
+  let tx = spent_tx(
+    test_minting_authority_hash,
+    Some(test_minting_authority_hash),
+  )
+  expect [gs_in] = tx.inputs
+  expect InlineDatum(raw) = gs_in.output.datum
+  let bad = builtin.constr_data(
+    0,
+    utils.replace_data_field(
+      builtin.unconstr_fields(raw),
+      idx_deactivated,
+      builtin.constr_data(2, []),
+    ),
+  )
+  run_withdraw(
+    spent_redeemer(),
+    Transaction {
+      ..tx,
+      inputs: [
+        Input {
+          ..gs_in,
+          output: Output { ..gs_in.output, datum: InlineDatum(bad) },
+        },
+      ],
+    },
   )
 }

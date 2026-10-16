@@ -97,10 +97,12 @@ in this repository.
 
 | Module | Responsibility |
 |---|---|
-| [`validators/global_state.ak`](validators/global_state.ak) | Mints the one-shot GlobalState NFT at genesis and controls the continuing state UTxO: remaining mintable supply, pause, KYC settings, trusted issuers, admin rotation, upgrades and deactivation. |
+| [`validators/global_state.ak`](validators/global_state.ak) | Mints the one-shot GlobalState NFT at genesis, with a sanitised initial datum, into the permanent spend proxy. |
+| [`validators/global_state_proxy.ak`](validators/global_state_proxy.ak) | Permanent, unparameterised home of the GlobalState NFT. Reads only datum field 0 and requires that script's withdraw-0 in the same transaction. |
+| [`validators/global_state_logic.ak`](validators/global_state_logic.ak) | Replaceable GlobalState logic (the withdraw-0 script named by datum field 0) that controls the continuing state UTxO: remaining mintable supply, pause, KYC settings, trusted issuers, admin rotation, upgrades, logic rotation and deactivation. Its tests are in `global_state_logic_tests.ak`. |
 | [`validators/power_users.ak`](validators/power_users.ak) | Maintains the operator linked list. The GlobalState admin grants or changes the five independent role flags. |
 | [`validators/denylist.ak`](validators/denylist.ak) | Maintains the sanctions linked list. An `is_admin` power user can add or remove an entry; presence means sanctioned. |
-| [`validators/minting_logic_script.ak`](validators/minting_logic_script.ak) | Permanent CIP-113 minting proxy. It reads GlobalState and requires the currently named minting authority to run; its hash defines this token's issuance policy. |
+| [`validators/minting_logic_script.ak`](validators/minting_logic_script.ak) | Permanent CIP-113 minting proxy. It reads GlobalState and requires the currently named minting authority to run. Its hash, applied to the base layer's issuance template, yields this token's issuance policy ID. |
 | [`validators/minting_authority.ak`](validators/minting_authority.ak) | Replaceable authority for registration, mint, burn and registry-node upgrades. It checks supply-changing transactions against roles, destinations, the denylist and KYC. |
 | [`validators/transfer_logic_script.ak`](validators/transfer_logic_script.ak) | Checks ordinary transfers for pause, deactivation, sender and receiver denylist absence, and enabled KYC gates. |
 | [`validators/third_party_transfer_logic_script.ak`](validators/third_party_transfer_logic_script.ak) | Checks forced transfers: `can_force_transfer` authority and vetted destinations, while allowing a sanctioned or expired source and remaining available during a pause. |
@@ -130,13 +132,15 @@ is carried in the GlobalState datum as opaque `Data` and is not parsed by any va
 populating it correctly — and keeping it consistent with the register — is an off-chain duty of the
 issuer and registrar.
 
-Keep it, and the trusted-entity list, **small**. The three datum caps in
+Keep it, and the trusted-entity list, **small**. Besides the per-field caps in
 [`lib/constants.ak`](lib/constants.ak) (64 entities, 512 B of metadata each, 4096 B of
-`security_info`) are enforced independently and nothing bounds their sum, which at the maxima would
-be far larger than a transaction. Nothing can get stuck — the oversized transaction is simply
-rejected by the ledger, and any spend may shrink a field again — but the GlobalState UTxO is spent
-by every mint, burn and admin action, and an inflated datum eats the room a mint needs for its KYC
-proofs (≈ 370 B per attested destination).
+`security_info`), the whole datum (as Plutus serialises it, appended fields included) is bounded by the deployment
+parameter `max_global_state_datum_bytes` (recommended: 8192). It is checked at genesis and on every
+GlobalState action, mints and burns included. A write that does not grow the datum always passes, so
+a datum over the cap can always be shrunk. Keep headroom: at the cap, even a burn that adds a byte to
+`mintable_amount` is refused until the datum shrinks. The GlobalState UTxO is
+spent by every mint, burn and admin action, and its datum takes room a mint needs for its KYC proofs
+(≈ 230 B per attested destination with a wallet-made proof).
 
 Denylist entry metadata is also free-form `Data`, but each new entry is capped at 512 B once
 CBOR-serialised. Larger case files, legal records, or evidence should live off-chain and be
@@ -178,14 +182,18 @@ referenced by compact identifiers or hashes.
 ## Actors
 
 * **Admin** — the `admin_credential_hash` held in the GlobalState datum. Controls the power-user
-  list itself (add, remove, modify), the security metadata, and the irreversible deactivation
-  switch. Rotatable, so the master key can be replaced without redeploying.
-* **Power user** — a node in the power-users linked list, carrying independently grantable flags:
+  list itself (add, remove, modify), the security metadata, the remaining supply cap
+  (`SetMintableAmount`, until `LockUpgrades`), the GlobalState logic itself
+  (`RotateGlobalStateScript`, until `LockUpgrades`), and the irreversible deactivation switch. Rotatable, so the master key can be replaced without redeploying.
+* **Power user** — a node in the power-users linked list, carrying independently grantable flags
+  (a credential equal to GlobalState datum field 0, the GlobalState logic hash, is refused
+  wherever the role is used — that logic's withdrawal is in every GlobalState transaction and
+  would otherwise sign for it):
   * `is_admin` — add and remove denylist entries. Deliberately split from the master admin key, so a
     compliance function can be delegated without handing over control of the protocol.
   * `can_mint` — mint new tokens, up to the remaining supply cap
   * `can_burn` — burn tokens, restoring headroom under the cap
-  * `can_pause` — pause and unpause all standard transfers
+  * `can_pause` — pause and unpause all standard transfers (each write must flip the flag)
   * `can_force_transfer` — seize tokens, moving them to a vetted address
 * **Trusted entity** — an off-chain KYC attestor whose Ed25519 verification key is listed in the
   GlobalState datum. It signs the KYC proofs that transfers present. Not an on-chain role: it never
@@ -213,7 +221,10 @@ referenced by compact identifiers or hashes.
   static (every such change is still signed, on-chain, power-user-gated and cap-enforced), and a
   holder minted to during a pause cannot move the tokens until it lifts — so do not mint to third
   parties mid-pause.
-* Minting is capped; burning returns headroom to the cap. **Burning existing supply spends a
+* Minting is capped; burning returns headroom to the cap. The cap is remaining headroom, not total
+  supply: until `LockUpgrades`, the admin may also reset it to any non-negative absolute value
+  with `SetMintableAmount` (setting it below what is already minted simply stops further minting).
+  There is no upper bound: off-chain readers must decode it as an arbitrary-precision integer. That action cannot share a transaction with a mint. **Burning existing supply spends a
   programmable-base UTxO, so the CIP-113 base layer makes the transfer logic run over it** — which
   means a burn during a pause, or from a sanctioned holder, must instead be routed through the
   forced-transfer path and needs `can_force_transfer`, not just `can_burn`.
@@ -243,7 +254,8 @@ referenced by compact identifiers or hashes.
 
 ### Upgrading and locking the rules
 
-The GlobalState admin has two distinct upgrade paths while `upgrades_locked` is false:
+The GlobalState admin has three distinct upgrade paths, plus control over the supply cap, while
+`upgrades_locked` is false:
 
 * `RotateMintingScript` changes `minting_script_credential_hash` in GlobalState. The permanent
   minting proxy then requires the replacement authority's withdraw-0. The proxy checks delegation,
@@ -252,12 +264,53 @@ The GlobalState admin has two distinct upgrade paths while `upgrades_locked` is 
   not have to consent.
 * `UpgradeRegistryNode` changes this token's CIP-113 transfer and/or third-party transfer logic
   credentials in its registry node. The admin signs and the minting authority verifies the
-  continuing node. The minting proxy, GlobalState policy and disabled unfracking hook stay pinned;
+  continuing node, which must name exactly the transfer and seizure scripts that authority was built
+  with (F08). Re-pointing either is therefore two admin steps: `RotateMintingScript` to an authority
+  built with the new hash, then `UpgradeRegistryNode`. The minting proxy, GlobalState policy and disabled unfracking hook stay pinned;
   an upgrade cannot mint or burn this token in the same transaction. Register replacement logic
   stake credentials before use.
+* `SetMintableAmount { new_mintable_amount }` sets `mintable_amount` to any non-negative absolute
+  value (no upper bound). Admin-signed; it cannot mint, burn or move the security token in the
+  same transaction.
+* `RotateGlobalStateScript { new_global_state_script_hash }` replaces the GlobalState **logic**.
+  The GlobalState NFT lives forever at `global_state_proxy`, a tiny spend validator that reads only
+  datum field 0 (`global_state_script_credential_hash`) and requires that credential's withdraw-0;
+  every GlobalState rule lives in the script field 0 names. Rotation rewrites field 0 and must run
+  **both** logics in one transaction: the current one checks the admin signature, the lock, that the
+  new hash is not the admin's or the minting authority's, and that the datum's frozen core (below)
+  still decodes and is unchanged apart from field 0; the new one must run its own withdraw-0 with
+  the same `RotateGlobalStateScript` redeemer — which proves its script is producible, its stake
+  credential registered and that it decodes a GlobalState rotation, but **not** that it is a correct
+  GlobalState logic — and checks the datum it is about to govern (this version accepts exactly the
+  input with field 0 rewritten). **The new logic governs every
+  later GlobalState action, the supply cap included** — rotating to a permissive script hands
+  GlobalState to anyone, which is stronger than a permissive minting authority. Rotate only to a
+  reviewed build of this repository: before signing, rebuild the new logic from source at a pinned
+  commit with every parameter and check that its hash equals `new_global_state_script_hash` (do the
+  same for field 0 before genesis). Everything after the frozen core is the incoming logic's to
+  accept: this version accepts only field 0 rewritten, but a successor may also change tail values
+  in the rotation transaction itself — the denylist policy ID, `network_id`, `transfers_paused` or
+  `upgrades_locked` — so reviewing a successor includes reviewing what its incoming side accepts.
+  One admin signature authorises a rotation. As with `RotateAdmin`, the old side authorises and the
+  new side proves it is live — the new admin by signing, the new logic by running — but the logic
+  is code the admin chose, so its run is not a second approval. For two-party control, make the
+  admin a native-script multisig with a registered stake credential: a script admin signs through
+  its own zero-value withdrawal. The NFT never moves, and
+  readers find GlobalState by its NFT, never its address. The datum has a **frozen core and a free
+  tail**. Fields 0–4 (logic hash, `deactivated`, admin, power-users list id, minting authority) are
+  the only fields the scripts that can never be redeployed read after genesis; they keep their
+  position and type forever. Fields 5+ belong to the installed logic: a new logic may drop, reorder,
+  retype or append them (within `max_global_state_datum_bytes`). The replaceable readers (minting
+  authority, transfer and third-party logic) decode the v1 tail, and would trap on or silently misread
+  a different one, so before installing a logic that changes the tail, first rotate them to versions
+  that accept **both** the current and the new layout: the authority through `RotateMintingScript`,
+  then the transfer scripts through the new authority's `UpgradeRegistryNode`, then the GlobalState
+  logic — all before `LockUpgrades`. The invariants every replacement logic must keep are listed in
+  `validators/global_state_logic.ak`.
 
-`LockUpgrades` is an admin-signed, one-way GlobalState action that closes **both** paths for later
-transactions. It does not deactivate transfers, minting or burning. If a registry upgrade is bundled
+`LockUpgrades` is an admin-signed, one-way GlobalState action that closes **all four** for later
+transactions — after it, `mintable_amount` moves only through mint and burn and the GlobalState
+logic can no longer be replaced. It does not deactivate transfers, minting or burning. If a registry upgrade is bundled
 with the lock in one transaction, the upgrade reads the pre-lock GlobalState input and can still
 succeed; audit the whole transaction when deciding which rules were locked. The same pre-state rule
 applies to a registry upgrade bundled with admin rotation or deactivation.
@@ -280,16 +333,20 @@ aiken check -D      # type-check and run the test suite
 aiken build         # compile; regenerates plutus.json
 ```
 
-`aiken build` writes the blueprint to `plutus.json`. Every validator takes compile-time parameters,
+`aiken build` writes the blueprint to `plutus.json`. Every validator except `global_state_proxy` takes compile-time parameters,
 so the blueprint contains **unapplied** scripts — apply parameters with `aiken blueprint apply` (or
 the equivalent in your off-chain library) before deriving any hash or address.
 
 ### Prerequisites
 
-One value comes from the deployed CIP-113 base layer of the target network, not from this repo —
-obtain it before applying any parameters:
+Two values come from the deployed CIP-113 base layer of the target network, not from this repo —
+obtain them before applying any parameters:
 
 * **`registry_policy_id`** — the CIP-113 registry mint policy id.
+* **The issuance template** — `prefix_cbor_hex` and `postfix_cbor_hex` from the base layer's
+  `IssuanceCborHex` datum (the reference UTxO carrying its `IssuanceCborHex` NFT). Applied to the
+  minting proxy's hash (row 6) it yields this token's issuance policy ID; see
+  [What the derived parameters must equal](#what-the-derived-parameters-must-equal).
 
 **`plb_script_hash`** — the CIP-113 programmable-logic-base (PLB) script hash — is **off-chain
 only**: the address of every programmable-token UTxO. No validator in this repo takes it as a
@@ -299,29 +356,30 @@ transfer and seizure alike (see
 
 ### Parameter order
 
-Parameters have to be applied in dependency order — GlobalState policy → the two lists →
+Parameters have to be applied in dependency order — GlobalState proxy → GlobalState policy → the two lists →
 the minting-logic proxy → the rest — because each layer's policy ID or script hash feeds later
 validators. The table below is exhaustive and lists, for every validator, its parameters in the
 exact order the blueprint (`plutus.json`) declares them; apply top to bottom.
 
 > `aiken blueprint apply` takes parameters **positionally, one at a time**, and shared parameters
-> are **not** in a shared order across validators — e.g. row 7 (`global_state_spend_validator`)
+> are **not** in a shared order across validators — e.g. row 7 (`global_state_logic`)
 > lists the issuance policy id before `global_state_policy_id`, while rows 8–10 list
 > `global_state_policy_id` first. Always follow this validator's own row below; never assume a
 > "usual" order.
 
 | # | Validator | Parameters (blueprint order) | Source |
 |---|---|---|---|
-| 1 | `global_state.global_state_mint_validator` (mint) | `tx0`, `index0` | The genesis UTxO you choose to spend. |
+| 0 | `global_state_proxy.global_state_proxy` (spend) | — | No parameters: its hash is the same for every deployment. |
+| 1 | `global_state.global_state_mint_validator` (mint) | `tx0`, `index0`, `global_state_proxy_hash`, `max_global_state_datum_bytes` | The genesis UTxO you choose to spend; the hash of `global_state_proxy` (row 0). The NFT must be minted to that script address; the datum-size cap (recommended 8192, **same value as row 7** — nothing on chain ties the two). |
 | 2 | `power_users.mint` | `global_state_policy_id`, `init_input_out_ref` | Row 1; a genesis UTxO reserved for this list. |
 | 3 | `power_users.power_users_validator` (spend) | `global_state_policy_id`, `power_users_linked_list_policy_id` | Row 1; the hash of `power_users.mint` (row 2) — this is the **power-users policy ID**. |
 | 4 | `denylist.mint` | `global_state_policy_id`, `init_input_out_ref`, `power_user_list_script_hash` | Row 1; a genesis UTxO reserved for this list; the hash of `power_users_validator` (row 3, **spend** — not row 2's policy id). |
 | 5 | `denylist.denylist_validator` (spend) | `denylist_linked_list_policy_id` | The hash of `denylist.mint` (row 4) — this is the **denylist policy ID**. |
 | 6 | `minting_logic_script.minting_logic_validator` | `global_state_policy_id` | Row 1. Its only parameter. |
-| 7 | `global_state.global_state_spend_validator` (spend) | `security_asset_name`, `issuance_policy_id`, `global_state_policy_id`, `power_user_list_script_hash` | Operator choice; the hash of `minting_logic_validator` (row 6) — the **issuance policy ID**, i.e. the security token's policy ID; row 1; the hash of `power_users_validator` (row 3). |
-| 8 | `transfer_logic_script.transfer_logic_validator` | `security_asset_name`, `global_state_policy_id`, `expected_issuance_policy_id`, `denylist_script_hash` | Operator choice; row 1; the hash of `minting_logic_validator` (row 6); the hash of `denylist_validator` (row 5). |
-| 9 | `third_party_transfer_logic_script.third_party_transfer_logic_validator` | `security_asset_name`, `global_state_policy_id`, `expected_issuance_policy_id`, `denylist_script_hash`, `power_user_list_script_hash` | Operator choice; row 1; row 6's hash; row 5's hash; row 3's hash. (The power-users policy id is read from the GlobalState datum at run time, not compiled in.) |
-| 10 | `minting_authority.minting_authority_validator` | `security_asset_name`, `global_state_policy_id`, `registry_policy_id`, `power_users_linked_list_policy_id`, `minting_logic_script_credential_hash`, `expected_issuance_policy_id`, `denylist_script_hash`, `power_user_list_script_hash` | Operator choice; row 1; Prerequisites; row 2's hash; row 6's hash; row 6's hash again (**must be identical to the previous value** — see below); row 5's hash; row 3's hash. |
+| 7 | `global_state_logic.global_state_logic` (withdraw) | `security_asset_name`, `issuance_policy_id`, `global_state_policy_id`, `power_user_list_script_hash`, `max_global_state_datum_bytes` | Operator choice; the **issuance policy ID**, i.e. the security token's policy ID, derived from row 6's hash (see below; **not** row 6's hash itself); row 1; the hash of `power_users_validator` (row 3); the datum-size cap (same value as row 1; a rotated-in logic may choose another). Its hash goes into GlobalState datum **field 0** at genesis. |
+| 8 | `transfer_logic_script.transfer_logic_validator` | `security_asset_name`, `global_state_policy_id`, `expected_issuance_policy_id`, `denylist_script_hash` | Operator choice; row 1; the issuance policy ID (as row 7); the hash of `denylist_validator` (row 5). |
+| 9 | `third_party_transfer_logic_script.third_party_transfer_logic_validator` | `security_asset_name`, `global_state_policy_id`, `expected_issuance_policy_id`, `denylist_script_hash`, `power_user_list_script_hash` | Operator choice; row 1; the issuance policy ID (as row 7); row 5's hash; row 3's hash. (The power-users policy id is read from the GlobalState datum at run time, not compiled in.) |
+| 10 | `minting_authority.minting_authority_validator` | `security_asset_name`, `global_state_policy_id`, `registry_policy_id`, `power_users_linked_list_policy_id`, `minting_logic_script_credential_hash`, `expected_issuance_policy_id`, `denylist_script_hash`, `power_user_list_script_hash`, `transfer_logic_script_hash`, `third_party_transfer_logic_script_hash` | Operator choice; row 1; Prerequisites; row 2's hash; row 6's hash; the issuance policy ID (as row 7 — it **differs** from row 6's hash, see below); row 5's hash; row 3's hash; row 8's hash; row 9's hash (the scripts registry fields 3 and 4 must name). |
 
 ### What the derived parameters must equal
 
@@ -331,10 +389,21 @@ exact order the blueprint (`plutus.json`) declares them; apply top to bottom.
   `denylist.mint`'s policy id.
 * `power_users_linked_list_policy_id` / `denylist_linked_list_policy_id` — the respective `mint`
   validator hashes (their policy ids).
-* `issuance_policy_id`, `expected_issuance_policy_id` and `minting_logic_script_credential_hash` —
-  all three are the hash of `minting_logic_script.minting_logic_validator`. The last two are two
-  separate parameter slots of `minting_authority_validator` (row 10) and **must receive the
-  identical value**; a deploy script should assert this rather than rely on it by construction.
+* `minting_logic_script_credential_hash` — the hash of `minting_logic_script.minting_logic_validator`
+  (row 6), the permanent minting proxy.
+* `issuance_policy_id` (row 7) and `expected_issuance_policy_id` (rows 8–10) — the security token's
+  policy ID, which is the base layer's issuance template applied to the proxy:
+  `blake2b_224(0x03 ‖ prefix_cbor_hex ‖ proxy hash ‖ postfix_cbor_hex)`, with the template from
+  Prerequisites. It is the key of this token's CIP-113 registry node, and it is **never** the proxy
+  hash itself. A deploy script should derive it this way and assert it differs from
+  `minting_logic_script_credential_hash`: the authority's registration fails closed on a wrong value,
+  but the GlobalState and transfer scripts cannot detect one — a transfer logic built with the wrong
+  policy ID finds no parties and skips the denylist and KYC checks for every transfer.
+* `transfer_logic_script_hash` and `third_party_transfer_logic_script_hash` (row 10) — the hashes of
+  rows 8 and 9, in that order. Registration and every `UpgradeRegistryNode` require registry fields 3
+  and 4 to name exactly these (F08), and the two must differ. The pin is only as good as row 10's
+  build: assert the order in the deploy script, and include "a seizure without a
+  `can_force_transfer` operator is rejected" in the post-deploy smoke test.
 * `security_asset_name` — an operator choice, with one constraint: it must **not** carry a protected
   CIP-67 prefix (see [CIP-68 metadata tokens](#cip-68-metadata-tokens)). Registration asserts this
   and fails closed if it is violated, because a protected supply name would make every rule meant
@@ -348,18 +417,22 @@ exact order the blueprint (`plutus.json`) declares them; apply top to bottom.
 
 ### Deployment: reference scripts
 
-Four validators are withdraw-0 scripts, i.e. they run as zero-value withdrawals rather than as the
-spending or minting script of any UTxO: `transfer_logic_validator` (~6.1 KB, every transfer),
-`third_party_transfer_logic_validator` (~6.7 KB, every seizure), `minting_authority_validator`
-(~8.4 KB, every mint and burn) and the minting proxy `minting_logic_validator` (~1.1 KB, also every
+Five validators are withdraw-0 scripts, i.e. they run as zero-value withdrawals rather than as the
+spending or minting script of any UTxO: `global_state_logic` (every GlobalState action — the proxy
+holding the NFT requires it), `transfer_logic_validator` (~6.8 KB, every transfer),
+`third_party_transfer_logic_validator` (~7.1 KB, every seizure), `minting_authority_validator`
+(~9.3 KB, every mint and burn) and the minting proxy `minting_logic_validator` (~1.0 KB, also every
 mint and burn — the proxy's withdraw-0 is what the CIP-113 registry node invokes, and it in turn
-requires the authority's). The three large ones must be published once as reference-script UTxOs and
+requires the authority's). The four large ones (`global_state_logic` is ~5.9 KB and runs in every
+mint and burn too) must be published once as reference-script UTxOs and
 supplied via reference inputs — not inlined (a transaction is capped at 16 KiB); the proxy is small
 enough to inline but is simplest to publish alongside them. The two list `mint` validators
-(~4.7–5.2 KB) should in practice be treated the same way.
+(~5.2–5.8 KB) must be treated the same way: the genesis transaction runs both, the GlobalState
+mint and `global_state_logic` — ≈ 19.3 KB of scripts against the 16 KiB limit — so publish them
+and `global_state_logic` before genesis (step 0 of [Initialising a token](#initialising-a-token)).
 
-All four withdraw-0 scripts need their **stake credential registered** on chain before the first
-transaction that names them in `withdrawals` — see step 2 of [Initialising a token](#initialising-a-token).
+All five withdraw-0 scripts need their **stake credential registered** on chain before the first
+transaction that names them in `withdrawals` — see steps 0 and 2 of [Initialising a token](#initialising-a-token).
 A withdrawal from an unregistered credential is rejected by the ledger at phase 1, before any script
 runs, so forgetting the proxy's registration makes every mint and burn fail from genesis on.
 
@@ -369,10 +442,17 @@ runs, so forgetting the proxy's registration makes every mint and burn fail from
 > inert rather than insecure, but it would be inert *quietly*.
 
 > **Verify before genesis, off-chain:** that the two linked-list policy IDs differ and each matches
-> the corresponding compiled `mint` validator hash, and that the GlobalState NFT actually lands at
-> `global_state_spend_validator`'s address. The on-chain code checks what it can (the IDs must
-> differ and be 28 bytes) but cannot bind an ID to a hash, and the genesis mint validator cannot see
-> its own spend counterpart's address.
+> the corresponding compiled `mint` validator hash, and that datum field 0 is the hash of
+> `global_state_logic` rebuilt from source with this deployment's parameters. The on-chain code
+> checks what it can (the IDs must differ and be 28 bytes; the NFT must land at
+> `global_state_proxy`; field 0 must be 28 bytes, differ from the admin, the minting authority and
+> the proxy, and run in the genesis transaction, where this logic accepts only a datum that names
+> it and fits its own cap; each list's `Init` requires the GlobalState minted alongside to name
+> that list's policy id) but cannot bind field 0 to a hash: field 0 depends on the GlobalState
+> policy, which depends on the mint's own parameters. A field 0 that cannot run now fails genesis;
+> one that runs and accepts it — another validator, or this logic applied with a wrong parameter —
+> still gets through and then governs GlobalState. Smoke-test one GlobalState action right after
+> genesis.
 
 ### What is delegated to the CIP-113 base layer
 
@@ -501,12 +581,21 @@ binding axis**.
   adds ≈ 0.10 M mem / 33 M CPU — the node is authenticated once per run of adjacent parties citing
   it; a party citing a different node pays the full authentication, ≈ 0.15 M mem / 45 M CPU. The
   dedupe check adds a small quadratic term that matters only beyond ~20 parties per side.
-* **Attestation KYC** adds ≈ 0.06 M mem / 74 M CPU per vetted party (one Ed25519 verification);
-  membership (MPF) proofs are cheaper.
+* **Attestation KYC** (a trusted issuer signs the claim through CIP-30 `signData`, including
+  Ledger's CIP-8 hashed mode) adds ≈ 76 K mem / 80.5 M CPU per vetted party (measured on the transfer
+  fixture with and without the proof checked): the transaction builder
+  extracts the COSE parts off chain, and the validator only rebuilds the COSE `Sig_structure` and
+  verifies one Ed25519 signature (plus one BLAKE2b-224 when hashed). Membership (MPF) proofs are
+  cheaper. A raw Ed25519 signature over the bare claim was supported until 2026-10-15 and is no
+  longer accepted; it cost ≈ 20 K mem / 7.5 M CPU and ≈ 47 bytes less per proof. An earlier
+  revision parsed the full COSE objects on chain at +3.5 KB per script and ≈ 300 K mem / 92 M CPU
+  per proof; the lean form checks everything that matters for authorisation and nothing else (see
+  the integration guide).
 * **Forced transfer** ≈ 0.60 M mem / 0.18 G CPU with one destination, ≈ 0.10 M mem / 32 M CPU per
   further destination sharing a node.
-* **Redeemer size** ≈ 32 B per party without KYC, ≈ 370 B per party with attestation proofs — the
-  16 KiB transaction limit binds near 40 attested parties.
+* **Redeemer size** ≈ 20 B per party without KYC and ≈ 230 B with an attestation proof made by a
+  wallet (its ≈ 45-byte protected header names the signing address); a backend issuer's minimal
+  3-byte header brings it to ≈ 190 B. Measured with `serialise_data` on a transfer action.
 
 `aiken bench -m "transfer_logic_script.{..}" --max-size 40` scales linearly in `n` on both benches
 (`transfer_cost_by_party_count`: `n` senders + `n` destinations, denylist-only, root-only covering
@@ -514,22 +603,25 @@ node; `seizure_cost_by_destination_count`: one seized input, `n` destinations, d
 
 | n | transfer mem | transfer CPU | seizure mem | seizure CPU |
 |---:|---:|---:|---:|---:|
-| 1 | 613,128 | 182,775,654 | 596,023 | 180,053,221 |
-| 4 | 1,236,280 | 380,038,077 | 895,326 | 275,166,868 |
-| 8 | 2,125,720 | 696,021,281 | 1,323,682 | 428,468,384 |
-| 16 | 4,182,808 | 1,524,533,481 | 2,319,498 | 833,344,312 |
+| 1 | 694,134 | 207,875,081 | 692,317 | 209,306,067 |
+| 4 | 1,347,964 | 414,369,677 | 992,220 | 304,515,714 |
+| 8 | 2,278,308 | 742,662,445 | 1,421,376 | 457,945,230 |
+| 16 | 4,417,204 | 1,595,793,773 | 2,418,792 | 863,077,158 |
 
-> **Conservative maxima, at 25% of the budget:** ordinary transfer ≤ 13 unique parties per side
-> denylist-only, ≤ 9 per side with attestation KYC on both sides; seizure ≤ 23 destinations
-> denylist-only, ≤ 16 with receiver KYC. Split larger distributions; keep parties that share a
+> **Conservative maxima, at 25% of the budget:** ordinary transfer ≤ 12 unique parties per side
+> denylist-only, ≤ 8 per side with attestation KYC on both sides; seizure ≤ 23 destinations
+> denylist-only, ≤ 15 with receiver KYC. The KYC figures add ≈ 76 K memory per attestation proof to
+> the benches above. Split larger distributions; keep parties that share a
 > covering node adjacent in the action lists — they follow input/output order.
 
 ## KYC proof formats
 
-Both proof types bind the same five things: **who** (credential hash), **which credential form**
+Both proof types (attestation and membership) bind the same five things: **who** (credential hash), **which credential form**
 (key or script), **how long** (TTL), **which token** (issuance policy ID) and **which network**.
 
-**Attestation** — a 67-byte payload, raw Ed25519-signed by a key in `trusted_entity_vkeys`:
+**Attestation** (`Cip30Attestation`) — a 67-byte claim, signed through CIP-30 `signData` (an
+Ed25519 signature over the COSE `Sig_structure` wrapping the claim, or its BLAKE2b-224 hash) by a
+key in `trusted_entity_vkeys`. A raw Ed25519 signature over the bare claim is not accepted:
 
 | Bytes | Field | Width |
 |---|---|---|
@@ -588,15 +680,31 @@ which key to deduplicate on.
 Genesis is a short sequence of transactions. Apply the parameters first, then submit each
 dependent transaction after the preceding output is available.
 
+0. **Prepare.** Register the stake credential of `global_state_logic`, applied with this
+   deployment's parameters (its `publish` handler accepts `RegisterCredential`), and publish it
+   and both list `mint` validators as reference-script UTxOs: the genesis transaction runs those
+   three and the GlobalState mint, ≈ 19.3 KB of scripts, which cannot all be inlined under the
+   16 KiB transaction limit. No transaction before genesis may spend one of the three reserved
+   one-shot inputs, so exclude them from coin selection: they are baked into the mint parameters,
+   and spending one means choosing a new input and re-applying every parameter that depends on it.
 1. **Create GlobalState and both linked-list roots in one transaction.** Spend the three reserved
    one-shot inputs and mint the GlobalState NFT, power-users root NFT and denylist root NFT
    together. The GlobalState mint validator rejects genesis unless both root policies mint in this
-   same transaction. Put the GlobalState NFT at `global_state_spend_validator` with an inline datum
-   containing the admin credential, supply cap, list policy IDs, KYC flags, trusted entity keys,
-   network ID, initial minting-authority hash and `upgrades_locked = False`. Put each root at its
-   own list spend validator. Verify all three addresses off-chain before signing; their mint
-   validators cannot pin the corresponding spend addresses at genesis.
-2. **Register the logic scripts' stake credentials.** Register the minting proxy
+   same transaction. Put the GlobalState NFT at `global_state_proxy` (the mint validator enforces
+   this) with an inline `GlobalStateDatum` in exactly this field order: the frozen core — 0 the hash of
+   `global_state_logic`, 1 `deactivated = False`, 2 the admin credential, 3 the power-users list
+   policy ID, 4 the initial minting-authority hash — then the v1 tail: 5 `transfers_paused = False`,
+   6 the supply cap, 7 the denylist policy ID, 8 `security_info`, 9 the trusted entity keys,
+   10 `member_root_hash`, 11/12 the sender/receiver KYC flags, 13 the network ID and
+   14 `upgrades_locked = False`. Put each root at its own list
+   spend validator. Each list's `Init` rejects a GlobalState datum that does not name it. The
+   GlobalState mint also requires the withdraw-0 of the logic field 0 names: add it with a
+   `GlobalStateSpendRedeemer` whose `global_state_output_index` points at the GlobalState output
+   (its action is ignored at genesis); the logic accepts only a datum that names it and fits its
+   own `max_global_state_datum_bytes`. Verify the two list addresses off-chain, and rebuild
+   `global_state_logic` from source with every parameter to check field 0, before signing; the
+   mint validators cannot pin them at genesis.
+2. **Register the other logic scripts' stake credentials.** Register the minting proxy
    `minting_logic_validator` and current `minting_authority_validator` **before** the CIP-113
    registration, which invokes both as zero-value withdrawals. Register
    `transfer_logic_validator` and `third_party_transfer_logic_validator` before their first use.
@@ -605,7 +713,8 @@ dependent transaction after the preceding output is available.
 3. **Assign power users** by inserting one node per operator, with the role flags needed for later
    actions. A `can_mint` operator must exist before a registration that mints initial supply.
 4. **Register in the CIP-113 registry.** Insert the node keyed by the issuance policy ID, naming
-   the proxy, transfer and third-party transfer logic scripts and the GlobalState policy. Use
+   the proxy, exactly the transfer and third-party transfer logic scripts the minting authority was
+   built with (rows 8 and 9), and the GlobalState policy. Use
    `RegisterStructural` with no issuance-policy mint, or use `RegisterMint` if minting the initial
    supply in this transaction.
 5. **Mint the initial supply**, unless it was minted with `RegisterMint` in step 4. `MintBurn`
@@ -621,8 +730,9 @@ denylist holders, and add or modify power users.
 ## Token uniqueness
 
 Uniqueness derives from the genesis UTxO. `tx0`/`index0` are applied to `global_state_mint_validator`,
-which makes the GlobalState policy ID unique to that deployment; every other validator takes that
-policy ID (directly or transitively) as a parameter. Together with `security_asset_name`, this means
+which makes the GlobalState policy ID unique to that deployment; every other validator except the
+unparameterised `global_state_proxy` takes that policy ID (directly or transitively) as a parameter.
+The proxy's address is therefore shared by every deployment — locate GlobalState by its NFT. Together with `security_asset_name`, this means
 each deployment compiles to different validator hashes — and therefore to a different security token
 policy ID — even for identical source code.
 

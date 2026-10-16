@@ -23,7 +23,7 @@ use types/global_state.{
   gs_datum_from_location,
 }
 use types/kyc_proof.{
-  Attestation, AttestationProof, KycProof, Membership, MembershipProof,
+  Cip30Attestation, Cip30AttestationProof, KycProof, Membership, MembershipProof,
 }
 use types/power_users.{PowerUser}
 use types/third_party_transfer_logic_script.{
@@ -208,6 +208,10 @@ validator third_party_transfer_logic_validator(
       no_protected_tokens_spent?,
       all_destinations_ok,
       power_user_data.can_force_transfer,
+      // Never the GlobalState logic named in field 0: when this seizure also
+      // spends GlobalState, that logic's withdrawal is in the transaction and
+      // would sign for the operator.
+      power_user_node_key != gs_datum.global_state_script_credential_hash,
       must_be_signed_by_credential(self, power_user_node_key),
     }
   }
@@ -302,6 +306,7 @@ fn p_out_ref(ix: Int) -> OutputReference {
 
 fn p_gs_ref_input(paused: Bool, deactivated: Bool, req_receiver: Bool) -> Input {
   let datum = GlobalStateDatum {
+    global_state_script_credential_hash: #"9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a",
     transfers_paused: paused,
     deactivated,
     mintable_amount: 1_000_000,
@@ -484,9 +489,11 @@ fn p_seized_input() -> Input {
 }
 
 fn p_dummy_proof() -> KycProof {
-  Attestation {
-    kyc_proof: AttestationProof {
+  Cip30Attestation {
+    cip30_proof: Cip30AttestationProof {
+      protected_header: #"",
       payload: #"",
+      hashed: False,
       signature: #"",
       issuer_vkey: #"",
     },
@@ -622,7 +629,7 @@ test force_transfer_works_while_paused() {
 // ── GlobalState may be spent instead of referenced ──────────────────────────
 //
 // The BURN shape. A burn must SPEND GlobalState — only then does
-// `global_state_spend_validator`'s `MintSecurity` branch run and credit the
+// the GlobalState logic's `MintSecurity` branch run and credit the
 // burned supply back to `mintable_amount` — and it must also run THIS
 // withdrawal, because CIP-113's `ThirdPartyAct` is the only
 // programmable-logic-global branch a burn can take. Conway rejects a
@@ -811,6 +818,7 @@ test force_transfer_rejected_when_not_signed() {
 /// `power_user_linked_list_policy_id`, for the cross-check tests below.
 fn p_gs_ref_input_with_pu_policy(pu_policy_field: ByteArray) -> Input {
   let datum = GlobalStateDatum {
+    global_state_script_credential_hash: #"9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a",
     transfers_paused: False,
     deactivated: False,
     mintable_amount: 1_000_000,
@@ -899,6 +907,7 @@ fn p_gs_ref_input_with_member_root(
   member_root_hash: ByteArray,
 ) -> Input {
   let datum = GlobalStateDatum {
+    global_state_script_credential_hash: #"9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a",
     transfers_paused: False,
     deactivated: False,
     mintable_amount: 1_000_000,
@@ -1172,4 +1181,39 @@ test seizure_succeeds_when_no_protected_token_is_spent() {
     outputs: [p_token_utxo(p_dest_stake, 1_000)],
   }
   run_third_party(p_redeemer(), tx)
+}
+
+// ── the GlobalState logic can never stand in for the operator ────────────────
+//
+// When a seizure also spends GlobalState, the logic named in its field 0 runs
+// as a withdrawal — and `must_be_signed_by_credential` accepts a withdrawal as
+// a signature. A `can_force_transfer` operator whose credential IS that logic
+// hash would be satisfied by anyone. Here the operator does not sign at all;
+// only the logic's withdrawal is present.
+fn p_with_gs_logic(input: Input, logic: ByteArray) -> Input {
+  expect InlineDatum(raw) = input.output.datum
+  expect gs: GlobalStateDatum = raw
+  Input {
+    ..input,
+    output: Output {
+      ..input.output,
+      datum: InlineDatum(
+        GlobalStateDatum { ..gs, global_state_script_credential_hash: logic },
+      ),
+    },
+  }
+}
+
+test seizure_rejects_an_operator_that_is_the_global_state_logic() {
+  let tx = p_spent_gs_tx()
+  expect [seized, gs_input] = tx.inputs
+  !run_third_party(
+    p_spent_gs_redeemer(GlobalStateSpent { global_state_input_index: 1 }),
+    Transaction {
+      ..tx,
+      inputs: [seized, p_with_gs_logic(gs_input, p_pu_cred)],
+      withdrawals: [Pair(Script(p_pu_cred), 0), ..tx.withdrawals],
+      extra_signatories: [],
+    },
+  )
 }

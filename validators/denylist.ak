@@ -13,11 +13,14 @@ use cardano/transaction.{
   InlineDatum, Input, NoDatum, Output, OutputReference, Transaction, find_input,
 }
 use constants
+use tests
 use types/denylist.{
   AddToDenylist, Deinit, Denylist, Init, MintRedeemer, RemoveFromDenylist,
   SpendRedeemer, StateTransition,
 }
-use types/global_state.{GlobalStateDatum, gs_datum_from_ref_input}
+use types/global_state.{
+  GlobalStateDatum, genesis_global_state, gs_core_from_ref_input,
+}
 use types/power_users.{PowerUser}
 use utils.{must_be_signed_by_credential, quantity_of_policy_id}
 
@@ -33,7 +36,7 @@ fn power_user_from_refs(
   power_user_node_ref_input_index: Int,
   power_user_list_script_hash: ByteArray,
 ) -> (ByteArray, PowerUser) {
-  let gs = gs_datum_from_ref_input(
+  let gs = gs_core_from_ref_input(
     self.reference_inputs,
     global_state_ref_input_index,
     global_state_policy_id,
@@ -44,11 +47,18 @@ fn power_user_from_refs(
     self.reference_inputs,
     power_user_node_ref_input_index,
   )
-  utils.authenticated_power_user(
+  let (power_user_credential_hash, power_user_data) = utils.authenticated_power_user(
     power_user_node_ref_input.output,
     gs.power_user_linked_list_policy_id,
     power_user_list_script_hash,
   )
+  // Never the GlobalState logic named in field 0: its withdrawal would sign
+  // for the operator. Today it cannot appear here — it needs GlobalState
+  // SPENT (or, once, minted at genesis, before any GlobalState exists to
+  // read), and this reads GlobalState as a reference input, which the ledger
+  // keeps disjoint from the inputs — but that is a ledger rule, not ours.
+  expect power_user_credential_hash != gs.global_state_script_credential_hash
+  (power_user_credential_hash, power_user_data)
 }
 
 validator denylist_validator(denylist_linked_list_policy_id: ByteArray) {
@@ -101,8 +111,9 @@ validator mint(
   mint(redeemer: MintRedeemer, policy_id: PolicyId, self: Transaction) {
     when redeemer is {
       Init { root_output_index } -> {
-        // Nonce-gated. GS doesn't exist yet at bootstrap — the operator-held
-        // one-shot UTxO is the implicit gate, same pattern as power_users.
+        // Nonce-gated. GS is only being created in this same transaction (it is
+        // an output, not yet an input) — the operator-held one-shot UTxO is the
+        // implicit gate, same pattern as power_users.
         let nonce_validated = list.any(
           self.inputs,
           fn(input) { input.output_reference == init_input_out_ref },
@@ -112,6 +123,13 @@ validator mint(
           dict.size(tokens(self.mint, policy_id)) == 1,
           // Genesis: no list node exists yet, so none may be spent.
           (utils.count_inputs_with_policy(self.inputs, policy_id) == 0)?,
+          // Genesis binding: the GlobalState minted in this same transaction
+          // must name THIS list. The GlobalState mint only checks that the
+          // policy its datum names mints something, and the id is immutable
+          // afterwards — so a deployment naming another list would leave this
+          // one, and the role or sanctions checks it carries, unreachable for
+          // good. Not circular: the GlobalState policy is a parameter here.
+          (genesis_global_state(self.outputs, global_state_policy_id).denylist_linked_list_policy_id == policy_id)?,
           // The library hands this callback the produced root's ADDRESS, so a
           // caller could in principle pin where the root lands. THIS ONE CANNOT,
           // and the reason is worth recording so nobody tries to "fix" it:
@@ -154,12 +172,12 @@ validator mint(
         // lists — and makes this branch what its name suggests: cleanup, not a
         // kill switch.
         //
-        // Read with `gs_datum_from_ref_input`, NOT `active_admin_from_ref_input`:
+        // Read with `gs_core_from_ref_input`, NOT `active_admin_from_ref_input`:
         // the latter traps on a deactivated protocol, which is exactly the
         // state this branch now requires. The GlobalState UTxO can no longer be
         // spent once deactivated, but it is still readable as a reference
         // input, so the admin credential remains available here.
-        let gs = gs_datum_from_ref_input(
+        let gs = gs_core_from_ref_input(
           self.reference_inputs,
           global_state_ref_input_index,
           global_state_policy_id,
@@ -509,6 +527,7 @@ fn t_dl_stray_input(ix: Int) -> Input {
 
 fn t_gs_datum(deactivated: Bool) -> GlobalStateDatum {
   GlobalStateDatum {
+    global_state_script_credential_hash: #"9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a",
     transfers_paused: False,
     deactivated,
     mintable_amount: 1_000_000_000,
@@ -765,4 +784,31 @@ test denylist_remove_rejects_a_27_byte_key() {
 /// Same guard, one byte long.
 test denylist_remove_rejects_a_29_byte_key() {
   !t_run_denylist_remove(t_key_29, t_dl_remove_tx(t_key_29))
+}
+
+// Non-upgradeable: must keep reading a GlobalState datum a future version
+// extended with trailing fields (see decode_global_state_core).
+test denylist_insert_accepts_a_global_state_with_trailing_fields() {
+  t_run_denylist_add(
+    t_key_28,
+    tests.with_trailing_gs_fields(t_dl_insert_tx(t_key_28), t_gs_policy),
+  )
+}
+
+// Frozen core: the sanctions path keeps working when a later logic reshapes
+// every field after 0–4.
+test denylist_insert_accepts_a_global_state_with_a_reshaped_tail() {
+  t_run_denylist_add(
+    t_key_28,
+    tests.with_reshaped_gs_tail(t_dl_insert_tx(t_key_28), t_gs_policy),
+  )
+}
+
+// The sanctions path must treat a malformed `deactivated` as an error, never
+// as "live".
+test denylist_insert_rejects_a_malformed_deactivated_flag() fail {
+  t_run_denylist_add(
+    t_key_28,
+    tests.with_malformed_gs_deactivated(t_dl_insert_tx(t_key_28), t_gs_policy),
+  )
 }

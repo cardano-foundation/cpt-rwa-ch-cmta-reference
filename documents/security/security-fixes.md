@@ -331,7 +331,7 @@ exactly one extra input, so they isolate the count),
 `absence_proof_rejects_a_covering_node_in_a_wallet`,
 `wallet_held_power_user_node_cannot_authorise_a_sanction`,
 `misplaced_power_user_node_cannot_authorise_a_sanction`, and — in
-`validators/global_state.ak` — `pause_fails_when_the_power_user_node_is_in_a_wallet` and
+`validators/global_state_logic_tests.ak` — `pause_fails_when_the_power_user_node_is_in_a_wallet` and
 `pause_fails_when_the_power_user_node_is_at_the_wrong_script`, each with a positive control.
 
 The two `*_spend_handler_is_pure_delegation` tests are deliberate records that the `spend` handlers
@@ -497,7 +497,7 @@ withdrawal from the control UTxO is a privileged operator moving their own worki
 attack. `value_preserved` is therefore exactly what the code says it is, and nothing more:
 
 ```aiken
-// validators/global_state.ak
+// validators/global_state_logic.ak
 let value_preserved = without_lovelace(own_input.output.value) == without_lovelace(
   global_state_output.value,
 )
@@ -749,8 +749,8 @@ it has been skipped:
    can never be spent again, so every lovelace left on it — along with the GlobalState NFT itself —
    is locked forever. This is the one place the accepted ADA-withdrawal behaviour of
    [§7](#7-the-globalstate-utxos-ada-balance-was-unconstrained) is not merely harmless but useful.
-2. **Pause** — needs a live `can_pause` power user, so it must happen while the operator list is
-   still populated.
+2. **Pause** (skip if already paused — a pause that does not flip the flag is rejected) — needs a
+   live `can_pause` power user, so it must happen while the operator list is still populated.
 3. **Empty the denylist** (`RemoveFromDenylist` per entry, `is_admin` power user).
 4. **Empty the power-users list** (`RemovePowerUser` per entry, admin) — last, because steps 2 and 3
    consume power-user nodes.
@@ -903,11 +903,70 @@ adding the constant perturbs nothing that does not use it.
 
 ---
 
+## 14. Registry fields 3 and 4 accepted any script (F08)
+
+At registration and on `UpgradeRegistryNode` the minting authority only checked that registry fields
+3 and 4 were *some* script credential. The base layer authorises a seizure by the field-4 script's
+withdraw-0 alone, with no owner consent, so a swapped pair or a foreign script there would have let
+anyone seize: with this deployment's transfer logic in field 4, every seizure passes on pause,
+denylist and KYC alone.
+
+**Changed (2026-10-15):** `minting_authority_validator` takes two more parameters,
+`transfer_logic_script_hash` and `third_party_transfer_logic_script_hash`, and both registration
+branches and `UpgradeRegistryNode` require fields 3 and 4 to equal exactly `Script` of them. The two
+must differ. Re-pointing either field now means `RotateMintingScript` to an authority built with the
+new hash first, then `UpgradeRegistryNode`. Only the minting authority's hash changes, so a
+deployment that has not locked upgrades can adopt the fix by rotation; nothing permanent is
+redeployed. Rotation does not re-check the node already registered: after rotating, read the live
+node and confirm field 3 is `Script` of the transfer logic and field 4 `Script` of the seizure logic;
+if not, run `UpgradeRegistryNode` before `LockUpgrades`.
+
+**Pinned by** the `registration_*` and `upgrade_*` tests in the F08 section of
+`validators/minting_authority.ak` (swapped scripts, a foreign transfer or seizure script, the
+transfer script in both fields) and
+`an_authority_built_with_one_hash_for_both_scripts_refuses_registration`; each pin was
+mutation-checked.
+
+## 15. Genesis never ran the field-0 logic, and rotation accepted any script that runs
+
+Two halves of one gap, raised in review of PR #29. Genesis only checked field 0's length and that it
+differed from the proxy, the admin and the minting authority: a field 0 that could not run (a typo,
+an unregistered stake credential, a build for another GlobalState policy) produced a GlobalState that
+no action could ever spend, rotation included, since rotation needs the current logic to run. And the rotation's check
+that the new logic runs was satisfied by any script whose withdraw-0 passes in a GlobalState
+transaction, such as this deployment's own transfer logic.
+
+**Changed (2026-10-16):**
+* The GlobalState mint requires the withdraw-0 of the logic field 0 names, and `global_state_logic`
+  gained a one-shot genesis branch, gated on the GlobalState NFT being minted in the same
+  transaction: the output carrying the NFT must name this logic in field 0 and fit this logic's own
+  `max_global_state_datum_bytes`, so the two caps agree at birth. Outside genesis the logic's
+  withdrawal still proves nothing without a spent GlobalState.
+* The outgoing side of `RotateGlobalStateScript` requires the new logic to run with the very same
+  rotation redeemer, so a script that cannot decode a GlobalState rotation cannot be installed.
+
+Neither proves the script is a correct GlobalState logic — one that ignores its redeemer passes — so
+the runbooks now require re-deriving the hash from source and every parameter before signing genesis
+or a rotation. The mint change moves the GlobalState policy id and applies to new deployments only;
+the logic change can be adopted by rotation.
+
+**Pinned by** `global_state_mint_fails_without_the_global_state_logic_withdrawal`,
+`global_state_mint_fails_when_only_another_script_withdraws`, `logic_accepts_the_genesis_that_names_it`,
+the `logic_genesis_*` tests, `logic_built_for_another_global_state_policy_fails_genesis`, and
+`rotate_gs_logic_fails_when_the_new_logic_runs_with_another_redeemer`,
+`rotate_gs_logic_fails_when_the_new_logic_redeemer_names_another_logic` and
+`rotate_gs_logic_fails_without_a_redeemer_for_the_new_logic`; each new check was mutation-checked.
+The new checks also hid five older guards from the tests written for them — rotation's 28-byte,
+self-rotation, minting-authority and admin guards, and genesis's proxy guard — so each now has a
+test in which it is the only check that fails (`t_consistent_rotate_tx`,
+`global_state_mint_fails_when_field_0_is_the_proxy_even_if_it_runs`).
+
 ## Acknowledged, and deliberately not changed
 
 Findings from the 2026-08-28 audit that were reviewed and judged not to warrant a code change. They
 are recorded here so a future reader does not have to re-derive the reasoning — and so that a future
-*change* in any of these areas is a conscious one.
+*change* in any of these areas is a conscious one. Entries marked "partly changed" were revisited
+later; each says what changed and when.
 
 ### The transfer withdraw-0 is satisfiable with no parties
 
@@ -928,18 +987,35 @@ Left as is. The seizure path carries an equivalent guard (`at_least_one_seized_i
 authorises an *override* and must be bound to real seized value; the transfer path authorises
 nothing on its own.
 
-### `PauseTransfers` accepts a no-op transition
+### `PauseTransfers` churn can race admin recovery (F11, issue #17) — partly changed
 
-The branch does not require `transfers_paused` to actually change, so a `can_pause` operator can
-re-pause an already-paused protocol. This churns the single control UTxO and, given that lovelace is
-unconstrained (§7), can move ADA out of it repeatedly.
+**Changed (2026-10-14):** the branch now requires `transfers_paused` to flip. Previously a
+`can_pause` operator could re-pause an already-paused protocol (or re-unpause an unpaused one) as
+often as they liked. Each such write changed nothing but the GlobalState UTxO reference, and every
+admin transaction built against the previous reference became stale. That includes the power-users
+update that revokes the operator's `can_pause`, because it reads GlobalState as a reference input.
+Pinned by the `pause_flip_*` tests in `validators/global_state_logic_tests.ak`.
 
-Not a defect: the operator is signing, holds the flag, and can already pause and unpause at will —
-the no-op grants no authority they lack. The recovery is the ordinary one, the admin removing the
-flag. (`LockUpgrades` *does* refuse a no-op, but for a different reason: it is one-way, so
-`True → True` would be a silent no-op on an irreversible action.)
+**Still accepted:** contention on the singleton UTxO is not removed. An operator can still
+alternate paused → unpaused → paused, one write per flip, and lovelace stays unconstrained (§7).
+Every such write now changes the protocol state visibly and is attributable to the signing
+operator. Recovery is the ordinary one: the admin revokes `can_pause`, built against the freshest
+GlobalState UTxO and resubmitted if it goes stale. Removing the race entirely needs a larger change
+to emergency semantics, such as admin-only unpause or direct deactivation without a paused
+pre-state, and was not chosen.
 
-### Datum size: the three caps do not add up to a joint bound
+### Datum size: the three caps do not add up to a joint bound (F09, issue #15) — partly changed
+
+**Changed (2026-10-14):** a joint bound now exists. `max_global_state_datum_bytes`, a parameter of
+both the GlobalState mint and the GlobalState logic (recommended 8192), caps the serialised datum,
+appended fields included, at genesis and on every GlobalState action: one check runs before the
+action dispatch, so a future branch cannot forget it. A write passes if it fits the cap **or** does
+not grow the datum, so a datum left over the cap (for example by a logic with a higher cap) can always be
+shrunk. The exception is excess held in fields a later logic appended: this logic cannot remove them.
+The mint and logic values are not tied together on chain; the deployment script must check them.
+The per-field caps stay: they still bound a single entry. Pinned by the `datum_cap_*` tests in
+`validators/global_state.ak` and `validators/global_state_logic_tests.ak`. The original assessment
+follows.
 
 `max_trusted_entities` (64), `max_trusted_entity_metadata_bytes` (512 B) and
 `max_security_info_bytes` (4096 B) are enforced independently, and nothing checks their sum. At the
@@ -1165,7 +1241,8 @@ This change set is **redeploy-only** — it moves the denylist policy id and the
 address. Nothing is on mainnet, so that is the clean path.
 
 Do **not** call `LockUpgrades` until these fixes are deployed. It permanently closes both upgrade
-paths.
+paths (and, since `SetMintableAmount` and `RotateGlobalStateScript` were added, admin changes to
+the supply cap and replacement of the GlobalState logic).
 
 ---
 
