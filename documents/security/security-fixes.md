@@ -927,6 +927,68 @@ transfer script in both fields) and
 `an_authority_built_with_one_hash_for_both_scripts_refuses_registration`; each pin was
 mutation-checked.
 
+## 15. Genesis never ran the field-0 logic, and rotation accepted any script that runs
+
+Two halves of one gap, raised in review of PR #29. Genesis only checked field 0's length and that it
+differed from the proxy, the admin and the minting authority: a field 0 that could not run (a typo,
+an unregistered stake credential, a build for another GlobalState policy) produced a GlobalState that
+no action could ever spend, rotation included, since rotation needs the current logic to run. And the rotation's check
+that the new logic runs was satisfied by any script whose withdraw-0 passes in a GlobalState
+transaction, such as this deployment's own transfer logic.
+
+**Changed (2026-10-16):**
+* The GlobalState mint requires the withdraw-0 of the logic field 0 names, and `global_state_logic`
+  gained a one-shot genesis branch, gated on the GlobalState NFT being minted in the same
+  transaction: the output carrying the NFT must name this logic in field 0 and fit this logic's own
+  `max_global_state_datum_bytes`, so the two caps agree at birth. Outside genesis the logic's
+  withdrawal still proves nothing without a spent GlobalState.
+* The outgoing side of `RotateGlobalStateScript` requires the new logic to run with the very same
+  rotation redeemer, so a script that cannot decode a GlobalState rotation cannot be installed.
+
+Neither proves the script is a correct GlobalState logic — one that ignores its redeemer passes — so
+the runbooks now require re-deriving the hash from source and every parameter before signing genesis
+or a rotation. The mint change moves the GlobalState policy id and applies to new deployments only;
+the logic change can be adopted by rotation.
+
+**Pinned by** `global_state_mint_fails_without_the_global_state_logic_withdrawal`,
+`global_state_mint_fails_when_only_another_script_withdraws`, `logic_accepts_the_genesis_that_names_it`,
+the `logic_genesis_*` tests, `logic_built_for_another_global_state_policy_fails_genesis`, and
+`rotate_gs_logic_fails_when_the_new_logic_runs_with_another_redeemer`,
+`rotate_gs_logic_fails_when_the_new_logic_redeemer_names_another_logic` and
+`rotate_gs_logic_fails_without_a_redeemer_for_the_new_logic`; each new check was mutation-checked.
+The new checks also hid five older guards from the tests written for them — rotation's 28-byte,
+self-rotation, minting-authority and admin guards, and genesis's proxy guard — so each now has a
+test in which it is the only check that fails (`t_consistent_rotate_tx`,
+`global_state_mint_fails_when_field_0_is_the_proxy_even_if_it_runs`).
+
+## 16. The power-users list policy id was held twice on the mint path
+
+Raised in review of PR #29. The minting authority took `power_users_linked_list_policy_id` as a
+compile-time parameter and required it to equal GlobalState field 3, the same value. The seizure
+logic (2026-08-20) and the denylist (a5d5883) had already dropped their copies. The GlobalState
+datum's copy cannot go: the GlobalState mint checks the list root at genesis, and the list's policy
+is built from the GlobalState policy, so it cannot be a parameter there.
+
+**Changed (2026-10-21):** `minting_authority_validator` drops the parameter (**10 → 9**) and
+authenticates power-user nodes under field 3 of the NFT-authenticated GlobalState input. This
+supersedes the 2026-08-20 cross-check. Only the minting authority's hash moves, so a deployment that
+has not locked upgrades adopts it by `RotateMintingScript`. Deploy scripts must drop the fourth
+argument.
+
+**What it costs.** Under this GlobalState logic, field 3 is set once at genesis and no action writes
+it, so the authority accepts no new transaction. The cross-check differed only if genesis had named
+a wrong policy (or if a future logic rewrote field 3). Then every mint trapped; now mints follow
+that policy's nodes, as seizure, sanctions and `PauseTransfers` already did. Field 3's value is
+therefore a replacement-logic invariant (`global_state_logic.ak`, invariant 11), and the genesis
+check that both list policy ids match their compiled `mint` hashes is load-bearing for the mint path
+too. `power_user_list_script_hash` pins only the node's address: anyone can pay a foreign-policy NFT
+there.
+
+**Pinned by** `mint_fails_when_global_state_power_user_policy_id_mismatches` and its positive
+control, re-purposed: field 3 names a policy the node is not under, so `authenticated_power_user`
+traps. Mutation-checked: authenticating under a fixed policy instead of field 3 makes the negative
+test fail.
+
 ## Acknowledged, and deliberately not changed
 
 Findings from the 2026-08-28 audit that were reviewed and judged not to warrant a code change. They
@@ -1207,8 +1269,8 @@ This change set is **redeploy-only** — it moves the denylist policy id and the
 address. Nothing is on mainnet, so that is the clean path.
 
 Do **not** call `LockUpgrades` until these fixes are deployed. It permanently closes both upgrade
-paths (and, since `SetMintableAmount` and `MigrateGlobalState` were added, admin changes to the
-supply cap and replacement of the GlobalState validator).
+paths (and, since `SetMintableAmount` and `RotateGlobalStateScript` were added, admin changes to
+the supply cap and replacement of the GlobalState logic).
 
 ---
 

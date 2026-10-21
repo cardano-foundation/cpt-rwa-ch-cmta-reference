@@ -690,7 +690,6 @@ fn run_authority(
     sec_name,
     gs_policy,
     registry_policy,
-    pu_policy,
     proxy_hash,
     issuance_policy,
     denylist_script_hash,
