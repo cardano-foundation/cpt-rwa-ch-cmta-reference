@@ -89,6 +89,12 @@ use utils.{must_be_signed_by_credential, must_run_script_withdrawal}
 //      redeemer unchanged — `GlobalStateSpendRedeemer` with
 //      `RotateGlobalStateScript` at constructor 14 — since the outgoing side
 //      requires both withdrawals to carry the same one.
+//  11. Field 3's VALUE (`power_user_linked_list_policy_id`) never changes after
+//      genesis — invariant 4 freezes only its position and type. It is the
+//      sole anchor for which list's nodes are power users: the minting
+//      authority, the denylist, the third-party transfer logic and
+//      PauseTransfers here all authenticate operators under it with no
+//      compile-time copy to check against.
 validator global_state_logic(
   security_asset_name: ByteArray,
   issuance_policy_id: ByteArray,

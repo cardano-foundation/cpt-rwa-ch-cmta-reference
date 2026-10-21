@@ -379,7 +379,7 @@ exact order the blueprint (`plutus.json`) declares them; apply top to bottom.
 | 7 | `global_state_logic.global_state_logic` (withdraw) | `security_asset_name`, `issuance_policy_id`, `global_state_policy_id`, `power_user_list_script_hash`, `max_global_state_datum_bytes` | Operator choice; the **issuance policy ID**, i.e. the security token's policy ID, derived from row 6's hash (see below; **not** row 6's hash itself); row 1; the hash of `power_users_validator` (row 3); the datum-size cap (same value as row 1; a rotated-in logic may choose another). Its hash goes into GlobalState datum **field 0** at genesis. |
 | 8 | `transfer_logic_script.transfer_logic_validator` | `security_asset_name`, `global_state_policy_id`, `expected_issuance_policy_id`, `denylist_script_hash` | Operator choice; row 1; the issuance policy ID (as row 7); the hash of `denylist_validator` (row 5). |
 | 9 | `third_party_transfer_logic_script.third_party_transfer_logic_validator` | `security_asset_name`, `global_state_policy_id`, `expected_issuance_policy_id`, `denylist_script_hash`, `power_user_list_script_hash` | Operator choice; row 1; the issuance policy ID (as row 7); row 5's hash; row 3's hash. (The power-users policy id is read from the GlobalState datum at run time, not compiled in.) |
-| 10 | `minting_authority.minting_authority_validator` | `security_asset_name`, `global_state_policy_id`, `registry_policy_id`, `power_users_linked_list_policy_id`, `minting_logic_script_credential_hash`, `expected_issuance_policy_id`, `denylist_script_hash`, `power_user_list_script_hash`, `transfer_logic_script_hash`, `third_party_transfer_logic_script_hash` | Operator choice; row 1; Prerequisites; row 2's hash; row 6's hash; the issuance policy ID (as row 7 — it **differs** from row 6's hash, see below); row 5's hash; row 3's hash; row 8's hash; row 9's hash (the scripts registry fields 3 and 4 must name). |
+| 10 | `minting_authority.minting_authority_validator` | `security_asset_name`, `global_state_policy_id`, `registry_policy_id`, `minting_logic_script_credential_hash`, `expected_issuance_policy_id`, `denylist_script_hash`, `power_user_list_script_hash`, `transfer_logic_script_hash`, `third_party_transfer_logic_script_hash` | Operator choice; row 1; Prerequisites; row 6's hash; the issuance policy ID (as row 7 — it **differs** from row 6's hash, see below); row 5's hash; row 3's hash; row 8's hash; row 9's hash (the scripts registry fields 3 and 4 must name). The power-users policy id is read from the GlobalState datum at run time, not compiled in. |
 
 ### What the derived parameters must equal
 
@@ -452,7 +452,10 @@ runs, so forgetting the proxy's registration makes every mint and burn fail from
 > policy, which depends on the mint's own parameters. A field 0 that cannot run now fails genesis;
 > one that runs and accepts it — another validator, or this logic applied with a wrong parameter —
 > still gets through and then governs GlobalState. Smoke-test one GlobalState action right after
-> genesis.
+> genesis. The power-users policy ID (field 3) is the only anchor for which list's nodes are
+> operators: the minting authority, the denylist, seizure and `PauseTransfers` authenticate
+> them under it, with no compile-time copy, so a wrong field 3 hands those roles to whoever
+> controls that policy.
 
 ### What is delegated to the CIP-113 base layer
 

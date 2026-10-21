@@ -88,12 +88,19 @@ use utils.{must_be_signed_by_credential}
 ///      forbids duplicate keys, no second node naming this proxy can ever be
 ///      inserted. Weaken this and registration becomes a stealthy, repeatable
 ///      vehicle for hijacking transfer compliance. IRREVERSIBLE.
+///   6. POWER USERS ARE AUTHENTICATED UNDER GLOBALSTATE FIELD 3
+///      (`power_user_linked_list_policy_id`), read from the NFT-authenticated
+///      GlobalState input — there is no compile-time copy to check it
+///      against. `power_user_list_script_hash` pins only the node's ADDRESS,
+///      and anyone can pay an NFT of a foreign policy there, so field 3 is the
+///      sole anchor for which list grants `can_mint` / `can_burn`. It is set
+///      once at genesis and no GlobalState logic may ever change its value
+///      (see the replacement-logic invariants in global_state_logic.ak).
 /// ============================================================================
 validator minting_authority_validator(
   security_asset_name: ByteArray,
   global_state_policy_id: ByteArray,
   registry_policy_id: ByteArray,
-  power_users_linked_list_policy_id: ByteArray,
   // The permanent proxy's hash (validators/minting_logic_script.ak) — used
   // to independently re-verify the registry node this transaction concerns
   // (see the redeemer type's doc comment). Not circular: the proxy never
@@ -185,10 +192,9 @@ validator minting_authority_validator(
           )
         // Decode GlobalState ONCE. The NFT check authenticates the UTxO
         // BEFORE any field of its datum is read; `!deactivated` traps
-        // immediately (INVARIANT 4). The power-users list policy cross-check
-        // moves here (from `verify_mint_or_burn`) so both callers — this one
-        // and `RegisterMint` below — do it once, against the same decoded
-        // field list, instead of the callee re-deriving it per call.
+        // immediately (INVARIANT 4). The power-users list policy id is read
+        // from that same authenticated datum (INVARIANT 6), here, so both
+        // callers — this one and `RegisterMint` below — read it once.
         let gs_input = utils.safe_list_at(self.inputs, global_state_input_index)
         expect
           quantity_of(
@@ -199,10 +205,8 @@ validator minting_authority_validator(
         expect InlineDatum(gs_raw) = gs_input.output.datum
         let fields = builtin.unconstr_fields(gs_raw)
         expect !global_state.get_deactivated(fields)
-        expect
-          power_users_linked_list_policy_id == global_state.get_power_user_linked_list_policy_id(
-            fields,
-          )
+        let power_user_linked_list_policy_id =
+          global_state.get_power_user_linked_list_policy_id(fields)
         and {
           // Steady state mints supply and nothing else. A CIP-68 metadata
           // token is a registration-time artefact; allowing one here would let
@@ -220,7 +224,7 @@ validator minting_authority_validator(
             power_user_node_ref_input_index,
             destination_actions,
             security_asset_name,
-            power_users_linked_list_policy_id,
+            power_user_linked_list_policy_id,
             denylist_script_hash,
             power_user_list_script_hash,
             self,
@@ -254,8 +258,9 @@ validator minting_authority_validator(
         )
         // Decode GlobalState ONCE — same shape as the MintBurn call site
         // above: the NFT check authenticates the UTxO before any field of
-        // its datum is read, and the deactivation trap and power-users
-        // cross-check both run here rather than inside `verify_mint_or_burn`.
+        // its datum is read, and the deactivation trap and the power-users
+        // list policy read both run here rather than inside
+        // `verify_mint_or_burn`.
         let gs_input = utils.safe_list_at(self.inputs, global_state_input_index)
         expect
           quantity_of(
@@ -266,10 +271,8 @@ validator minting_authority_validator(
         expect InlineDatum(gs_raw) = gs_input.output.datum
         let fields = builtin.unconstr_fields(gs_raw)
         expect !global_state.get_deactivated(fields)
-        expect
-          power_users_linked_list_policy_id == global_state.get_power_user_linked_list_policy_id(
-            fields,
-          )
+        let power_user_linked_list_policy_id =
+          global_state.get_power_user_linked_list_policy_id(fields)
         let admin_credential_hash = global_state.get_admin_credential_hash(
           fields,
         )
@@ -312,7 +315,7 @@ validator minting_authority_validator(
             power_user_node_ref_input_index,
             destination_actions,
             security_asset_name,
-            power_users_linked_list_policy_id,
+            power_user_linked_list_policy_id,
             denylist_script_hash,
             power_user_list_script_hash,
             self,
@@ -726,9 +729,9 @@ fn names_pinned_transfer_scripts(
 ///
 /// GlobalState arrives ALREADY AUTHENTICATED as `gs_raw` — the raw datum
 /// `Data` of a UTxO the caller has already NFT-checked. This function must
-/// not re-resolve or re-authenticate it: the deactivation trap and the
-/// power-users list policy cross-check both already ran at the call site,
-/// against the same decoded field list. The only thing left genuinely
+/// not re-resolve or re-authenticate it: the deactivation trap already ran at
+/// the call site, which also read `power_user_linked_list_policy_id` from the
+/// same decoded field list. The only thing left genuinely
 /// conditional on the caller's shape is the full TYPED decode, which only a
 /// mint (`minted_amount > 0`) needs, for destination vetting — a burn pays
 /// no decode at all.
@@ -739,7 +742,7 @@ fn verify_mint_or_burn(
   power_user_node_ref_input_index: Int,
   destination_actions: List<MintingLogicDestinationAction>,
   security_asset_name: ByteArray,
-  power_users_linked_list_policy_id: ByteArray,
+  power_user_linked_list_policy_id: ByteArray,
   denylist_script_hash: ByteArray,
   power_user_list_script_hash: ByteArray,
   self: Transaction,
@@ -760,7 +763,7 @@ fn verify_mint_or_burn(
 
   let (power_user_node_key, power_user_data) = utils.authenticated_power_user(
     power_user_ref_input.output,
-    power_users_linked_list_policy_id,
+    power_user_linked_list_policy_id,
     power_user_list_script_hash,
   )
 
@@ -1130,8 +1133,8 @@ fn make_gs_ref_input_locked() -> Input {
 
 // The mint-path GlobalState input (SPENT — `make_gs_input`'s shape), but
 // with its `power_user_linked_list_policy_id` field overridden. Models a
-// mis-deployment where the datum's genesis-set copy of the list policy id
-// disagrees with this validator's compile-time parameter.
+// GlobalState whose field 3 names a different list policy than the one the
+// power-user node's NFT is under.
 fn make_gs_input_with_pu_policy(pu_policy_id: ByteArray) -> Input {
   let base = make_gs_input(False)
   expect InlineDatum(raw) = base.output.datum
@@ -1492,7 +1495,6 @@ fn run_withdraw(redeemer: MintingAuthorityWithdrawRedeemer, tx: Transaction) {
     test_security_asset_name,
     test_gs_policy_id,
     test_registry_policy_id,
-    test_pu_policy_id,
     test_proxy_hash,
     test_issuance_policy_id,
     test_denylist_script_hash,
@@ -1707,7 +1709,7 @@ test mint_authority_withdraw_fails_when_minting_without_mint_permission() {
   )
 }
 
-// ── power-user list policy id cross-check ────────────────────────────────────
+// ── power-user list policy id comes from GlobalState field 3 (INVARIANT 6) ───
 
 test mint_succeeds_when_global_state_power_user_policy_id_matches() {
   // POSITIVE CONTROL. Same shape as `mint_succeeds_with_clean_destination_no_receiver_kyc`,
@@ -1738,10 +1740,10 @@ test mint_succeeds_when_global_state_power_user_policy_id_matches() {
 }
 
 test mint_fails_when_global_state_power_user_policy_id_mismatches() fail {
-  // The GlobalState datum's own `power_user_linked_list_policy_id` must
-  // agree with this deployment's compile-time parameter (`test_pu_policy_id`,
-  // as supplied by `run_withdraw`). Traps at the cross-check `expect` in
-  // `verify_mint_or_burn`, before the power-user node is even looked up.
+  // Power users are authenticated under the GlobalState datum's own
+  // `power_user_linked_list_policy_id`, never a fixed policy. Here it names a
+  // policy the power-user node's NFT (under `test_pu_policy_id`) is not under,
+  // so `utils.authenticated_power_user` in `verify_mint_or_burn` traps.
   let amount = 1_000
   let redeemer = MintBurn {
     global_state_input_index: 0,
@@ -2843,7 +2845,6 @@ test publish_accepts_credential_registration() {
     test_security_asset_name,
     test_gs_policy_id,
     test_registry_policy_id,
-    test_pu_policy_id,
     test_proxy_hash,
     test_issuance_policy_id,
     test_denylist_script_hash,
@@ -2872,7 +2873,6 @@ test publish_rejects_credential_deregistration() {
     test_security_asset_name,
     test_gs_policy_id,
     test_registry_policy_id,
-    test_pu_policy_id,
     test_proxy_hash,
     test_issuance_policy_id,
     test_denylist_script_hash,
@@ -2945,7 +2945,6 @@ fn run_withdraw_with_protected_security_name(
     #"000643b0534543",
     test_gs_policy_id,
     test_registry_policy_id,
-    test_pu_policy_id,
     test_proxy_hash,
     test_issuance_policy_id,
     test_denylist_script_hash,
@@ -3135,7 +3134,6 @@ test an_authority_built_with_one_hash_for_both_scripts_refuses_registration() fa
     test_security_asset_name,
     test_gs_policy_id,
     test_registry_policy_id,
-    test_pu_policy_id,
     test_proxy_hash,
     test_issuance_policy_id,
     test_denylist_script_hash,

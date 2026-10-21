@@ -807,15 +807,16 @@ test force_transfer_rejected_when_not_signed() {
 }
 
 // ============================================================================
-// Power-users list policy cross-check
+// Power users are authenticated under GlobalState field 3
 // ============================================================================
-// The compile-time `power_users_linked_list_policy_id` parameter and
-// GlobalState's `power_user_linked_list_policy_id` field must agree. Both
-// tests share one fixture — only that one datum field differs — so the
-// pairing pins that the trap is caused specifically by the mismatch.
+// There is no compile-time copy of the power-users list policy id: the
+// `can_force_transfer` node is authenticated under GlobalState's
+// `power_user_linked_list_policy_id` field. Both tests share one fixture —
+// only that one datum field differs — so the pairing pins that the trap is
+// caused specifically by field 3 naming a policy the node is not under.
 
 /// Sibling of `p_gs_ref_input` with a caller-chosen
-/// `power_user_linked_list_policy_id`, for the cross-check tests below.
+/// `power_user_linked_list_policy_id`, for the field-3 tests below.
 fn p_gs_ref_input_with_pu_policy(pu_policy_field: ByteArray) -> Input {
   let datum = GlobalStateDatum {
     global_state_script_credential_hash: #"9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a",
@@ -852,15 +853,14 @@ fn p_gs_ref_input_with_pu_policy(pu_policy_field: ByteArray) -> Input {
 }
 
 /// A policy id distinct from `p_pu_policy` (this deployment's real
-/// power-users list), used only to prove the cross-check catches a mismatch.
+/// power-users list), used only to prove field 3 is the policy the node is
+/// authenticated under.
 const p_wrong_pu_policy: ByteArray =
   #"bfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbf"
 
-/// NEGATIVE. GlobalState's `power_user_linked_list_policy_id` disagrees with
-/// the deployment's `p_pu_policy` parameter. Traps at
-/// `expect gs_datum.power_user_linked_list_policy_id ==
-/// power_users_linked_list_policy_id`, before any power-user node is read.
-/// Hence `fail`.
+/// NEGATIVE. GlobalState's `power_user_linked_list_policy_id` names a policy
+/// the power-user node's NFT (under `p_pu_policy`) is not under, so
+/// `utils.authenticated_power_user` traps. Hence `fail`.
 test force_transfer_rejects_a_global_state_with_a_mismatched_power_user_policy() fail {
   let tx = Transaction {
     ..p_tx(False, False, False, True, [p_seized_input()], [p_pu_cred]),

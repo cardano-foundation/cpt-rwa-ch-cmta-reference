@@ -961,6 +961,34 @@ self-rotation, minting-authority and admin guards, and genesis's proxy guard —
 test in which it is the only check that fails (`t_consistent_rotate_tx`,
 `global_state_mint_fails_when_field_0_is_the_proxy_even_if_it_runs`).
 
+## 16. The power-users list policy id was held twice on the mint path
+
+Raised in review of PR #29. The minting authority took `power_users_linked_list_policy_id` as a
+compile-time parameter and required it to equal GlobalState field 3, the same value. The seizure
+logic (2026-08-20) and the denylist (a5d5883) had already dropped their copies. The GlobalState
+datum's copy cannot go: the GlobalState mint checks the list root at genesis, and the list's policy
+is built from the GlobalState policy, so it cannot be a parameter there.
+
+**Changed (2026-10-21):** `minting_authority_validator` drops the parameter (**10 → 9**) and
+authenticates power-user nodes under field 3 of the NFT-authenticated GlobalState input. This
+supersedes the 2026-08-20 cross-check. Only the minting authority's hash moves, so a deployment that
+has not locked upgrades adopts it by `RotateMintingScript`. Deploy scripts must drop the fourth
+argument.
+
+**What it costs.** Under this GlobalState logic, field 3 is set once at genesis and no action writes
+it, so the authority accepts no new transaction. The cross-check differed only if genesis had named
+a wrong policy (or if a future logic rewrote field 3). Then every mint trapped; now mints follow
+that policy's nodes, as seizure, sanctions and `PauseTransfers` already did. Field 3's value is
+therefore a replacement-logic invariant (`global_state_logic.ak`, invariant 11), and the genesis
+check that both list policy ids match their compiled `mint` hashes is load-bearing for the mint path
+too. `power_user_list_script_hash` pins only the node's address: anyone can pay a foreign-policy NFT
+there.
+
+**Pinned by** `mint_fails_when_global_state_power_user_policy_id_mismatches` and its positive
+control, re-purposed: field 3 names a policy the node is not under, so `authenticated_power_user`
+traps. Mutation-checked: authenticating under a fixed policy instead of field 3 makes the negative
+test fail.
+
 ## Acknowledged, and deliberately not changed
 
 Findings from the 2026-08-28 audit that were reviewed and judged not to warrant a code change. They
