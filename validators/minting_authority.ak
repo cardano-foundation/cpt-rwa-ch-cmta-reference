@@ -205,8 +205,9 @@ validator minting_authority_validator(
         expect InlineDatum(gs_raw) = gs_input.output.datum
         let fields = builtin.unconstr_fields(gs_raw)
         expect !global_state.get_deactivated(fields)
-        let power_user_linked_list_policy_id =
-          global_state.get_power_user_linked_list_policy_id(fields)
+        let power_user_linked_list_policy_id = global_state.get_power_user_linked_list_policy_id(
+          fields,
+        )
         and {
           // Steady state mints supply and nothing else. A CIP-68 metadata
           // token is a registration-time artefact; allowing one here would let
@@ -271,8 +272,9 @@ validator minting_authority_validator(
         expect InlineDatum(gs_raw) = gs_input.output.datum
         let fields = builtin.unconstr_fields(gs_raw)
         expect !global_state.get_deactivated(fields)
-        let power_user_linked_list_policy_id =
-          global_state.get_power_user_linked_list_policy_id(fields)
+        let power_user_linked_list_policy_id = global_state.get_power_user_linked_list_policy_id(
+          fields,
+        )
         let admin_credential_hash = global_state.get_admin_credential_hash(
           fields,
         )
