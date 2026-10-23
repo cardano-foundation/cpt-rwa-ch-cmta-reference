@@ -38,6 +38,7 @@ the wrong asset name, a list root that did not link to the node being removed, a
 | [11](#11-the-power-user-authority-footgun-was-undocumented) | The power-user authority footgun was undocumented | Info | Fixed |
 | [12](#12-dismantling-either-linked-list-was-a-one-way-freeze-of-a-live-protocol) | Dismantling either linked list was a one-way freeze of a live protocol | Medium | Fixed |
 | [13](#13-cip-68-metadata-tokens-were-governed-by-an-exact-name-not-by-their-kind) | CIP-68 metadata tokens were governed by an exact name, not by their kind | Medium | Fixed |
+| [17](#17-partial-freeze-a-denylist-entry-can-freeze-an-amount-not-only-the-whole-holding) | Partial freeze: a denylist entry can freeze an amount | Feature | Added 2026-10-23 |
 
 Findings 12 and 13 come from the 2026-08-28 re-audit; 1–11 from the original review. Then:
 [acknowledged and not changed](#acknowledged-and-deliberately-not-changed),
@@ -334,9 +335,10 @@ exactly one extra input, so they isolate the count),
 `validators/global_state_logic_tests.ak` — `pause_fails_when_the_power_user_node_is_in_a_wallet` and
 `pause_fails_when_the_power_user_node_is_at_the_wrong_script`, each with a positive control.
 
-The two `*_spend_handler_is_pure_delegation` tests are deliberate records that the `spend` handlers
-were **not** changed — the constraint lives in the mint validators, which must run for any list
-mutation.
+The two `*_spend_handler_is_pure_delegation` tests are deliberate records that the `spend` handlers'
+`StateTransition` path was **not** changed — the constraint lives in the mint validators, which must
+run for any insert or remove. The denylist's later in-place `UpdateDenylistEntry` (§17) runs no mint;
+it binds each spend to its own continuation, which must keep the address, the NFT and the link.
 
 ---
 
@@ -989,6 +991,76 @@ control, re-purposed: field 3 names a policy the node is not under, so `authenti
 traps. Mutation-checked: authenticating under a fixed policy instead of field 3 makes the negative
 test fail.
 
+## 17. Partial freeze: a denylist entry can freeze an amount, not only the whole holding
+
+A feature, not a defect, recorded here because it changes what a denylist entry means and adds a
+mutation path to a permanent validator. Requested to match CMTAT `freezePartialTokens`: "this
+address has that many tokens frozen; which ones does not matter".
+
+**Changed (2026-10-23):**
+
+* The node datum is `Denylist { frozen_amount: Option<Int>, metadata }`. `None` is a full freeze,
+  exactly what every entry meant before. `Some(f)` with `f > 0` is a partial freeze. `Some(f)` with
+  `f <= 0` is refused at every write (`AddToDenylist`, `UpdateDenylistEntry`).
+* A party's denylist index may now name **its own node** as well as a covering node
+  (`absence.party_permitted`). Own node with `None`: rejected on every side. Own node with
+  `Some(f)`: every destination gate accepts (transfer, mint, seizure); the transfer path's sender
+  gate accepts only if the outputs whose inline stake credential hash is the node key carry at
+  least `f` of the security token. The redeemer encoding does not change, and an unlisted party's
+  proof is byte-identical to before.
+* `denylist_validator` (spend) gains `UpdateDenylistEntry`, which rewrites one node's data in place
+  through the library's `spend_for_updating_elements_data`, gated like Add/Remove (an `is_admin`
+  power user, signed, protocol not deactivated), nodes only, strict decode, metadata ≤ 512 B, and
+  the node's ADA may not decrease. Remove-then-add cannot do this: the burn and re-mint of the same
+  node NFT cancel out, so it would take two transactions with the holder unlisted in between. The
+  validator gains two parameters, `global_state_policy_id` and `power_user_list_script_hash`
+  (README row 5), so its hash moves, and with it every hash that pins it (rows 8–10).
+
+**Invariants** (complexity-specialist review, 2026-10-23):
+
+1. *Freeze floor.* In a `TransferAct` transaction that spends hash `h`'s security tokens, the
+   outputs to stake hash `h` carry at least `f`. The only ways below `f` are a seizure
+   (`can_force_transfer`) or an `is_admin` Remove/Update, which change `f` and move nothing.
+2. *Full freeze unchanged.* `None` rejects `h` as a sender and as every kind of destination.
+3. *Exact membership.* A party's element is authenticated (list policy from GlobalState field 7,
+   list spend address pinned) and is either the party's own node or covers it — never both, since
+   keys are unique and strictly ascending and `covers_key` is strict.
+4. *Writes are strict, reads fail closed.* Writers `expect` a well-formed `Denylist`; a reader that
+   meets an own node it cannot decode rejects that party (a strict soft cast returning False)
+   rather than trapping the whole transaction.
+5. *The memo caches the element, never a verdict.* `compliance.vet_remembering` re-decides
+   membership for each party's own hash, so one party's membership proof cannot pass another.
+6. *Update and insert/remove never share a transaction.* One requires a list-policy mint, the
+   other forbids it.
+
+**A dependency worth stating plainly.** The sender rule reads only the *stake* credential of the
+paid-back outputs. On Cardano the *payment* credential controls spending, so the rule is sound only
+because the CIP-113 base layer keeps this token at programmable-base outputs on every path
+(`no_escape` on mint, transfer conservation, seizure pairing, unfracking disabled by registry
+field 5) — the same premise the destination fold has always relied on.
+
+**Costs, accepted.** Every send by a partially frozen holder must include at least `f` of its own
+tokens, so a balance in many small UTxOs may need consolidating first (16 KiB limit). Neither
+`AddToDenylist` nor `UpdateDenylistEntry` can see the holder's balance, so `f` is not bounded by
+it: an `f` above the balance blocks every send by that holder until its balance reaches `f`
+(receiving still works) — on the sending side, a full freeze. The pay-back output makes the
+holder a destination of its own transaction, so with `requires_receiver_kyc` set it needs valid
+receiver KYC to send even when `requires_sender_kyc` is off; a partially frozen holder with lapsed
+KYC must renew it first (pinned by
+`partially_frozen_sender_without_valid_kyc_is_blocked_by_receiver_kyc`). Exempting that change from
+receiver KYC was considered and deferred to keep the gate simple. An update
+changes the node's UTxO reference, so in-flight transactions that cite it — the holder's own, or a
+neighbour's absence proof — must be rebuilt. A seizure can leave the holder below `f`; update `f`
+afterwards if that is not intended. A partially frozen holder can now take a partial seizure's
+residual, which a fully frozen one still cannot (see the operational constraints below).
+
+**Pinned by** the `partially_frozen_*` / `fully_frozen_*` / `memo_*` / `paid_back_*` / `both_*` /
+`each_*` / `own_node_*` / `undecodable_*` tests in `validators/transfer_logic_script.ak`, the partial-seizure tests in
+`validators/third_party_transfer_logic_script.ak`, `mint_to_a_*_frozen_destination_*` in
+`validators/minting_authority.ak`, and the `denylist_insert_*_freeze` / `denylist_update_*` tests in
+`validators/denylist.ak`. Every new guard was mutation-checked: replacing it with `True` (or the
+memo's per-party check with a cached verdict) makes at least one of these tests fail.
+
 ## Acknowledged, and deliberately not changed
 
 Findings from the 2026-08-28 audit that were reviewed and judged not to warrant a code change. They
@@ -1204,6 +1276,22 @@ weakens the gate. But nothing works until off-chain moves:
 2. **The membership MPF tree must be rebuilt.** Leaf key `credential_type ‖ hash`; leaf value
    `valid_until_ms ‖ security_policy_id ‖ network_id`. Use the exported encoders. Rebuild the root
    **before** calling `UpdateMemberRootHash`.
+
+### The 2026-10-23 partial freeze: one datum change, one redeemer variant, two new parameters
+
+* **Datum, breaking for encoders.** `Denylist` is now `{ frozen_amount: Option<Int>, metadata }`,
+  `frozen_amount` first. `AddToDenylist` and `UpdateDenylistEntry` builders must encode it; an entry
+  written in the old one-field shape does not decode, so readers reject its holder and
+  `RemoveFromDenylist`'s `expect` traps on it. No deployment exists, so there is nothing to migrate.
+* **Spend redeemer.** `SpendRedeemer` gains `UpdateDenylistEntry { own_input_index,
+  own_output_index, global_state_ref_input_index, power_user_node_ref_input_index }`;
+  `StateTransition` keeps its encoding.
+* **Parameters.** `denylist_validator` goes from 1 to 3, in the same positions as `denylist.mint`'s:
+  `(global_state_policy_id, denylist_linked_list_policy_id, power_user_list_script_hash)` — the list
+  policy id moves from first to second (README row 5). Its hash moves, and with it every script
+  that pins it: transfer logic, third-party logic, minting authority (rows 8–10).
+* **Proofs.** The per-party denylist index may name the party's own node (partially frozen) as
+  well as a covering node. An unlisted party's proof is unchanged.
 
 ### The 2026-08-28 fixes: no schema change, one dropped parameter, five moved hashes
 

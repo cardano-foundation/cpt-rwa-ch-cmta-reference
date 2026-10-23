@@ -1,6 +1,6 @@
 # Programmable asset tokens on Cardano based on the CMTA framework
 
-Aiken (Plutus V3) contracts providing on-chain primitives for programmable asset tokens   designed as reference profiles for use cases based on the CMTA framework and supporting the implementation of Swiss legal requirements. The primitives include KYC-gated transfers, denylisting, global pause, forced transfers and seizures, supply caps, role-based permissions, and an irreversible decommission mechanism.
+Aiken (Plutus V3) contracts providing on-chain primitives for programmable asset tokens   designed as reference profiles for use cases based on the CMTA framework and supporting the implementation of Swiss legal requirements. The primitives include KYC-gated transfers, denylisting with full or partial freezes, global pause, forced transfers and seizures, supply caps, role-based permissions, and an irreversible decommission mechanism.
 
 The contracts build on CIP-113 (programmable tokens) by Michele Nuzzi, Matteo Coppola, Giovanni Gargiulo and Philip Di Sarro: [CIP-113](https://github.com/HarmonicLabs/CIPs/blob/master/CIP-0113/README.md) 
 
@@ -18,7 +18,7 @@ The profile provides technical functionality only and is intended to support the
 ### CMTA profile
 
 Reflects technical requirements and functionalities defined by the CMTA Framework (Blockchain-agnostic functional specification of the CMTA token), providing a technical basis for implementations seeking to address relevant requirements under Swiss law. The framework defines 42 numbered functionalities `ABS-01…42`, of which **only `ABS-01…14` are mandatory**. CMTAT v3.2.0 (Solidity) serves as a semantic reference and technical reference for this profile, without implying full equivalence or conformity. The v3.2.0 release has not itself been fully audited; the latest fully audited release is v3.0.0.
-The profile implements the relevant base and enforcement functionality of the CMTA Framework, covering supply and balance views (ledger-native on Cardano), transfer, mint, burn, pause/unpause and status, deactivate and status, and full-address freeze/unfreeze and status. Optional modules (snapshots, distributions, debt terms, delegated approval) are not implemented; EVM-specific machinery (allowance mechanic, gasless relaying, cross-chain, interface conformance) is not applicable on eUTxO.
+The profile implements the relevant base and enforcement functionality of the CMTA Framework, covering supply and balance views (ledger-native on Cardano), transfer, mint, burn, pause/unpause and status, deactivate and status, full-address freeze/unfreeze and status, and partial freeze (a frozen amount per address). Optional modules (snapshots, distributions, debt terms, delegated approval) are not implemented; EVM-specific machinery (allowance mechanic, gasless relaying, cross-chain, interface conformance) is not applicable on eUTxO.
 A third-party equivalency assessment of this codebase is maintained at [CMTA/CMTAT-Cardano](https://github.com/CMTA/CMTAT-Cardano).
 
 ---
@@ -101,13 +101,13 @@ in this repository.
 | [`validators/global_state_proxy.ak`](validators/global_state_proxy.ak) | Permanent, unparameterised home of the GlobalState NFT. Reads only datum field 0 and requires that script's withdraw-0 in the same transaction. |
 | [`validators/global_state_logic.ak`](validators/global_state_logic.ak) | Replaceable GlobalState logic (the withdraw-0 script named by datum field 0) that controls the continuing state UTxO: remaining mintable supply, pause, KYC settings, trusted issuers, admin rotation, upgrades, logic rotation and deactivation. Its tests are in `global_state_logic_tests.ak`. |
 | [`validators/power_users.ak`](validators/power_users.ak) | Maintains the operator linked list. The GlobalState admin grants or changes the five independent role flags. |
-| [`validators/denylist.ak`](validators/denylist.ak) | Maintains the sanctions linked list. An `is_admin` power user can add or remove an entry; presence means sanctioned. |
+| [`validators/denylist.ak`](validators/denylist.ak) | Maintains the sanctions linked list. An `is_admin` power user can add or remove an entry, or update one in place (`UpdateDenylistEntry`). An entry's `frozen_amount` is `None` (fully frozen) or `Some(f)` (partially frozen: may receive, and may send only while keeping at least `f`). |
 | [`validators/minting_logic_script.ak`](validators/minting_logic_script.ak) | Permanent CIP-113 minting proxy. It reads GlobalState and requires the currently named minting authority to run. Its hash, applied to the base layer's issuance template, yields this token's issuance policy ID. |
 | [`validators/minting_authority.ak`](validators/minting_authority.ak) | Replaceable authority for registration, mint, burn and registry-node upgrades. It checks supply-changing transactions against roles, destinations, the denylist and KYC. |
-| [`validators/transfer_logic_script.ak`](validators/transfer_logic_script.ak) | Checks ordinary transfers for pause, deactivation, sender and receiver denylist absence, and enabled KYC gates. |
+| [`validators/transfer_logic_script.ak`](validators/transfer_logic_script.ak) | Checks ordinary transfers for pause, deactivation, the sender and receiver denylist gates (absence, or a partial freeze whose floor the sender keeps), and enabled KYC gates. |
 | [`validators/third_party_transfer_logic_script.ak`](validators/third_party_transfer_logic_script.ak) | Checks forced transfers: `can_force_transfer` authority and vetted destinations, while allowing a sanctioned or expired source and remaining available during a pause. |
 | [`lib/types/`](lib/types/) | On-chain datum and redeemer schemas consumed by transaction builders, including GlobalState, operator roles and KYC proofs. |
-| [`lib/kyc/verify.ak`](lib/kyc/verify.ak), [`lib/denylist/absence.ak`](lib/denylist/absence.ak), [`lib/compliance.ak`](lib/compliance.ak) | Verify attestations or membership proofs, prove denylist absence using a covering node, and apply those checks to each party. |
+| [`lib/kyc/verify.ak`](lib/kyc/verify.ak), [`lib/denylist/absence.ak`](lib/denylist/absence.ak), [`lib/compliance.ak`](lib/compliance.ak) | Verify attestations or membership proofs, prove denylist absence using a covering node or membership through the party's own (partially frozen) node, and apply those checks to each party. |
 | [`lib/cip68.ak`](lib/cip68.ak), [`lib/constants.ak`](lib/constants.ak), [`lib/utils.ak`](lib/utils.ak) | Enforce metadata-token shape and provide shared protocol constants and transaction helpers. |
 
 For transaction inputs, withdrawals and redeemer examples, see the
@@ -118,7 +118,8 @@ For transaction inputs, withdrawals and redeemer examples, see the
 ## Technical compliance status
 
 The mandatory enforcement core is implemented and covered by the test suite: KYC-gated transfers
-(sender and receiver, each independently toggleable), a sanctions denylist, global pause, forced
+(sender and receiver, each independently toggleable), a sanctions denylist with full and partial
+freezes, global pause, forced
 transfer, a supply cap, mint and burn, role-split operators, and an irreversible decommission
 switch.
 
@@ -142,8 +143,8 @@ a datum over the cap can always be shrunk. Keep headroom: at the cap, even a bur
 spent by every mint, burn and admin action, and its datum takes room a mint needs for its KYC proofs
 (≈ 230 B per attested destination with a wallet-made proof).
 
-Denylist entry metadata is also free-form `Data`, but each new entry is capped at 512 B once
-CBOR-serialised. Larger case files, legal records, or evidence should live off-chain and be
+Denylist entry metadata is also free-form `Data`, but an entry's `metadata` field is capped at
+512 B once CBOR-serialised (on insert and on update; `frozen_amount` is not part of that cap). Larger case files, legal records, or evidence should live off-chain and be
 referenced by compact identifiers or hashes.
 
 ### Review and audit
@@ -189,7 +190,7 @@ referenced by compact identifiers or hashes.
   (a credential equal to GlobalState datum field 0, the GlobalState logic hash, is refused
   wherever the role is used — that logic's withdrawal is in every GlobalState transaction and
   would otherwise sign for it):
-  * `is_admin` — add and remove denylist entries. Deliberately split from the master admin key, so a
+  * `is_admin` — add, remove and update denylist entries (including the frozen amount). Deliberately split from the master admin key, so a
     compliance function can be delegated without handing over control of the protocol.
   * `can_mint` — mint new tokens, up to the remaining supply cap
   * `can_burn` — burn tokens, restoring headroom under the cap
@@ -198,17 +199,35 @@ referenced by compact identifiers or hashes.
 * **Trusted entity** — an off-chain KYC attestor whose Ed25519 verification key is listed in the
   GlobalState datum. It signs the KYC proofs that transfers present. Not an on-chain role: it never
   submits transactions, it only signs attestations.
-* **Holder** — any wallet or script holding the token. Must be absent from the denylist and, when
+* **Holder** — any wallet or script holding the token. Must be absent from the denylist (or only
+  partially frozen, see below) and, when
   the corresponding flag is set, must present a valid KYC proof (or prove membership of the
   allowlist tree).
 
 ## How it works
 
 * An issuer initialises the protocol, then grants power-user flags to the operators who need them.
-* Power users and denylist entries are each stored on-chain as a linked list; **presence in the
-  denylist is the sanction** — there is no flag to toggle, and absence is proven with a covering-node
-  proof.
-* A transfer must clear the pause gate, then per sender and per receiver: denylist absence, plus a
+* Power users and denylist entries are each stored on-chain as a linked list. A denylist entry
+  freezes the holder's credential hash, fully or partially (CMTAT `freezePartialTokens`):
+  * `frozen_amount: None` — **fully frozen** (sanctioned): the holder can neither send nor receive.
+  * `frozen_amount: Some(f)` — **partially frozen**: the holder receives freely, and can send only in
+    a transaction that pays at least `f` of the token back to outputs carrying its own stake
+    credential hash. Either credential form of that hash counts, so a holder that pays its floor to
+    the form it cannot authorise strands those tokens (recoverable only by seizure); paid to its
+    own form, the holder still holds at least `f` afterwards. Every such send must therefore
+    include at least `f` of the holder's own tokens as inputs; a balance spread over many small
+    UTxOs may need consolidating first (16 KiB transaction limit). `f` is not checked against the
+    holder's balance: an admin may set it above what the holder holds, and the holder then cannot
+    send at all until its balance reaches `f` (it can still receive). The pay-back output also makes
+    the holder a destination of its own transaction, so when `requires_receiver_kyc` is set the
+    holder needs a valid KYC proof to send — even if `requires_sender_kyc` is off. A partially
+    frozen holder whose KYC has lapsed must renew it before it can send.
+
+  An unlisted party proves absence with a covering-node proof; a partially frozen party cites its
+  own node instead. An `is_admin` power user changes `f` in place with `UpdateDenylistEntry`.
+  Seizure ignores a partial freeze (it is an override) and can leave the holder below `f`.
+* A transfer must clear the pause gate, then per sender and per receiver: the denylist gate (absence,
+  or a partial freeze — whose floor a sender must keep), plus a
   valid KYC proof whenever `requires_sender_kyc` / `requires_receiver_kyc` is set. The two are
   toggled independently.
 * Forced transfers move tokens to a vetted destination. They intentionally remain available while
@@ -230,9 +249,9 @@ referenced by compact identifiers or hashes.
   forced-transfer path and needs `can_force_transfer`, not just `can_burn`.
 * **Seizure is all-or-nothing per UTxO whenever the holder cannot clear the destination gates.**
   The base layer returns a partial seizure's residual to the holder's own address, and this
-  deployment vets every token-bearing output as a destination — so the residual must itself prove
-  denylist absence and, when `requires_receiver_kyc` is set, present a valid KYC proof. A sanctioned
-  holder can do neither; **so can a holder whose attestation has simply expired**, which is the case
+  deployment vets every token-bearing output as a destination — so the residual must itself clear
+  the denylist gate and, when `requires_receiver_kyc` is set, present a valid KYC proof. A fully
+  frozen holder can do neither (a *partially* frozen one can receive the residual); **so can a holder whose attestation has simply expired**, which is the case
   that surprises operators. Drain whole UTxOs instead; a position can still be partially seized by
   choosing which UTxOs to spend. Both constraints are explained in
   [`documents/security/security-fixes.md`](documents/security/security-fixes.md).
@@ -374,7 +393,7 @@ exact order the blueprint (`plutus.json`) declares them; apply top to bottom.
 | 2 | `power_users.mint` | `global_state_policy_id`, `init_input_out_ref` | Row 1; a genesis UTxO reserved for this list. |
 | 3 | `power_users.power_users_validator` (spend) | `global_state_policy_id`, `power_users_linked_list_policy_id` | Row 1; the hash of `power_users.mint` (row 2) — this is the **power-users policy ID**. |
 | 4 | `denylist.mint` | `global_state_policy_id`, `init_input_out_ref`, `power_user_list_script_hash` | Row 1; a genesis UTxO reserved for this list; the hash of `power_users_validator` (row 3, **spend** — not row 2's policy id). |
-| 5 | `denylist.denylist_validator` (spend) | `denylist_linked_list_policy_id` | The hash of `denylist.mint` (row 4) — this is the **denylist policy ID**. |
+| 5 | `denylist.denylist_validator` (spend) | `global_state_policy_id`, `denylist_linked_list_policy_id`, `power_user_list_script_hash` | Row 1; the hash of `denylist.mint` (row 4) — this is the **denylist policy ID**; row 3's hash (for `UpdateDenylistEntry`'s `is_admin` check). Same positions as row 4's parameters. |
 | 6 | `minting_logic_script.minting_logic_validator` | `global_state_policy_id` | Row 1. Its only parameter. |
 | 7 | `global_state_logic.global_state_logic` (withdraw) | `security_asset_name`, `issuance_policy_id`, `global_state_policy_id`, `power_user_list_script_hash`, `max_global_state_datum_bytes` | Operator choice; the **issuance policy ID**, i.e. the security token's policy ID, derived from row 6's hash (see below; **not** row 6's hash itself); row 1; the hash of `power_users_validator` (row 3); the datum-size cap (same value as row 1; a rotated-in logic may choose another). Its hash goes into GlobalState datum **field 0** at genesis. |
 | 8 | `transfer_logic_script.transfer_logic_validator` | `security_asset_name`, `global_state_policy_id`, `expected_issuance_policy_id`, `denylist_script_hash` | Operator choice; row 1; the issuance policy ID (as row 7); the hash of `denylist_validator` (row 5). |
@@ -748,9 +767,13 @@ For wallets and dApps reading protocol state:
 3. Find that UTxO and read the GlobalState datum for: pause and deactivation flags, remaining
    mintable amount, security info, the KYC requirement flags, the trusted entity keys, and the
    power-users and denylist linked-list policy IDs
-4. To check whether a holder is sanctioned, look for a UTxO holding an NFT with `policy_id ==` the
-   denylist policy ID and `datum.key ==` the holder's credential hash. **Presence means denylisted**
-   — there is no flag to read, and absence is proven on-chain with a covering-node proof
+4. To check whether a holder is frozen, look for a UTxO holding an NFT with `policy_id ==` the
+   denylist policy ID and asset name `"Node"` ‖ the holder's 28-byte credential hash (the node
+   datum carries no key — the key IS the asset name after the 4-byte `"Node"` prefix). **Presence
+   means listed** —
+   then read the entry's `frozen_amount`: `None` = fully frozen, `Some(f)` = partially frozen (the
+   holder must keep at least `f`). On chain, an unlisted holder proves absence with a covering-node
+   proof, and a partially frozen one cites its own node
 5. For operator roles, read the power-users list the same way; each node's datum carries that
    operator's role flags
 

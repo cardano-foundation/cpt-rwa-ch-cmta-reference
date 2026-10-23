@@ -7,7 +7,7 @@ use aiken/interval.{
 }
 use aiken/merkle_patricia_forestry as mpf
 use aiken/primitive/bytearray
-use aiken_design_patterns/linked_list.{Element, Root}
+use aiken_design_patterns/linked_list.{Element, Node, Root}
 use cardano/address.{Address, Credential, Inline, Script, VerificationKey}
 use cardano/assets.{from_asset, from_lovelace, merge, quantity_of}
 use cardano/certificate.{Certificate, RegisterCredential}
@@ -19,6 +19,7 @@ use compliance
 use constants
 use kyc/verify.{membership_leaf_key, membership_leaf_value}
 use types/cip68.{Cip68Datum} as types_cip68
+use types/denylist.{Denylist}
 use types/global_state.{
   GlobalStateDatum, GlobalStateLocation, GlobalStateReferenced, GlobalStateSpent,
   gs_datum_from_location,
@@ -30,15 +31,18 @@ use types/transfer_logic_script.{
   TransferLogicScriptAction, TransferLogicScriptDestinationAction,
   TransferLogicScriptWithdrawRedeemer,
 }
+use utils
 
 /// Transfer logic for a BAFIN security token (Track 4, TEL+denylist model).
 ///
 /// Per-input check (for each unique sender stake credential):
 ///   1. The redeemer's matching KYC proof validates against GS.trusted_entity_vkeys or the pkh of the sender is in the GS's merkle tree.
-///   2. The sender is NOT in the denylist (covering-node absence proof).
+///   2. The sender is NOT in the denylist (covering-node absence proof), or is only
+///      PARTIALLY frozen (own node, `Some(f)`) and this transaction pays at least `f`
+///      back to its stake credential hash.
 ///
 /// Per-output check (for each unique destination stake credential):
-///   3. The destination is NOT in the denylist. 
+///   3. The destination is NOT in the denylist, or is only partially frozen.
 ///   4. If GS.requires_receiver_kyc, the redeemer's matching KYC proof validates against GS.trusted_entity_vkeys as well (same checks as for senders)
 ///      or if the pkh of the receiver is in the GS's merkle tree. 
 ///
@@ -67,8 +71,8 @@ validator transfer_logic_validator(
   /// what closes that; nothing about "did some node name me" was ever
   /// load-bearing.
   expected_issuance_policy_id: ByteArray,
-  /// The DENYLIST SPEND VALIDATOR's script hash, threaded into
-  /// `verify_denylist_absence`. See its doc comment.
+  /// The DENYLIST SPEND VALIDATOR's script hash, which every denylist element
+  /// a party cites must sit at. See `absence.with_denylist_element`.
   denylist_script_hash: ByteArray,
 ) {
   withdraw(
@@ -197,15 +201,42 @@ validator transfer_logic_validator(
       ),
     )
 
-    // 4. Per-sender and per-destination: denylist absence, plus KYC when the
+    // 4. Per-sender and per-destination: the denylist gate, plus KYC when the
     //    corresponding flag is set. Swiss CO Art. 973e / eWpG §14 / ERC-3643
     //    all require the RECIPIENT to be KYC'd at transfer time (a named
     //    creditor / registered holder), which is why both sides are vetted.
+    //
+    //    A PARTIALLY frozen sender (own denylist node, `frozen_amount:
+    //    Some(f)`) may send only if this transaction pays at least `f` of the
+    //    security token back to outputs whose inline stake credential hash is
+    //    the sender's. Those outputs are part of what the sender holds once
+    //    the transaction lands, so the sender still holds at least `f`: the
+    //    freeze floor. Conservative — UTxOs the sender does not spend are not
+    //    seen and not counted, which is why every send must re-include `f`.
+    //
+    //    Reading only the STAKE credential is sound because of the base
+    //    layer, not because of anything here: the security token can only sit
+    //    at a programmable-logic-base output (mint `no_escape`, transfer
+    //    conservation of PLB outputs over PLB inputs), so no output can carry
+    //    it under someone else's payment key while naming the sender's stake
+    //    credential. Same premise as the destination fold above.
+    //
+    //    Destinations — the sender's own change included — accept a partially
+    //    frozen party unconditionally: a partial freeze limits sending, never
+    //    receiving.
     let all_senders_ok = compliance.verify_parties(
       inputs_user_credentials,
       redeemer.actions_for_each_input,
       fn(action) { action.source_proof },
-      fn(action) { action.source_denylist_covering_ref_input_index },
+      fn(action) { action.source_denylist_ref_input_index },
+      fn(holder_hash, frozen_amount) {
+        paid_back_to_holder(
+          self.outputs,
+          issuance_policy_id,
+          security_asset_name,
+          holder_hash,
+        ) >= frozen_amount
+      },
       gs_datum.requires_sender_kyc,
       gs_datum,
       issuance_policy_id,
@@ -217,7 +248,8 @@ validator transfer_logic_validator(
       outputs_user_credentials,
       redeemer.destination_actions,
       fn(action) { action.destination_proof },
-      fn(action) { action.destination_denylist_covering_ref_input_index },
+      fn(action) { action.destination_denylist_ref_input_index },
+      fn(_, _) { True },
       gs_datum.requires_receiver_kyc,
       gs_datum,
       issuance_policy_id,
@@ -248,6 +280,48 @@ validator transfer_logic_validator(
   else(_) {
     fail
   }
+}
+
+/// How much of the security token this transaction pays to outputs whose
+/// inline stake credential hash is `holder_hash` — the holder's holdings that
+/// this transaction creates, and therefore a lower bound on what the holder
+/// holds once it lands.
+///
+/// Counted by BARE HASH, as the denylist keys: a node freezes the hash, so an
+/// output to either credential form of it counts towards the floor.
+///
+/// Only outputs carrying the security token are inspected, and only those must
+/// have an inline stake credential — the same shape the destination fold
+/// already demands of them, so an ADA-only output with no stake credential is
+/// skipped, never trapped on. Other asset names and other policies count for
+/// nothing.
+fn paid_back_to_holder(
+  outputs: List<Output>,
+  issuance_policy_id: ByteArray,
+  security_asset_name: ByteArray,
+  holder_hash: ByteArray,
+) -> Int {
+  list.foldl(
+    outputs,
+    0,
+    fn(output, paid_back) {
+      let quantity = quantity_of(
+        output.value,
+        issuance_policy_id,
+        security_asset_name,
+      )
+      if quantity > 0 {
+        expect Some(Inline(stake_cred)) = output.address.stake_credential
+        if utils.credential_hash(stake_cred) == holder_hash {
+          paid_back + quantity
+        } else {
+          paid_back
+        }
+      } else {
+        paid_back
+      }
+    },
+  )
 }
 
 // ============================================================================
@@ -505,14 +579,14 @@ fn dummy_proof() -> KycProof {
 fn t_source_action() -> TransferLogicScriptAction {
   TransferLogicScriptAction {
     source_proof: dummy_proof(),
-    source_denylist_covering_ref_input_index: 2,
+    source_denylist_ref_input_index: 2,
   }
 }
 
 fn t_dest_action() -> TransferLogicScriptDestinationAction {
   TransferLogicScriptDestinationAction {
     destination_proof: dummy_proof(),
-    destination_denylist_covering_ref_input_index: 2,
+    destination_denylist_ref_input_index: 2,
   }
 }
 
@@ -648,7 +722,7 @@ fn t_cip30_proof(proof: Cip30AttestationProof) -> KycProof {
 fn t_source_action_with_proof(proof: KycProof) -> TransferLogicScriptAction {
   TransferLogicScriptAction {
     source_proof: proof,
-    source_denylist_covering_ref_input_index: 2,
+    source_denylist_ref_input_index: 2,
   }
 }
 
@@ -657,7 +731,7 @@ fn t_dest_action_with_proof(
 ) -> TransferLogicScriptDestinationAction {
   TransferLogicScriptDestinationAction {
     destination_proof: proof,
-    destination_denylist_covering_ref_input_index: 2,
+    destination_denylist_ref_input_index: 2,
   }
 }
 
@@ -745,13 +819,13 @@ test transfer_succeeds_without_any_registry_reference_input() {
       actions_for_each_input: [
         TransferLogicScriptAction {
           source_proof: dummy_proof(),
-          source_denylist_covering_ref_input_index: 1,
+          source_denylist_ref_input_index: 1,
         },
       ],
       destination_actions: [
         TransferLogicScriptDestinationAction {
           destination_proof: dummy_proof(),
-          destination_denylist_covering_ref_input_index: 1,
+          destination_denylist_ref_input_index: 1,
         },
       ],
     },
@@ -790,13 +864,13 @@ fn t_spent_gs_redeemer(
     actions_for_each_input: [
       TransferLogicScriptAction {
         source_proof: dummy_proof(),
-        source_denylist_covering_ref_input_index: 1,
+        source_denylist_ref_input_index: 1,
       },
     ],
     destination_actions: [
       TransferLogicScriptDestinationAction {
         destination_proof: dummy_proof(),
-        destination_denylist_covering_ref_input_index: 1,
+        destination_denylist_ref_input_index: 1,
       },
     ],
   }
@@ -1269,4 +1343,689 @@ test transfer_rejects_a_cip68_output_holding_security_tokens() fail {
       },
     ),
   )
+}
+
+// ── Partial freeze (denylist `frozen_amount`) ─────────────────────────────────
+//
+// A listed holder cites its OWN node; `None` is a full freeze, `Some(f)` lets
+// it receive freely and send only while paying at least `f` back to itself.
+//
+// Keys, in list order: A = 0a… (t_sender_stake), C = 0b… (t_dest_stake),
+// B = 0c…, D = 0d…. Reference inputs: 0 registry, 1 GlobalState, 2 denylist
+// root, 3+ denylist nodes — built per test, because each test needs its own
+// list. KYC is off throughout: these tests are about the denylist gate only.
+
+const pf_b: ByteArray =
+  #"0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c"
+
+const pf_d: ByteArray =
+  #"0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d"
+
+fn pf_root(link: Option<ByteArray>) -> Input {
+  let element: Element<Data, Data> = Element {
+    data: Root { data: builtin.constr_data(0, []) },
+    link,
+  }
+  Input {
+    ..t_denylist_root_ref_input(),
+    output: Output {
+      ..t_denylist_root_ref_input().output,
+      datum: InlineDatum(element),
+    },
+  }
+}
+
+/// A denylist node at the list's own address, holding `data` as its entry.
+fn pf_node_with_data(
+  ix: Int,
+  key: ByteArray,
+  link: Option<ByteArray>,
+  data: Data,
+) -> Input {
+  let element: Element<Data, Data> = Element { data: Node { data }, link }
+  Input {
+    output_reference: t_out_ref(20 + ix),
+    output: Output {
+      address: Address {
+        payment_credential: Script(t_denylist_script_hash),
+        stake_credential: None,
+      },
+      value: merge(
+        from_lovelace(2_000_000),
+        from_asset(
+          t_denylist_policy,
+          bytearray.concat(constants.linked_list_node_key_prefix, key),
+          1,
+        ),
+      ),
+      datum: InlineDatum(element),
+      reference_script: None,
+    },
+  }
+}
+
+fn pf_node(
+  ix: Int,
+  key: ByteArray,
+  link: Option<ByteArray>,
+  frozen_amount: Option<Int>,
+) -> Input {
+  pf_node_with_data(
+    ix,
+    key,
+    link,
+    Denylist { frozen_amount, metadata: builtin.constr_data(0, []) },
+  )
+}
+
+fn pf_input(ix: Int, stake: Credential, amount: Int) -> Input {
+  Input {
+    output_reference: t_out_ref(10 + ix),
+    output: Output {
+      ..t_token_utxo(#"", amount),
+      address: Address {
+        payment_credential: Script(t_plb_hash),
+        stake_credential: Some(Inline(stake)),
+      },
+    },
+  }
+}
+
+fn pf_output(stake: Credential, amount: Int) -> Output {
+  Output {
+    ..t_token_utxo(#"", amount),
+    address: Address {
+      payment_credential: Script(t_plb_hash),
+      stake_credential: Some(Inline(stake)),
+    },
+  }
+}
+
+fn pf_src(index: Int) -> TransferLogicScriptAction {
+  TransferLogicScriptAction {
+    source_proof: dummy_proof(),
+    source_denylist_ref_input_index: index,
+  }
+}
+
+fn pf_dst(index: Int) -> TransferLogicScriptDestinationAction {
+  TransferLogicScriptDestinationAction {
+    destination_proof: dummy_proof(),
+    destination_denylist_ref_input_index: index,
+  }
+}
+
+fn pf_run(
+  nodes: List<Input>,
+  inputs: List<Input>,
+  outputs: List<Output>,
+  sources: List<TransferLogicScriptAction>,
+  destinations: List<TransferLogicScriptDestinationAction>,
+) -> Bool {
+  let tx = Transaction {
+    ..t_transfer_tx(False, False, False, False),
+    inputs,
+    outputs,
+    reference_inputs: [
+      t_registry_ref_input(),
+      t_gs_ref_input(False, False, False, False),
+      ..nodes
+    ],
+  }
+  run_transfer(
+    TransferLogicScriptWithdrawRedeemer {
+      ..t_redeemer(),
+      actions_for_each_input: sources,
+      destination_actions: destinations,
+    },
+    tx,
+  )
+}
+
+/// Root → A(frozen_amount) → end. Index 2 root, 3 A's node.
+fn pf_list_a(frozen_amount: Option<Int>) -> List<Input> {
+  [
+    pf_root(Some(t_sender_stake)),
+    pf_node(0, t_sender_stake, None, frozen_amount),
+  ]
+}
+
+fn pf_a() -> Credential {
+  VerificationKey(t_sender_stake)
+}
+
+fn pf_c() -> Credential {
+  VerificationKey(t_dest_stake)
+}
+
+// A (frozen 400) sends 600 of 1000 to C and keeps exactly 400: the floor holds.
+test partially_frozen_sender_may_send_above_the_floor() {
+  pf_run(
+    pf_list_a(Some(400)),
+    [pf_input(0, pf_a(), 1_000)],
+    [pf_output(pf_c(), 600), pf_output(pf_a(), 400)],
+    [pf_src(3)],
+    // C is covered by A's node (0a < 0b, A is the tail); A by its own node.
+    [pf_dst(3), pf_dst(3)],
+  )
+}
+
+// One token too far: A keeps 399 < 400.
+test partially_frozen_sender_may_not_breach_the_floor() {
+  !pf_run(
+    pf_list_a(Some(400)),
+    [pf_input(0, pf_a(), 1_000)],
+    [pf_output(pf_c(), 601), pf_output(pf_a(), 399)],
+    [pf_src(3)],
+    [pf_dst(3), pf_dst(3)],
+  )
+}
+
+// A full freeze is unchanged: paying everything back does not help.
+test fully_frozen_sender_is_rejected_even_when_paying_everything_back() {
+  !pf_run(
+    pf_list_a(None),
+    [pf_input(0, pf_a(), 1_000)],
+    [pf_output(pf_a(), 1_000)],
+    [pf_src(3)],
+    [pf_dst(3)],
+  )
+}
+
+// Sender side in isolation: A appears only as a sender (all 1_000 go to C),
+// so nothing but A's own `None` node can reject the transaction.
+test fully_frozen_sender_alone_is_rejected() {
+  !pf_run(
+    pf_list_a(None),
+    [pf_input(0, pf_a(), 1_000)],
+    [pf_output(pf_c(), 1_000)],
+    [pf_src(3)],
+    [pf_dst(3)],
+  )
+}
+
+// Positive control for the isolated sender tests: the same shape, with A
+// partially frozen at 1 and keeping 1.
+test partially_frozen_sender_alone_keeping_its_floor_passes() {
+  pf_run(
+    pf_list_a(Some(1)),
+    [pf_input(0, pf_a(), 1_000)],
+    [pf_output(pf_c(), 999), pf_output(pf_a(), 1)],
+    [pf_src(3)],
+    [pf_dst(3), pf_dst(3)],
+  )
+}
+
+// A partially frozen holder receives freely.
+test partially_frozen_receiver_is_accepted() {
+  pf_run(
+    pf_list_a(Some(400)),
+    [pf_input(0, pf_c(), 1_000)],
+    [pf_output(pf_a(), 1_000)],
+    [pf_src(3)],
+    [pf_dst(3)],
+  )
+}
+
+// …a fully frozen one does not.
+test fully_frozen_receiver_is_rejected() {
+  !pf_run(
+    pf_list_a(None),
+    [pf_input(0, pf_c(), 1_000)],
+    [pf_output(pf_a(), 1_000)],
+    [pf_src(3)],
+    [pf_dst(3)],
+  )
+}
+
+// A copy of A's node held anywhere but the denylist's own address
+// authenticates nothing — here under a foreign SCRIPT, so it is the hash
+// equality, not the credential kind, that must reject it.
+test partially_frozen_proof_from_a_node_outside_the_list_is_rejected() fail {
+  let wallet_node = Input {
+    ..pf_node(0, t_sender_stake, None, Some(1)),
+    output: Output {
+      ..pf_node(0, t_sender_stake, None, Some(1)).output,
+      address: Address {
+        payment_credential: Script(t_third_party_hash),
+        stake_credential: None,
+      },
+    },
+  }
+  pf_run(
+    [pf_root(Some(t_sender_stake)), wallet_node],
+    [pf_input(0, pf_a(), 1_000)],
+    [pf_output(pf_c(), 999), pf_output(pf_a(), 1)],
+    [pf_src(3)],
+    // Every proof leans on the wallet copy, so the address pin is the only
+    // thing that can reject this transaction.
+    [pf_dst(3), pf_dst(3)],
+  )
+}
+
+// Only the security asset of the pinned policy counts as paid back: 400 of
+// another asset name to A does not keep the floor.
+test paid_back_counts_only_the_security_asset() {
+  let other_name_to_a = Output {
+    ..pf_output(pf_a(), 1),
+    value: merge(
+      from_lovelace(2_000_000),
+      from_asset(t_issuance_policy, "OTHER", 400),
+    ),
+  }
+  !pf_run(
+    pf_list_a(Some(400)),
+    [pf_input(0, pf_a(), 1_000)],
+    [pf_output(pf_c(), 1_000), other_name_to_a],
+    [pf_src(3)],
+    [pf_dst(3)],
+  )
+}
+
+// …and neither does another policy's token under the same name.
+test paid_back_ignores_another_policy() {
+  let other_policy_to_a = Output {
+    ..pf_output(pf_a(), 1),
+    value: merge(
+      from_lovelace(2_000_000),
+      from_asset(t_gs_policy, t_sec_name, 400),
+    ),
+  }
+  !pf_run(
+    pf_list_a(Some(400)),
+    [pf_input(0, pf_a(), 1_000)],
+    [pf_output(pf_c(), 1_000), other_policy_to_a],
+    [pf_src(3)],
+    [pf_dst(3)],
+  )
+}
+
+// An ADA-only output without any stake credential is skipped, not trapped on.
+test paid_back_skips_outputs_without_the_security_token() {
+  let ada_change = Output {
+    address: Address {
+      payment_credential: VerificationKey(t_dest_stake),
+      stake_credential: None,
+    },
+    value: from_lovelace(5_000_000),
+    datum: NoDatum,
+    reference_script: None,
+  }
+  pf_run(
+    pf_list_a(Some(400)),
+    [pf_input(0, pf_a(), 1_000)],
+    [ada_change, pf_output(pf_c(), 600), pf_output(pf_a(), 400)],
+    [pf_src(3)],
+    [pf_dst(3), pf_dst(3)],
+  )
+}
+
+// The freeze is on the HASH: paying back to the script form of A's hash keeps
+// the floor (and that form receives through the same node).
+test paid_back_counts_the_other_credential_form_of_the_same_hash() {
+  pf_run(
+    pf_list_a(Some(400)),
+    [pf_input(0, pf_a(), 1_000)],
+    [pf_output(pf_c(), 600), pf_output(Script(t_sender_stake), 400)],
+    [pf_src(3)],
+    [pf_dst(3), pf_dst(3)],
+  )
+}
+
+// …but paying "back" to anyone else's hash does not.
+test paid_back_to_a_different_hash_does_not_count() {
+  !pf_run(
+    pf_list_a(Some(400)),
+    [pf_input(0, pf_a(), 1_000)],
+    [pf_output(pf_c(), 600), pf_output(VerificationKey(pf_d), 400)],
+    [pf_src(3)],
+    [pf_dst(3), pf_dst(3)],
+  )
+}
+
+// Both credential forms of A as senders share A's node through the memo and
+// the one paid-back sum: kept floor → pass.
+test both_credential_forms_of_a_partially_frozen_hash_pass_together() {
+  pf_run(
+    pf_list_a(Some(400)),
+    [pf_input(0, pf_a(), 500), pf_input(1, Script(t_sender_stake), 500)],
+    [pf_output(pf_c(), 600), pf_output(pf_a(), 400)],
+    [pf_src(3), pf_src(3)],
+    [pf_dst(3), pf_dst(3)],
+  )
+}
+
+// …breached floor → both fail, so the transaction does.
+test both_credential_forms_of_a_partially_frozen_hash_fail_together() {
+  !pf_run(
+    pf_list_a(Some(400)),
+    [pf_input(0, pf_a(), 500), pf_input(1, Script(t_sender_stake), 500)],
+    [pf_output(pf_c(), 601), pf_output(pf_a(), 399)],
+    [pf_src(3), pf_src(3)],
+    [pf_dst(3), pf_dst(3)],
+  )
+}
+
+// A node whose entry does not decode as `Denylist` rejects its holder cleanly
+// — as a sender…
+test undecodable_own_node_rejects_the_sender() {
+  !pf_run(
+    [
+      pf_root(Some(t_sender_stake)),
+      pf_node_with_data(0, t_sender_stake, None, builtin.constr_data(0, [])),
+    ],
+    [pf_input(0, pf_a(), 1_000)],
+    [pf_output(pf_c(), 600), pf_output(pf_a(), 400)],
+    [pf_src(3)],
+    [pf_dst(3), pf_dst(3)],
+  )
+}
+
+// Sender side in isolation: A only sends, so only its undecodable node can
+// reject.
+test undecodable_own_node_rejects_a_sender_alone() {
+  !pf_run(
+    [
+      pf_root(Some(t_sender_stake)),
+      pf_node_with_data(0, t_sender_stake, None, builtin.constr_data(0, [])),
+    ],
+    [pf_input(0, pf_a(), 1_000)],
+    [pf_output(pf_c(), 1_000)],
+    [pf_src(3)],
+    [pf_dst(3)],
+  )
+}
+
+// …and as a receiver.
+test undecodable_own_node_rejects_the_receiver() {
+  !pf_run(
+    [
+      pf_root(Some(t_sender_stake)),
+      pf_node_with_data(0, t_sender_stake, None, builtin.constr_data(0, [])),
+    ],
+    [pf_input(0, pf_c(), 1_000)],
+    [pf_output(pf_a(), 1_000)],
+    [pf_src(3)],
+    [pf_dst(3)],
+  )
+}
+
+// ── Partial freeze through the covering-node memo ─────────────────────────────
+//
+// List: root → A(Some 400) → B(None) → end. Index 2 root, 3 A, 4 B. C sits
+// between A and B, so A's node legitimately covers C — and only C.
+
+fn pf_list_ab() -> List<Input> {
+  [
+    pf_root(Some(t_sender_stake)),
+    pf_node(0, t_sender_stake, Some(pf_b), Some(400)),
+    pf_node(1, pf_b, None, None),
+  ]
+}
+
+// (a) A first proves membership with node 3; B then cites node 3 too. The memo
+// hands B the same element, which neither is B's node nor covers B: rejected.
+// A cached "permitted" verdict would wave B through.
+test memo_never_lends_a_membership_proof_to_the_next_party() {
+  !pf_run(
+    pf_list_ab(),
+    [pf_input(0, pf_a(), 1_000), pf_input(1, VerificationKey(pf_b), 1)],
+    [pf_output(pf_a(), 1_001)],
+    [pf_src(3), pf_src(3)],
+    [pf_dst(3)],
+  )
+}
+
+// (b1) C first (covered by node 3, fresh), A second on the REMEMBERED element:
+// A's membership is still recognised and its floor (kept) honoured.
+test memo_recognises_membership_on_the_remembered_element() {
+  pf_run(
+    pf_list_ab(),
+    [pf_input(0, pf_c(), 100), pf_input(1, pf_a(), 1_000)],
+    [pf_output(VerificationKey(pf_d), 700), pf_output(pf_a(), 400)],
+    [pf_src(3), pf_src(3)],
+    // D is past B, so B's node covers D.
+    [pf_dst(4), pf_dst(3)],
+  )
+}
+
+// (b2) Same shape, floor breached: the remembered path enforces it too.
+test memo_enforces_the_floor_on_the_remembered_element() {
+  !pf_run(
+    pf_list_ab(),
+    [pf_input(0, pf_c(), 100), pf_input(1, pf_a(), 1_000)],
+    [pf_output(VerificationKey(pf_d), 701), pf_output(pf_a(), 399)],
+    [pf_src(3), pf_src(3)],
+    [pf_dst(4), pf_dst(3)],
+  )
+}
+
+// (d) A first on its own node; C second, covered by that same remembered
+// element: an absence proof still works through the memo.
+test memo_lets_a_membership_node_cover_the_next_party() {
+  pf_run(
+    pf_list_ab(),
+    [pf_input(0, pf_a(), 1_000), pf_input(1, pf_c(), 100)],
+    [pf_output(VerificationKey(pf_d), 700), pf_output(pf_a(), 400)],
+    [pf_src(3), pf_src(3)],
+    [pf_dst(4), pf_dst(3)],
+  )
+}
+
+// (c) Two partially frozen senders on different nodes; the outputs keep A's
+// floor but not D's.
+test each_partially_frozen_sender_keeps_its_own_floor() {
+  let list = [
+    pf_root(Some(t_sender_stake)),
+    pf_node(0, t_sender_stake, Some(pf_d), Some(400)),
+    pf_node(1, pf_d, None, Some(300)),
+  ]
+  !pf_run(
+    list,
+    [pf_input(0, pf_a(), 1_000), pf_input(1, VerificationKey(pf_d), 1_000)],
+    [
+      pf_output(pf_c(), 1_301),
+      pf_output(pf_a(), 400),
+      pf_output(VerificationKey(pf_d), 299),
+    ],
+    [pf_src(3), pf_src(4)],
+    [pf_dst(3), pf_dst(3), pf_dst(4)],
+  )
+}
+
+// (c, control) Both floors kept: pass.
+test both_partially_frozen_senders_keeping_their_floors_pass() {
+  let list = [
+    pf_root(Some(t_sender_stake)),
+    pf_node(0, t_sender_stake, Some(pf_d), Some(400)),
+    pf_node(1, pf_d, None, Some(300)),
+  ]
+  pf_run(
+    list,
+    [pf_input(0, pf_a(), 1_000), pf_input(1, VerificationKey(pf_d), 1_000)],
+    [
+      pf_output(pf_c(), 1_300),
+      pf_output(pf_a(), 400),
+      pf_output(VerificationKey(pf_d), 300),
+    ],
+    [pf_src(3), pf_src(4)],
+    [pf_dst(3), pf_dst(3), pf_dst(4)],
+  )
+}
+
+// ── `party_permitted`'s covering arms ─────────────────────────────────────────
+//
+// A listed party must not get past the gate by citing some OTHER element.
+// Before partial freezes these were pinned through `covers_key` by the
+// sanctioned-holder tests; those now take the own-node branch, so the covering
+// arms are pinned here.
+
+// A fully frozen A cites a node that sorts ABOVE it (D): D's key is not below
+// A, so D cannot cover A.
+test fully_frozen_sender_cannot_cite_a_later_node() {
+  let list = [
+    pf_root(Some(t_sender_stake)),
+    pf_node(0, t_sender_stake, Some(pf_d), None),
+    pf_node(1, pf_d, None, Some(300)),
+  ]
+  !pf_run(
+    list,
+    [pf_input(0, pf_a(), 1_000)],
+    [pf_output(pf_c(), 1_000)],
+    [pf_src(4)],
+    [pf_dst(3)],
+  )
+}
+
+// A fully frozen A, the first listed key, cites the ROOT: the root's link IS
+// A, so the root cannot cover A.
+test fully_frozen_first_listed_sender_cannot_cite_the_root() {
+  !pf_run(
+    pf_list_a(None),
+    [pf_input(0, pf_a(), 1_000)],
+    [pf_output(pf_c(), 1_000)],
+    [pf_src(2)],
+    [pf_dst(3)],
+  )
+}
+
+// Positive control for the shape: an unlisted A below the whole list is
+// covered by the root.
+test unlisted_sender_below_the_list_is_covered_by_the_root() {
+  pf_run(
+    [pf_root(Some(pf_d)), pf_node(0, pf_d, None, None)],
+    [pf_input(0, pf_a(), 1_000)],
+    [pf_output(pf_c(), 1_000)],
+    [pf_src(2)],
+    [pf_dst(2)],
+  )
+}
+
+// ── Receiving is never limited by a partial freeze ───────────────────────────
+
+// C (unlisted, covered by A's node) sends 100 to A, frozen at 400: A receives
+// far less than its floor and is still accepted. A floor applied to the
+// receiving side would reject this.
+test partially_frozen_receiver_may_receive_less_than_its_floor() {
+  pf_run(
+    pf_list_a(Some(400)),
+    [pf_input(0, pf_c(), 1_000)],
+    [pf_output(pf_a(), 100), pf_output(pf_c(), 900)],
+    [pf_src(3)],
+    [pf_dst(3), pf_dst(3)],
+  )
+}
+
+// ── Malformed own nodes fail closed ──────────────────────────────────────────
+//
+// The receiving side is the strict probe: its callback accepts any `Some`, so
+// a looser decoder that read a malformed entry as `Some(_)` would let the
+// receiver through. C (unlisted, covered by A's node) sends 1000 to A.
+
+fn pf_receive_with_own_node_data(data: Data) -> Bool {
+  pf_run(
+    [
+      pf_root(Some(t_sender_stake)),
+      pf_node_with_data(0, t_sender_stake, None, data),
+    ],
+    [pf_input(0, pf_c(), 1_000)],
+    [pf_output(pf_a(), 1_000)],
+    [pf_src(3)],
+    [pf_dst(3)],
+  )
+}
+
+test own_node_in_the_old_one_field_shape_rejects_the_receiver() {
+  !pf_receive_with_own_node_data(
+    builtin.constr_data(0, [builtin.constr_data(0, [])]),
+  )
+}
+
+test own_node_with_a_trailing_field_rejects_the_receiver() {
+  !pf_receive_with_own_node_data(
+    builtin.constr_data(
+      0,
+      [
+        builtin.constr_data(0, [builtin.i_data(400)]),
+        builtin.constr_data(0, []),
+        builtin.i_data(1),
+      ],
+    ),
+  )
+}
+
+test own_node_with_a_foreign_option_constructor_rejects_the_receiver() {
+  !pf_receive_with_own_node_data(
+    builtin.constr_data(
+      0,
+      [builtin.constr_data(2, []), builtin.constr_data(0, [])],
+    ),
+  )
+}
+
+test own_node_with_bytes_inside_some_rejects_the_receiver() {
+  !pf_receive_with_own_node_data(
+    builtin.constr_data(
+      0,
+      [
+        builtin.constr_data(0, [builtin.b_data(#"01")]),
+        builtin.constr_data(0, []),
+      ],
+    ),
+  )
+}
+
+test own_node_with_an_int_for_the_option_rejects_the_receiver() {
+  !pf_receive_with_own_node_data(
+    builtin.constr_data(0, [builtin.i_data(400), builtin.constr_data(0, [])]),
+  )
+}
+
+// Positive control: the same shape with a well-formed partial freeze passes.
+test own_node_well_formed_partial_freeze_admits_the_receiver() {
+  let entry: Data = Denylist {
+    frozen_amount: Some(400),
+    metadata: builtin.constr_data(0, []),
+  }
+  pf_receive_with_own_node_data(entry)
+}
+
+// ── Partial freeze × receiver KYC (documented limitation) ────────────────────
+//
+// The floor makes a partially frozen sender pay at least `f` back to itself,
+// which makes it a DESTINATION of its own transaction. With
+// `requires_receiver_kyc` set, it therefore needs a valid KYC proof as a
+// receiver too: a partially frozen holder whose KYC has lapsed cannot send at
+// all until it renews its KYC. Deliberate, kept simple (owner decision
+// 2026-10-23). A self-send makes A the only destination, so A's own (invalid)
+// proof is the only thing that can reject.
+
+fn pf_self_send(requires_receiver_kyc: Bool) -> Bool {
+  let tx = Transaction {
+    ..t_transfer_tx(False, False, False, requires_receiver_kyc),
+    inputs: [pf_input(0, pf_a(), 1_000)],
+    outputs: [pf_output(pf_a(), 1_000)],
+    reference_inputs: [
+      t_registry_ref_input(),
+      t_gs_ref_input(False, False, False, requires_receiver_kyc),
+      ..pf_list_a(Some(400))
+    ],
+  }
+  run_transfer(
+    TransferLogicScriptWithdrawRedeemer {
+      ..t_redeemer(),
+      actions_for_each_input: [pf_src(3)],
+      destination_actions: [pf_dst(3)],
+    },
+    tx,
+  )
+}
+
+test partially_frozen_sender_without_valid_kyc_is_blocked_by_receiver_kyc() {
+  !pf_self_send(True)
+}
+
+// Control: the same transaction with receiver KYC off passes.
+test partially_frozen_sender_self_send_passes_without_receiver_kyc() {
+  pf_self_send(False)
 }
