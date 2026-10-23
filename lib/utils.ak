@@ -173,8 +173,9 @@ pub fn credential_type_byte(credential: Credential) -> Int {
 /// The linked-list library authenticates exactly the three element UTxOs an
 /// insert or a remove touches (anchor, its reproduction, and the new/removed
 /// node) and says nothing about a FOURTH. Both list `spend` handlers delegate
-/// wholesale to their mint validator, which only asks whether SOME token of the
-/// policy is in the mint field — so an extra list node spent alongside a
+/// insert and remove (`StateTransition`) wholesale to their mint validator,
+/// which only asks whether SOME token of the policy is in the mint field — so
+/// an extra list node spent alongside a
 /// legitimate insert is constrained by nothing: the mint field carries one
 /// asset at +1, that fourth NFT is conserved by the ledger, and no validator
 /// says where it must land. It can go to a private wallet, where (because
@@ -184,7 +185,10 @@ pub fn credential_type_byte(credential: Credential) -> Int {
 ///
 /// Pinning the input count per mint branch is the cheapest place to close this:
 /// the mint validator already knows the operation shape and must run for any
-/// list mutation. Outputs need no separate constraint — with inputs pinned and
+/// insert or remove. (The denylist's in-place `UpdateDenylistEntry` runs no
+/// mint at all: the library's `one_to_one` binds each update spend to its own
+/// continuation, which must keep the address, the NFT and the link, so no node
+/// can leave the list that way either.) Outputs need no separate constraint — with inputs pinned and
 /// the mint field already restricted to a single asset, value conservation
 /// forces the count, and the library already requires each element output to
 /// hold exactly one NFT of the policy.

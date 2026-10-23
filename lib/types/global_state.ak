@@ -122,7 +122,8 @@ pub type GlobalStateDatum {
   //minted, increases when tokens are burnt. The admin may also set it to
   //an absolute value via `SetMintableAmount` until `upgrades_locked`.
   mintable_amount: Int,
-  //Denylist linked list minting policy (presence = sanctioned)
+  //Denylist linked list minting policy (presence = frozen: fully, or partially
+  //when the entry carries `frozen_amount: Some(f)`)
   denylist_linked_list_policy_id: ByteArray,
   //Regulation (eg. BaFin) compliancy info, not directly used in the contracts
   security_info: Data,

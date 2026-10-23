@@ -18,6 +18,7 @@ use cip68
 use compliance
 use constants
 use kyc/verify.{membership_leaf_key, membership_leaf_value}
+use types/denylist.{Denylist}
 use types/global_state.{
   GlobalStateDatum, GlobalStateLocation, GlobalStateReferenced, GlobalStateSpent,
   gs_datum_from_location,
@@ -35,7 +36,8 @@ use utils.{must_be_signed_by_credential}
 ///
 /// Per-destination check (for each unique destination stake credential):
 ///   1. If GS.requires_receiver_kyc, a valid KYC proof for the destination (attested by a TEL entity) or the pkh is in the merkle tree root.
-///   2. The destination is NOT in the denylist.
+///   2. The destination is NOT in the denylist, or is only PARTIALLY frozen
+///      (own node, `Some(f)`): a partial freeze limits sending, never receiving.
 ///
 /// NO source checks — force transfer is an admin override: the source may be
 /// denylisted or have expired KYC. That is the point.
@@ -73,8 +75,8 @@ validator third_party_transfer_logic_validator(
   /// names me" identity assertion was never load-bearing, since registry
   /// field 4 is a FREE CIP-113 field a decoy node could name too.
   expected_issuance_policy_id: ByteArray,
-  /// The DENYLIST SPEND VALIDATOR's script hash, threaded into
-  /// `verify_denylist_absence`. See its doc comment.
+  /// The DENYLIST SPEND VALIDATOR's script hash, which every denylist element
+  /// a party cites must sit at. See `absence.with_denylist_element`.
   denylist_script_hash: ByteArray,
   /// The POWER-USERS SPEND VALIDATOR's script hash — not the list
   /// policy id (they are separate validators with separate hashes).
@@ -138,15 +140,20 @@ validator third_party_transfer_logic_validator(
       ),
     )
 
-    // Per-destination: denylist absence, plus receiver KYC when the flag is
-    // set. There are deliberately NO source-side checks — a forced transfer is
-    // an admin override, and the source may be sanctioned or have expired KYC.
+    // Per-destination: the denylist gate (not listed, or only partially
+    // frozen), plus receiver KYC when the flag is set. There are deliberately
+    // NO source-side checks — a forced transfer is an admin override, and the
+    // source may be frozen (fully, or below its partial floor) or have expired
+    // KYC.
     // That is the point of the path.
     let all_destinations_ok = compliance.verify_parties(
       outputs_user_credentials,
       redeemer.destination_actions,
       fn(action) { action.destination_proof },
-      fn(action) { action.destination_denylist_covering_ref_input_index },
+      fn(action) { action.destination_denylist_ref_input_index },
+      // A partially frozen holder may receive — including the residual a
+      // partial seizure returns to them. A fully frozen one still may not.
+      fn(_, _) { True },
       gs_datum.requires_receiver_kyc,
       gs_datum,
       expected_issuance_policy_id,
@@ -366,11 +373,16 @@ fn p_registry_ref_input() -> Input {
   }
 }
 
-/// A denylist NODE sanctioning `key`. Absence for `key` itself is then
-/// unprovable through it, while any key sorting above it is still coverable.
+/// A denylist NODE fully freezing `key` (`frozen_amount: None`). `key` itself
+/// cannot clear the denylist gate through it, while any key sorting above it
+/// is still coverable.
 fn p_denylist_node_ref_input(key: ByteArray) -> Input {
+  let entry: Data = Denylist {
+    frozen_amount: None,
+    metadata: builtin.constr_data(0, []),
+  }
   let element: Element<Data, Data> = Element {
-    data: Node { data: builtin.constr_data(0, []) },
+    data: Node { data: entry },
     link: None,
   }
   Input {
@@ -503,7 +515,7 @@ fn p_dummy_proof() -> KycProof {
 fn p_dest_action() -> ThirdPartyDestinationAction {
   ThirdPartyDestinationAction {
     destination_proof: p_dummy_proof(),
-    destination_denylist_covering_ref_input_index: 2,
+    destination_denylist_ref_input_index: 2,
   }
 }
 
@@ -609,7 +621,7 @@ test seizure_succeeds_without_any_registry_reference_input() {
       destination_actions: [
         ThirdPartyDestinationAction {
           destination_proof: p_dummy_proof(),
-          destination_denylist_covering_ref_input_index: 1,
+          destination_denylist_ref_input_index: 1,
         },
       ],
     },
@@ -669,7 +681,7 @@ fn p_spent_gs_redeemer(
     destination_actions: [
       ThirdPartyDestinationAction {
         destination_proof: p_dummy_proof(),
-        destination_denylist_covering_ref_input_index: 1,
+        destination_denylist_ref_input_index: 1,
       },
     ],
   }
@@ -722,17 +734,18 @@ test force_transfer_rejected_when_deactivated() {
 // The CIP-113 base layer pairs each spent programmable-base input with an
 // output at the SAME address, which is where a partial seizure's residual
 // necessarily lands — back with the holder. This validator vets EVERY
-// token-bearing output as a destination, so that residual has to prove
-// denylist absence too, and for a sanctioned holder it cannot.
+// token-bearing output as a destination, so that residual has to clear the
+// denylist gate too, and a sanctioned (fully frozen) holder cannot.
 //
-// Net effect, and off-chain must plan for it: a seizure from a sanctioned
+// Net effect, and off-chain must plan for it: a seizure from a fully frozen
 // holder has to DRAIN each spent UTxO completely. Partial seizure works only
-// against a holder who is not sanctioned. Seizing a chosen amount from a
-// sanctioned holder therefore means selecting whole UTxOs, not splitting one.
+// against a holder who is not fully frozen (unlisted, or only partially
+// frozen). Seizing a chosen amount from a fully frozen holder therefore means
+// selecting whole UTxOs, not splitting one.
 
 /// A sanctioned holder's UTxO can be seized in FULL — the paired output keeps
-/// no security token, so it is not a destination at all and never has to prove
-/// absence.
+/// no security token, so it is not a destination at all and never has to clear
+/// the denylist gate.
 test seizure_of_a_sanctioned_holder_succeeds_when_the_utxo_is_drained() {
   let tx = Transaction {
     ..p_tx(False, False, False, True, [p_seized_input()], [p_pu_cred]),
@@ -1025,7 +1038,7 @@ test force_transfer_succeeds_when_destination_membership_proof_is_genuine() {
       p_dest_stake,
       p_membership_valid_until_ms,
     ),
-    destination_denylist_covering_ref_input_index: 2,
+    destination_denylist_ref_input_index: 2,
   }
   run_third_party(
     ThirdPartyTransferLogicScriptWithdrawRedeemer {
@@ -1051,7 +1064,7 @@ test force_transfer_rejected_when_destination_membership_root_is_for_another_cre
       p_dest_stake,
       p_membership_valid_until_ms,
     ),
-    destination_denylist_covering_ref_input_index: 2,
+    destination_denylist_ref_input_index: 2,
   }
   !run_third_party(
     ThirdPartyTransferLogicScriptWithdrawRedeemer {
@@ -1216,4 +1229,95 @@ test seizure_rejects_an_operator_that_is_the_global_state_logic() {
       extra_signatories: [],
     },
   )
+}
+
+// ── Partial freeze (denylist `frozen_amount`) ─────────────────────────────────
+//
+// Seizure ignores the source's freeze (an override), and a PARTIALLY frozen
+// holder may receive — so a partial seizure that returns a residual to a
+// partially frozen holder now works, while a fully frozen one still cannot
+// take a residual.
+
+/// The source's own denylist node, with a well-formed entry.
+fn p_source_node_ref_input(frozen_amount: Option<Int>) -> Input {
+  let element: Element<Data, Denylist> = Element {
+    data: Node {
+      data: Denylist { frozen_amount, metadata: builtin.constr_data(0, []) },
+    },
+    link: None,
+  }
+  Input {
+    ..p_denylist_node_ref_input(p_source_stake),
+    output: Output {
+      ..p_denylist_node_ref_input(p_source_stake).output,
+      datum: InlineDatum(element),
+    },
+  }
+}
+
+fn p_partial_seizure_tx(frozen_amount: Option<Int>) -> Transaction {
+  Transaction {
+    ..p_tx(False, False, False, True, [p_seized_input()], [p_pu_cred]),
+    reference_inputs: [
+      p_registry_ref_input(),
+      p_gs_ref_input(False, False, False),
+      p_source_node_ref_input(frozen_amount),
+      p_pu_node_ref_input(True),
+    ],
+    // 600 seized, 400 residual back to the source. The dest (0b…) is covered
+    // by the source's node (0a…, tail); the source cites its own node.
+    outputs: [
+      p_token_utxo(p_dest_stake, 600),
+      p_token_utxo(p_source_stake, 400),
+    ],
+  }
+}
+
+fn p_two_destinations() -> ThirdPartyTransferLogicScriptWithdrawRedeemer {
+  ThirdPartyTransferLogicScriptWithdrawRedeemer {
+    ..p_redeemer(),
+    destination_actions: [p_dest_action(), p_dest_action()],
+  }
+}
+
+test partial_seizure_leaving_a_residual_with_a_partially_frozen_holder_succeeds() {
+  run_third_party(p_two_destinations(), p_partial_seizure_tx(Some(1_000)))
+}
+
+// The seizure ignores the floor: leaving 400 under a 999_999 freeze is allowed.
+test seizure_may_take_a_partially_frozen_holder_below_the_floor() {
+  run_third_party(p_two_destinations(), p_partial_seizure_tx(Some(999_999)))
+}
+
+test partial_seizure_leaving_a_residual_with_a_fully_frozen_holder_fails() {
+  !run_third_party(p_two_destinations(), p_partial_seizure_tx(None))
+}
+
+// A partially frozen holder may also be the seizure's destination.
+test seizure_to_a_partially_frozen_destination_succeeds() {
+  let tx = Transaction {
+    ..p_partial_seizure_tx(Some(5)),
+    inputs: [
+      Input {
+        output_reference: p_out_ref(10),
+        output: p_token_utxo(p_dest_stake, 1_000),
+      },
+    ],
+    outputs: [p_token_utxo(p_source_stake, 1_000)],
+  }
+  run_third_party(p_redeemer(), tx)
+}
+
+test seizure_to_a_fully_frozen_destination_fails() {
+  let tx = Transaction {
+    ..p_partial_seizure_tx(None),
+    inputs: [
+      Input {
+        output_reference: p_out_ref(10),
+        output: p_token_utxo(p_dest_stake, 1_000),
+      },
+    ],
+    outputs: [p_token_utxo(p_source_stake, 1_000)],
+  }
+  !run_third_party(p_redeemer(), tx)
 }

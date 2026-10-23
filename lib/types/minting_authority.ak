@@ -4,13 +4,14 @@ use types/kyc_proof.{KycProof}
 /// One entry per unique destination (unique stake-credential among outputs
 /// carrying the security token) when minting. Mirrors the transfer-logic
 /// destination action: a KYC proof (checked only when
-/// `GlobalStateDatum.requires_receiver_kyc`) and a denylist-absence
-/// covering-node reference-input index (always checked). CMTAT v3.2.0
+/// `GlobalStateDatum.requires_receiver_kyc`) and a denylist element
+/// reference-input index (always checked): a covering node, or the
+/// destination's own node when only partially frozen. CMTAT v3.2.0
 /// refuses to mint to a frozen address (core) or to a non-allowlisted one
 /// (Allowlist variant); this is the eUTxO equivalent.
 pub type MintingLogicDestinationAction {
   destination_proof: KycProof,
-  destination_denylist_covering_ref_input_index: Int,
+  destination_denylist_ref_input_index: Int,
 }
 
 /// Withdraw redeemer for validators/minting_authority.ak — the swappable

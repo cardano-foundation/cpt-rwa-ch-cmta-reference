@@ -3,13 +3,15 @@ use types/kyc_proof.{KycProof}
 
 /// One entry per unique destination (unique stake-credential among outputs
 /// carrying the security token). Admin provides a KYC proof for each
-/// destination + a denylist-absence covering-node reference index.
+/// destination + a denylist element reference index (a covering node, or the
+/// destination's own node when only partially frozen).
 ///
 /// Source is NOT checked — force transfer is an admin override: the source
-/// may be denylisted or its KYC may have expired. That's the point.
+/// may be denylisted (fully, or below a partial freeze's floor) or its KYC may
+/// have expired. That's the point.
 pub type ThirdPartyDestinationAction {
   destination_proof: KycProof,
-  destination_denylist_covering_ref_input_index: Int,
+  destination_denylist_ref_input_index: Int,
 }
 
 pub type ThirdPartyTransferLogicScriptWithdrawRedeemer {

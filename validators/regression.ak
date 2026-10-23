@@ -47,7 +47,7 @@ use cardano/transaction.{
 }
 use constants
 use denylist as v_denylist
-use denylist/absence.{verify_denylist_absence}
+use denylist/absence.{verify_denylist_permits}
 use minting_authority as v_minting_authority
 use power_users as v_power_users
 use tests
@@ -296,8 +296,14 @@ fn ll_asset_name(key: ByteArray) -> ByteArray {
 /// `link` holds the successor's BARE key, exactly as `insert_ascending` writes
 /// it.
 fn dl_node_input(ix: Int, key: ByteArray, link: Option<ByteArray>) -> Input {
+  // A well-formed FULL freeze, so a holder citing its own node is rejected for
+  // being listed, not for an undecodable entry.
+  let entry: Data = Denylist {
+    frozen_amount: None,
+    metadata: builtin.constr_data(0, []),
+  }
   let element: Element<Data, Data> = Element {
-    data: Node { data: builtin.constr_data(0, []) },
+    data: Node { data: entry },
     link,
   }
   Input {
@@ -354,7 +360,12 @@ fn dl_root_output(link: Option<ByteArray>) -> Output {
 /// by the mint branch's `expect _parsed: Denylist = node_data`.
 fn dl_sanction_node_output(key: ByteArray, link: Option<ByteArray>) -> Output {
   let element: Element<Data, Denylist> = Element {
-    data: Node { data: Denylist { metadata: builtin.constr_data(0, []) } },
+    data: Node {
+      data: Denylist {
+        frozen_amount: None,
+        metadata: builtin.constr_data(0, []),
+      },
+    },
     link,
   }
   Output { ..dl_node_input(0, key, link).output, datum: InlineDatum(element) }
@@ -647,21 +658,21 @@ fn dummy_proof() -> KycProof {
 fn src_action(covering_ix: Int) -> TransferLogicScriptAction {
   TransferLogicScriptAction {
     source_proof: dummy_proof(),
-    source_denylist_covering_ref_input_index: covering_ix,
+    source_denylist_ref_input_index: covering_ix,
   }
 }
 
 fn dst_action(covering_ix: Int) -> TransferLogicScriptDestinationAction {
   TransferLogicScriptDestinationAction {
     destination_proof: dummy_proof(),
-    destination_denylist_covering_ref_input_index: covering_ix,
+    destination_denylist_ref_input_index: covering_ix,
   }
 }
 
 fn mint_dst_action(covering_ix: Int) -> MintingLogicDestinationAction {
   MintingLogicDestinationAction {
     destination_proof: dummy_proof(),
-    destination_denylist_covering_ref_input_index: covering_ix,
+    destination_denylist_ref_input_index: covering_ix,
   }
 }
 
@@ -704,7 +715,8 @@ fn run_authority(
 
 // ============================================================================
 // PROPERTY: every movement of the security token is gated by a live
-// denylist-absence proof and, when required, a valid KYC proof.
+// denylist-gate proof (absence, or a partial freeze) and, when required, a
+// valid KYC proof.
 // ============================================================================
 
 // The decoy-registry-node bypass test formerly here is gone: this property
@@ -713,11 +725,11 @@ fn run_authority(
 // time — so a decoy node naming this script (registry field 3 is a FREE
 // CIP-113 field) has nothing to bypass any more.
 
-/// A SANCTIONED holder attempts to move the real token with sender AND
-/// receiver KYC both switched on and their own denylist entry sitting in the
-/// reference inputs. The sanctioned party's own node is the covering
-/// candidate, and `covers_key` (lib/denylist/absence.ak:23) rejects a node
-/// whose key equals the target.
+/// A SANCTIONED (fully frozen) holder attempts to move the real token with
+/// sender AND receiver KYC both switched on, citing their own denylist entry.
+/// `absence.party_permitted` recognises the party's own node and rejects its
+/// `frozen_amount: None` on both sides; `covers_key` could never pass it
+/// either, since a node never covers its own key.
 test transfer_rejects_a_sanctioned_sender_via_the_genuine_node() {
   let tx = Transaction {
     ..base_tx(),
@@ -758,17 +770,18 @@ test transfer_rejects_a_sanctioned_sender_via_the_genuine_node() {
 /// The condition is just `S[0] < S[4]`: true for roughly half of all credential
 /// hashes, grindable in minutes for the rest.
 ///
-/// THE GUARD. `verify_denylist_absence` reads the link from the
+/// THE GUARD. `verify_denylist_permits` reads the link from the
 /// node's DATUM instead of from `get_element_info`, so `covers_from_above`
 /// compares S against S and correctly refuses to certify a present key.
 /// Returns False rather than trapping, hence `!`.
 test denylisted_key_cannot_prove_its_own_absence() {
-  !verify_denylist_absence(
+  !verify_denylist_permits(
     dl_sanctioned_key,
     0,
     [dl_node_input(0, dl_pred_key, Some(dl_sanctioned_key))],
     denylist_policy,
     denylist_script_hash,
+    fn(_, _) { True },
   )
 }
 
@@ -786,28 +799,31 @@ test denylist_absence_is_sound_and_complete_over_a_real_list() {
   and {
     // `dl_frozen_key` sorts strictly between P and S: absent, and provable
     // through P. This is the direction broke by stranding honest holders.
-    verify_denylist_absence(
+    verify_denylist_permits(
       dl_frozen_key,
       0,
       dl,
       denylist_policy,
       denylist_script_hash,
+      fn(_, _) { True },
     ),
     // S is PRESENT. No node in the list may certify its absence — neither its
     // predecessor (the bypass) nor S itself.
-    !verify_denylist_absence(
+    !verify_denylist_permits(
       dl_sanctioned_key,
       0,
       dl,
       denylist_policy,
       denylist_script_hash,
+      fn(_, _) { True },
     ),
-    !verify_denylist_absence(
+    !verify_denylist_permits(
       dl_sanctioned_key,
       1,
       dl,
       denylist_policy,
       denylist_script_hash,
+      fn(_, _) { True },
     ),
   }
 }
@@ -888,18 +904,19 @@ test transfer_accepts_a_clean_holder_with_a_high_successor_link() {
 /// covering node for ANY target. Keyed at the lowest possible key with no
 /// successor, it certifies absence for every credential on chain.
 ///
-/// THE GUARD. `verify_denylist_absence` takes the denylist
+/// THE GUARD. `verify_denylist_permits` takes the denylist
 /// SPEND validator's hash as a compile-time parameter and requires the covering
 /// element to still live there. The forged node sits at a `VerificationKey`
 /// address, so the `expect Script(...)` pattern match TRAPS — hence `fail`,
 /// not `!`.
 test absence_proof_rejects_a_covering_node_in_a_wallet() fail {
-  verify_denylist_absence(
+  verify_denylist_permits(
     dl_sanctioned_key,
     0,
     [dl_forged_node_at_attacker(0, dl_lowest_key, None)],
     denylist_policy,
     denylist_script_hash,
+    fn(_, _) { True },
   )
 }
 
@@ -912,9 +929,10 @@ test absence_proof_rejects_a_covering_node_in_a_wallet() fail {
 /// precondition `absence_proof_rejects_a_covering_node_in_a_wallet` needs.
 ///
 /// REWRITTEN to invoke the MINT validator.
-/// The `spend` handler is unchanged by the fix (it still just asks the mint
-/// field a question), so probing it would prove nothing; the constraint lives
-/// in the mint branches, which must run for any list mutation. This is a
+/// The `spend` handler's `StateTransition` path is unchanged by the fix (it
+/// still just asks the mint field a question), so probing it would prove
+/// nothing; the constraint lives in the mint branches, which must run for any
+/// insert or remove. This is a
 /// legitimate `AddToDenylist` insert — admin power user, correct anchor, one
 /// NFT minted — with ONE EXTRA denylist node spent alongside. The branch pins
 /// the list-policy input count at 1, so it returns False, hence `!`.
@@ -1182,15 +1200,19 @@ test denylist_deinit_rejects_a_missing_admin_signature() {
   )
 }
 
-/// The `spend` handler, kept as an explicit record that
-/// the input-count fix did NOT change it. It still delegates wholesale to the mint
-/// validator, so on its own it accepts. That is fine — it is no longer
+/// The `spend` handler's `StateTransition` path, kept as an explicit record
+/// that the input-count fix did NOT change it. It still delegates wholesale to
+/// the mint validator, so on its own it accepts. (The separate
+/// `UpdateDenylistEntry` path runs no mint and is pinned in
+/// `validators/denylist.ak`.) That is fine — it is no longer
 /// reachable with an unconstrained extra element, because the mint validator
 /// must also run and now counts inputs.
 test denylist_spend_handler_is_pure_delegation() {
   let no_datum: Option<Data> = None
   v_denylist.denylist_validator.spend(
+    gs_policy,
     denylist_policy,
+    pu_script_hash,
     no_datum,
     DenylistStateTransition,
     oref(0),
@@ -1786,11 +1808,11 @@ test the_same_transfer_succeeds_once_unpaused() {
 // that node once and still runs the covering check for every party.
 // ============================================================================
 //
-// `compliance.verify_parties` remembers the covering node it last
-// authenticated (reference-input index + key + link) and, for the next party
-// citing the SAME index, skips straight to `covers_key`. The tests below pin
-// what that must never change: every party is still compared against the
-// node's bounds, an index that is not a genuine list element still traps on
+// `compliance.verify_parties` remembers the denylist element it last
+// authenticated (reference-input index + key + link + data) and, for the next
+// party citing the SAME index, skips authentication and decides that party
+// afresh with `absence.party_permitted`. The tests below pin what that must
+// never change: every party is still compared against the element's bounds, an index that is not a genuine list element still traps on
 // first use, and a negative index never resolves to anything — in particular
 // not to a remembered node.
 
