@@ -2029,3 +2029,149 @@ test partially_frozen_sender_without_valid_kyc_is_blocked_by_receiver_kyc() {
 test partially_frozen_sender_self_send_passes_without_receiver_kyc() {
   pf_self_send(False)
 }
+
+// ── The multi-party walk: one element per index, judged per party ─────────────
+//
+// `compliance.vet_remembering` carries the last authenticated element through
+// the walk. These pin what that element may and may not be used for, in the
+// index patterns the earlier tests did not reach: a rejected FIRST party among
+// several, [i, j, i] and [i, j, j]. List N2: root → A (link B) → B → end;
+// index 2 root, 3 A's node (covers 0a < x < 0c: C, C2), 4 B's node (covers
+// x > 0c: D, E). In every N2 test the single destination (D, citing 4)
+// passes, so each rejects only for the sender named; the first test uses its
+// own one-node list, where the destination C cites A's node and passes.
+
+const pf_c2: ByteArray =
+  #"0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b00"
+
+const pf_e: ByteArray =
+  #"0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e"
+
+fn pf_list_n2() -> List<Input> {
+  [
+    pf_root(Some(t_sender_stake)),
+    pf_node(0, t_sender_stake, Some(pf_b), None),
+    pf_node(1, pf_b, None, None),
+  ]
+}
+
+fn pf_walk(senders: List<ByteArray>, indices: List<Int>) -> Bool {
+  pf_run(
+    pf_list_n2(),
+    list.indexed_map(
+      senders,
+      fn(i, key) { pf_input(i, VerificationKey(key), 1) },
+    ),
+    [pf_output(VerificationKey(pf_d), list.length(senders))],
+    list.map(indices, pf_src),
+    [pf_dst(4)],
+  )
+}
+
+// The first of two senders is fully frozen and cites its own node; the second
+// is clean and covered by that same element. The first party's own decision
+// must reject — the second passing must not carry the transaction.
+test memo_rejects_a_fully_frozen_first_party_among_several() {
+  !pf_run(
+    pf_list_a(None),
+    [pf_input(0, pf_a(), 1_000), pf_input(1, pf_c(), 1_000)],
+    [pf_output(pf_c(), 2_000)],
+    [pf_src(3), pf_src(3)],
+    [pf_dst(3)],
+  )
+}
+
+// [i, j, i]: C (3), D (4), E (3). E is not covered by A's node. A walk that
+// remembered index 3 alongside B's element would judge E against B, which
+// covers it.
+test memo_never_judges_a_party_against_another_index_element() {
+  !pf_walk([t_dest_stake, pf_d, pf_e], [3, 4, 3])
+}
+
+// [i, j, j]: C2 (3), D (4), C (4). C is not covered by B's node. A walk that
+// remembered index 4 alongside A's (stale) element would judge C against A,
+// which covers it.
+test memo_never_judges_a_party_against_a_stale_element() {
+  !pf_walk([pf_c2, pf_d, t_dest_stake], [3, 4, 4])
+}
+
+// Control for [i, j, i]: the third party is one A's node does cover.
+test memo_accepts_an_i_j_i_walk_of_covered_parties() {
+  pf_walk([t_dest_stake, pf_d, pf_c2], [3, 4, 3])
+}
+
+// Control for [i, j, j]: the third party is one B's node does cover.
+test memo_accepts_an_i_j_j_walk_of_covered_parties() {
+  pf_walk([pf_c2, pf_d, pf_e], [3, 4, 4])
+}
+
+// Three senders, two actions: the third party, reached on the remembered path,
+// has no action and the walk traps. (`fail` also accepts a clean rejection;
+// what this guards against is the third party being silently ACCEPTED.)
+test memo_path_traps_on_a_short_action_list() fail {
+  pf_walk([t_dest_stake, pf_c2, pf_d], [3, 3])
+}
+
+// The second party cites index 1, the GlobalState UTxO — not a list element —
+// so authenticating it afresh inside the walk traps. The second party is C2,
+// which the FIRST party's element (A's node) covers: a walk that reused that
+// element instead of authenticating index 1 would accept. (`fail` also
+// accepts a clean rejection; what this guards against is the second party
+// being silently ACCEPTED.)
+test fresh_element_that_fails_authentication_traps_on_a_later_party() fail {
+  pf_walk([t_dest_stake, pf_c2], [3, 1])
+}
+
+// ── Benches: parties covered by ordinary (non-root) nodes ─────────────────────
+//
+// `transfer_cost_by_party_count` cites the root, whose key is `None`; these
+// cite nodes with a key, the arm every unlisted holder of a non-empty list
+// takes. K0 and K1 sort below every `t_bench_hash` (its fifth byte is 1a or
+// 2b) and have no successor, so each covers every party.
+
+const t_bench_k0: ByteArray =
+  #"00000000000000000000000000000000000000000000000000000000"
+
+const t_bench_k1: ByteArray =
+  #"00000000000000000000000000000000000000000000000000000001"
+
+fn t_bench_node_tx(n: Int) -> Transaction {
+  let base = t_transfer_tx(False, False, False, False)
+  Transaction {
+    ..base,
+    inputs: list.map(list.range(0, n - 1), t_bench_sender_input),
+    outputs: list.map(list.range(0, n - 1), t_bench_dest_output),
+    reference_inputs: list.concat(
+      base.reference_inputs,
+      [pf_node(0, t_bench_k0, None, None), pf_node(1, t_bench_k1, None, None)],
+    ),
+  }
+}
+
+fn t_bench_node_redeemer(
+  index_of: fn(Int) -> Int,
+  n: Int,
+) -> TransferLogicScriptWithdrawRedeemer {
+  let indices = list.map(list.range(0, n - 1), index_of)
+  TransferLogicScriptWithdrawRedeemer {
+    global_state_location: GlobalStateReferenced {
+      global_state_ref_input_index: 1,
+    },
+    actions_for_each_input: list.map(indices, pf_src),
+    destination_actions: list.map(indices, pf_dst),
+  }
+}
+
+// Every party cites K0: the remembered element serves all but the first.
+bench transfer_cost_by_party_count_shared_node(n via n_parties) {
+  expect run_transfer(t_bench_node_redeemer(fn(_) { 3 }, n), t_bench_node_tx(n))
+}
+
+// Parties alternate between K0 and K1: every party re-authenticates.
+bench transfer_cost_by_party_count_alternating_nodes(n via n_parties) {
+  expect
+    run_transfer(
+      t_bench_node_redeemer(fn(i) { 3 + i % 2 }, n),
+      t_bench_node_tx(n),
+    )
+}

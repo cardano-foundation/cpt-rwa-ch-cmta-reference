@@ -226,6 +226,9 @@ referenced by compact identifiers or hashes.
   An unlisted party proves absence with a covering-node proof; a partially frozen party cites its
   own node instead. An `is_admin` power user changes `f` in place with `UpdateDenylistEntry`.
   Seizure ignores a partial freeze (it is an override) and can leave the holder below `f`.
+  Unlike CMTAT v3.2.0, a seizure does not lower `f` to match, a freeze is not bounded by the
+  holder's balance, and a full freeze replaces `f` rather than sitting beside it — see
+  [§17 of the security notes](documents/security/security-fixes.md#17-partial-freeze-a-denylist-entry-can-freeze-an-amount-not-only-the-whole-holding).
 * A transfer must clear the pause gate, then per sender and per receiver: the denylist gate (absence,
   or a partial freeze — whose floor a sender must keep), plus a
   valid KYC proof whenever `requires_sender_kyc` / `requires_receiver_kyc` is set. The two are

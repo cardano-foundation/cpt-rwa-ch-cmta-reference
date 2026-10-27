@@ -38,9 +38,14 @@ the wrong asset name, a list root that did not link to the node being removed, a
 | [11](#11-the-power-user-authority-footgun-was-undocumented) | The power-user authority footgun was undocumented | Info | Fixed |
 | [12](#12-dismantling-either-linked-list-was-a-one-way-freeze-of-a-live-protocol) | Dismantling either linked list was a one-way freeze of a live protocol | Medium | Fixed |
 | [13](#13-cip-68-metadata-tokens-were-governed-by-an-exact-name-not-by-their-kind) | CIP-68 metadata tokens were governed by an exact name, not by their kind | Medium | Fixed |
+| [14](#14-registry-fields-3-and-4-accepted-any-script-f08) | Registry fields 3 and 4 accepted any script (F08) | Medium | Fixed |
+| [15](#15-genesis-never-ran-the-field-0-logic-and-rotation-accepted-any-script-that-runs) | Genesis never ran the field-0 logic, and rotation accepted any script that runs | — | Fixed |
+| [16](#16-the-power-users-list-policy-id-was-held-twice-on-the-mint-path) | The power-users list policy id was held twice on the mint path | — | Fixed |
 | [17](#17-partial-freeze-a-denylist-entry-can-freeze-an-amount-not-only-the-whole-holding) | Partial freeze: a denylist entry can freeze an amount | Feature | Added 2026-10-23 |
 
-Findings 12 and 13 come from the 2026-08-28 re-audit; 1–11 from the original review. Then:
+Findings 12 and 13 come from the 2026-08-28 re-audit; 1–11 from the original review; 14 from the
+2026-10-15 audit (F08) and 15–16 from the review of PR #29, which assigned them no severity; 17 is a
+feature. Then:
 [acknowledged and not changed](#acknowledged-and-deliberately-not-changed),
 [the linked-list dependency](#the-linked-list-dependency),
 [what the base layer guarantees](#what-the-cip-113-base-layer-actually-guarantees),
@@ -1006,8 +1011,9 @@ address has that many tokens frozen; which ones does not matter".
   (`absence.party_permitted`). Own node with `None`: rejected on every side. Own node with
   `Some(f)`: every destination gate accepts (transfer, mint, seizure); the transfer path's sender
   gate accepts only if the outputs whose inline stake credential hash is the node key carry at
-  least `f` of the security token. The redeemer encoding does not change, and an unlisted party's
-  proof is byte-identical to before.
+  least `f` of the security token. The on-chain redeemer encoding does not change, and an unlisted
+  party's proof is byte-identical to before; the index fields are renamed in the blueprint, though
+  (see [what this changes for off-chain](#the-2026-10-23-partial-freeze-one-datum-change-one-redeemer-variant-two-new-parameters)).
 * `denylist_validator` (spend) gains `UpdateDenylistEntry`, which rewrites one node's data in place
   through the library's `spend_for_updating_elements_data`, gated like Add/Remove (an `is_admin`
   power user, signed, protocol not deactivated), nodes only, strict decode, metadata ≤ 512 B, and
@@ -1028,8 +1034,9 @@ address has that many tokens frozen; which ones does not matter".
 4. *Writes are strict, reads fail closed.* Writers `expect` a well-formed `Denylist`; a reader that
    meets an own node it cannot decode rejects that party (a strict soft cast returning False)
    rather than trapping the whole transaction.
-5. *The memo caches the element, never a verdict.* `compliance.vet_remembering` re-decides
-   membership for each party's own hash, so one party's membership proof cannot pass another.
+5. *The memo caches the element, never a verdict.* `compliance.vet_remembering` — since
+   2026-10-27 one self-recursive function walking every party after the first — re-decides membership for
+   each party's own hash, so one party's membership proof cannot pass another.
 6. *Update and insert/remove never share a transaction.* One requires a list-policy mint, the
    other forbids it.
 
@@ -1053,6 +1060,24 @@ changes the node's UTxO reference, so in-flight transactions that cite it — th
 neighbour's absence proof — must be rebuilt. A seizure can leave the holder below `f`; update `f`
 afterwards if that is not intended. A partially frozen holder can now take a partial seizure's
 residual, which a fully frozen one still cannot (see the operational constraints below).
+
+**Where this differs from CMTAT v3.2.0.** The model is CMTAT's "an amount is frozen, which tokens
+does not matter", but three behaviours of `ERC20EnforcementModuleInternal` are not reproduced:
+
+* *Forced transfer does not reduce `f`.* CMTAT's `_forcedTransfer` (and its forced burn, the
+  `to == address(0)` case) calls `_unfreezeTokens`, which lowers the frozen amount by however much
+  the transfer exceeds the active balance. Here a seizure moves tokens without touching the denylist
+  node, so `f` survives it: a holder seized below `f` cannot send until an `is_admin` power user
+  lowers `f` with `UpdateDenylistEntry` or the holder's balance climbs back to `f`. An operator
+  wanting CMTAT behaviour updates `f` in the same operating procedure as the seizure. Burning goes
+  through the same forced-transfer path here, so the same applies.
+* *Freezing is not bounded by the balance.* CMTAT's `_freezePartialTokens` reverts when the frozen
+  amount would exceed the balance. No denylist write can see a holder's balance, so `f` is
+  unbounded (see costs above).
+* *Full and partial freeze are one field, not two.* CMTAT keeps the address freeze and the frozen
+  amount independently, so lifting a full freeze restores the earlier partial one. Here
+  `frozen_amount` is either `None` or `Some(f)`: escalating to a full freeze discards `f`, and
+  relaxing back must write it again.
 
 **Pinned by** the `partially_frozen_*` / `fully_frozen_*` / `memo_*` / `paid_back_*` / `both_*` /
 `each_*` / `own_node_*` / `undecodable_*` tests in `validators/transfer_logic_script.ak`, the partial-seizure tests in
@@ -1292,6 +1317,13 @@ weakens the gate. But nothing works until off-chain moves:
   that pins it: transfer logic, third-party logic, minting authority (rows 8–10).
 * **Proofs.** The per-party denylist index may name the party's own node (partially frozen) as
   well as a covering node. An unlisted party's proof is unchanged.
+* **Blueprint field names, breaking for generated types.** The per-party index fields lose
+  `covering`: `source_denylist_covering_ref_input_index` → `source_denylist_ref_input_index` in
+  `TransferLogicScriptAction`, and `destination_denylist_covering_ref_input_index` →
+  `destination_denylist_ref_input_index` in `TransferLogicScriptDestinationAction`,
+  `MintingLogicDestinationAction` and `ThirdPartyDestinationAction`. Plutus data is positional, so
+  the on-chain encoding is unchanged and hand-written encoders keep working; types generated from
+  `plutus.json` change their field names and their call sites must follow.
 
 ### The 2026-08-28 fixes: no schema change, one dropped parameter, five moved hashes
 
@@ -1369,13 +1401,20 @@ composing them, they are not visible from either file alone, and off-chain proce
 for them. Found by working through each operation's full transaction shape against the vendored
 CIP-113 source.
 
-### Seizure is all-or-nothing per UTxO, against a sanctioned holder
+### Seizure is all-or-nothing per UTxO, against a fully frozen holder
 
 The base layer pairs each spent programmable-base input with an output at the **same address**, so a
 partial seizure's residual necessarily returns to the holder. This deployment vets every
-token-bearing output as a destination, and a sanctioned holder cannot produce a denylist-absence
-proof for their own address. So a partial seizure that leaves a residual with a sanctioned holder is
-rejected.
+token-bearing output as a destination, and a sanctioned (fully frozen, `frozen_amount: None`) holder
+cannot clear the denylist gate for their own address: it has no covering node, and its own node
+rejects it. So a partial seizure that leaves a residual with a fully frozen holder is rejected.
+
+A **partially frozen** holder (`Some(f)`, [§17](#17-partial-freeze-a-denylist-entry-can-freeze-an-amount-not-only-the-whole-holding))
+is not bound by this: it clears the destination gate by citing its own node, so it can take a
+partial seizure's residual, and the seizure ignores its floor `f`. Pinned by
+`partial_seizure_leaving_a_residual_with_a_partially_frozen_holder_succeeds` and
+`seizure_may_take_a_partially_frozen_holder_below_the_floor`. With `requires_receiver_kyc` set, the
+residual still needs the holder's valid KYC, as for any destination.
 
 **Full-draining a UTxO works**, because a paired output holding none of the security token is not a
 destination at all. A position can therefore still be partially seized at the *account* level, by

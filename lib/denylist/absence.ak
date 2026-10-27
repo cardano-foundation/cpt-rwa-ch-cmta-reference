@@ -1,4 +1,6 @@
 use aiken/builtin
+use aiken/collection/list
+use aiken/primitive/bytearray
 use aiken_design_patterns/linked_list.{get_element_info, run_element_with}
 use cardano/address.{Address, Script}
 use cardano/transaction.{Input}
@@ -64,6 +66,13 @@ pub fn covers_key(
 ///
 /// `frozen_amount` is read from the authenticated element, never from the
 /// redeemer.
+///
+/// For a node, `key < party_hash` is tested FIRST: that is the covering case
+/// every unlisted party takes, and it then costs one comparison instead of an
+/// equality test followed by `covers_key`. The decision is the same as testing
+/// equality first: `key < party_hash` excludes `key == party_hash`, and a key
+/// above the party covers nothing. A listed party pays one comparison more.
+/// Pinned by `party_permitted_matches_the_reference_formulation`.
 pub fn party_permitted(
   element_key: Option<ByteArray>,
   element_link: Option<ByteArray>,
@@ -73,7 +82,12 @@ pub fn party_permitted(
 ) -> Bool {
   when element_key is {
     Some(key) ->
-      if key == party_hash {
+      if builtin.less_than_bytearray(key, party_hash) {
+        when element_link is {
+          None -> True
+          Some(next_key) -> builtin.less_than_bytearray(party_hash, next_key)
+        }
+      } else if key == party_hash {
         if element_data is entry: Denylist {
           when entry.frozen_amount is {
             None -> False
@@ -84,7 +98,7 @@ pub fn party_permitted(
           False
         }
       } else {
-        covers_key(element_key, element_link, party_hash)
+        False
       }
     None -> covers_key(None, element_link, party_hash)
   }
@@ -242,4 +256,112 @@ test covers_target_equal_link_sad() {
 // Node whose key is greater than target does not cover.
 test covers_key_above_target_sad() {
   covers_key(Some(pkh_high), None, pkh_mid) == False
+}
+
+// ============================================================================
+// Tests — `party_permitted` equals its earlier, equality-first formulation
+// ============================================================================
+//
+// `party_permitted` tests `key < party_hash` before `key == party_hash` to save
+// a comparison on the covering path. This pins that the reorder decides exactly
+// what the equality-first body (c025bec) decided, verbatim below, over an
+// EXHAUSTIVE domain rather than a sample: keys, links and parties from a set
+// that includes the empty string and prefix pairs (so ordering by length
+// occurs), every entry shape a node can carry — well-formed or not — and
+// callbacks that depend on both arguments and answer both ways, so calling the
+// callback in a different case or with a different amount shows up.
+
+fn reference_party_permitted(
+  element_key: Option<ByteArray>,
+  element_link: Option<ByteArray>,
+  element_data: Data,
+  party_hash: ByteArray,
+  on_partially_frozen: fn(ByteArray, Int) -> Bool,
+) -> Bool {
+  when element_key is {
+    Some(key) ->
+      if key == party_hash {
+        if element_data is entry: Denylist {
+          when entry.frozen_amount is {
+            None -> False
+            Some(frozen_amount) ->
+              on_partially_frozen(party_hash, frozen_amount)
+          }
+        } else {
+          False
+        }
+      } else {
+        covers_key(element_key, element_link, party_hash)
+      }
+    None -> covers_key(None, element_link, party_hash)
+  }
+}
+
+const eq_bytes: List<ByteArray> =
+  [#"", #"00", #"01", #"0100", #"0101", #"01ff", #"02", #"ff", #"ff00"]
+
+fn eq_entries() -> List<Data> {
+  [
+    as_data(Denylist { frozen_amount: None, metadata: as_data(#"") }),
+    as_data(Denylist { frozen_amount: Some(0), metadata: as_data(#"") }),
+    as_data(Denylist { frozen_amount: Some(7), metadata: as_data(1) }),
+    as_data(Denylist { frozen_amount: Some(8), metadata: as_data(1) }),
+    // An `Option` with a foreign constructor.
+    builtin.constr_data(0, [builtin.constr_data(2, []), as_data(1)]),
+    // A missing field.
+    builtin.constr_data(0, [builtin.constr_data(0, [as_data(7)])]),
+    // The wrong outer constructor.
+    builtin.constr_data(1, [builtin.constr_data(0, [as_data(7)]), as_data(1)]),
+    as_data(1),
+    as_data(#"00"),
+  ]
+}
+
+// Selected by index: a function cannot be an element of a `List`.
+fn eq_callback(i: Int) -> fn(ByteArray, Int) -> Bool {
+  if i == 0 {
+    fn(_, _) { True }
+  } else if i == 1 {
+    fn(_, _) { False }
+  } else if i == 2 {
+    fn(h, f) { f > 7 && bytearray.length(h) > 1 }
+  } else {
+    fn(h, f) { f == 7 || h == #"01" }
+  }
+}
+
+test party_permitted_matches_the_reference_formulation() {
+  let bounds = [None, ..list.map(eq_bytes, Some)]
+  list.all(
+    bounds,
+    fn(key) {
+      list.all(
+        bounds,
+        fn(link) {
+          list.all(
+            eq_bytes,
+            fn(party) {
+              list.all(
+                eq_entries(),
+                fn(data) {
+                  list.all(
+                    [0, 1, 2, 3],
+                    fn(i) {
+                      party_permitted(key, link, data, party, eq_callback(i)) == reference_party_permitted(
+                        key,
+                        link,
+                        data,
+                        party,
+                        eq_callback(i),
+                      )
+                    },
+                  )
+                },
+              )
+            },
+          )
+        },
+      )
+    },
+  )
 }
