@@ -39,6 +39,12 @@ use types/power_users.{PowerUser}
 /// check this: whether a hash names something that genuinely decides is not
 /// visible on chain.
 ///
+/// `can_approve` is deliberately NOT gated by this helper: the approval logic
+/// accepts only the operator's KEY signature (`extra_signatories`), so a script
+/// hash can never satisfy it and a script-hash grant fails closed. Never
+/// "harmonise" it back to this helper — that would let any script running in a
+/// settlement (the transfer logic among them) approve for anyone.
+///
 /// DEPLOYMENT REQUIREMENT, not enforced on-chain: after granting OR rotating
 /// ANY power-user role, run the smoke test prescribed in
 /// `lib/types/global_state.ak` — assert that an operation exercising that role
@@ -116,8 +122,9 @@ pub fn quantity_of_policy_id(value: Value, policyId: PolicyId) {
 ///    revocation stick.
 ///
 /// Every caller that reads power-user authority goes through here — the
-/// denylist mint, the minting authority, the seizure logic and the GlobalState
-/// pause branch — so the three checks cannot drift apart between them.
+/// denylist mint, the minting authority, the seizure logic, the GlobalState
+/// pause branch and the approval logic (`approval_gate.operator_approved`) — so
+/// the three checks cannot drift apart between them.
 pub fn authenticated_power_user(
   node_output: Output,
   power_user_list_policy_id: PolicyId,

@@ -86,14 +86,14 @@ are distinct and equal the compiled list mint hashes. The datum's
 `minting_script_credential_hash` must identify the intended current minting authority, not the
 permanent proxy.
 
-### 2. Register the other four withdrawal credentials
+### 2. Register the other six withdrawal credentials
 
 With `global_state_logic` registered in §0, register the applied stake credentials for
 `minting_logic_validator` (proxy),
-`minting_authority_validator`, `transfer_logic_validator` and
-`third_party_transfer_logic_validator`. The first two **must** be registered before the CIP-113
-registry insert, because registration runs both withdraw-0 scripts. The latter two must be
-registered before transfers or seizures. Each validator's `publish` handler accepts
+`minting_authority_validator`, `transfer_logic_validator`,
+`third_party_transfer_logic_validator`, `approval_proxy` and `approval_logic`. The first two
+**must** be registered before the CIP-113 registry insert, because registration runs both withdraw-0
+scripts. The others must be registered before transfers, seizures or the first pending transfer. Each validator's `publish` handler accepts
 `RegisterCredential` and refuses deregistration.
 
 ### 3. Create an operator and register the CIP-113 node
@@ -279,6 +279,105 @@ seed, unhashed and hashed; the hashed ones were cross-checked against Emurgo's
 independent check of the CIP-8 hashing and of the `Sig_structure` encoding. To produce vectors of
 your own, sign the `Sig_structure` above with any Ed25519 library.
 
+## Two-step transfer approval
+
+See [README: Two-step transfer approval](../README.md#two-step-transfer-approval) for the rules.
+This section gives the transaction shapes. Every index below is a zero-based position in the final
+transaction.
+
+**Request** (switch on). A normal transfer whose token output goes to the vault:
+
+```aiken
+Output {
+  address: Address(Script(plb_hash), Some(Inline(Script(approval_proxy_hash)))),
+  value: lovelace + exactly `amount` of the security token, nothing else,
+  datum: InlineDatum(PendingTransfer { sender, recipient, amount }),
+  reference_script: None,
+}
+```
+
+* `sender` is the transaction's only token-bearing holder (full credential); `amount` is the
+  security quantity in that output. Change back to the sender is allowed.
+* Add the zero-value withdrawal of the approval logic GlobalState names (`approval_logic_hash`),
+  with `ApprovalRedeemer { global_state_location, actions: [], approver_ref_input_index: None }`.
+  **While the switch is on, every transfer carries this withdrawal** — a request, a settlement, a
+  plain transfer within the threshold and a CIP-68 metadata update alike; the approval logic
+  enforces the threshold.
+* The vault output is **no party**: it takes no destination action. Build `destination_actions`
+  for the other destinations only, in output order. The recipient is vetted when it is paid.
+* Reference GlobalState. A request cannot share a transaction with a GlobalState spend: every
+  spending action except `MintSecurity` forbids moving the token, and `MintSecurity` brings in the
+  minting authority, which refuses vault outputs.
+
+**Approve, Reject, Cancel, Close.** Spend the vault UTxO(s) through the base layer's transfer path.
+The base layer requires the owner's withdrawal, so add, all with zero value:
+
+```aiken
+// approval_proxy — GlobalState MUST be a reference input, and no input may hold its NFT.
+ApprovalProxyRedeemer { global_state_ref_input_index }
+
+// GlobalState logic (datum field 0)
+GlobalStateSpendRedeemer {
+  global_state_output_index: 0,          // unused here
+  action: DelegateApproval { global_state_ref_input_index },
+}
+
+// approval logic (GlobalState's approval_logic_hash)
+ApprovalRedeemer {
+  global_state_location: GlobalStateReferenced { global_state_ref_input_index },
+  actions: [SettlementAction { output_index, decision: Approve }], // one per vault input, input order
+  approver_ref_input_index: None, // Some(ix): a can_approve operator's power-user entry among the reference inputs
+}
+```
+
+* Each `output_index` names that vault input's paired output; they must strictly increase.
+* The paired output carries the vault input's non-ADA assets **exactly** and at least its lovelace,
+  at the programmable base, owned by `recipient` (Approve) or `sender` (Reject, Cancel), with
+  `NoDatum`.
+* Approve and Reject need the **GlobalState admin** (`admin_credential_hash`: its signature, or its
+  withdrawal for a script admin) **or** an operator holding `can_approve`: add its power-user list
+  entry as a reference input, set `approver_ref_input_index: Some(ix)`, and have the operator's
+  **key** sign (a withdrawal never counts). Close needs the admin. Removing or modifying the
+  operator's entry consumes it, so a transaction built on the old entry fails.
+* `can_approve` is the last field of the power-user entry. Adding it changes the entry's layout,
+  which the power-user list, the denylist, the GlobalState logic, the minting authority, seizure and
+  the approval logic all decode strictly. It ships with the approval gate. Adding it to a **live**
+  deployment would need a new power-user list, hence a new GlobalState (its list policy is frozen),
+  a new GlobalState policy, a new proxy and a **new token**: operators re-added to the new list, and
+  every pending transfer of the old deployment settled or cancelled first. Cancel needs
+  `sender`'s signature, or its withdrawal for a script credential — never the admin, and whatever
+  the switch says.
+* The transfer logic also runs in a settlement that moves tokens. Vault inputs are **no party**:
+  `actions_for_each_input` carries nothing for them (the original sender is not re-vetted — the
+  approver, admin or `can_approve` operator, screens before signing). `destination_actions` vet
+  the payees. A settlement may not include any holder token input — not even next to an ADA-only
+  vault input — and it may not share a transaction with any action that spends GlobalState.
+* **Close** — a vault UTxO holding only lovelace, with a datum that is not a `PendingTransfer`: the
+  paired output goes to the approval logic's `close_payout` address with at least the same lovelace.
+* A non-zero reward balance on any of these three credentials makes the zero-value withdrawal fail;
+  withdraw the full balance instead.
+
+**Changing the configuration** — GlobalState spend actions, admin-signed:
+`SetApprovalRequired { enabled }` (must flip), `SetApprovalThreshold { threshold }` (`>= 0`),
+`RotateApprovalLogic { new_approval_logic_hash }` (closed by `LockUpgrades`). Before rotating:
+register the new logic's stake credential, check its hash against a rebuild from source with
+**every** parameter of this deployment (`approval_proxy_hash`, GlobalState policy ID, power-user
+list script hash, issuance policy ID, security asset name, `close_payout` — only the last is
+checked on-chain), and afterwards run the smoke tests (a settlement without the admin is rejected;
+spending a pending transfer with no action is rejected; Approve, Reject and Close with the admin
+and Cancel with the sender are accepted; a holder transfer above the threshold is rejected and one
+within it accepted; with a `can_approve` operator, Approve with its key is accepted and with only a
+withdrawal of its hash is rejected). On a live deployment, rotate the approval logic before the
+transfer logic. Record the retired hash and keep treating it as a free credential (it no longer
+runs, but a successor or a rotation back could free it again): never send tokens to it or grant it
+a role. Wallets and operator tooling must refuse the GlobalState logic, the approval logic
+(current and retired) and, for the CIP-68 metadata token, the vault as destinations: the transfer
+and seizure paths no longer check them, and tokens sent there are lost to the sender. Never grant
+a power-user role (in particular `is_admin` and `can_force_transfer`, which the denylist and
+seizure do not check) to the approval logic's or the proxy's hash. Before rotating the
+**GlobalState logic**, switch approval off and let pending transfers drain: a successor without
+`DelegateApproval` freezes them.
+
 ## Mint, burn and forced transfer
 
 For a later mint, spend the GlobalState UTxO at `global_state_proxy` (any spend redeemer; it is
@@ -331,7 +430,8 @@ destinations supply the denylist gate (a covering node, or a partially frozen ho
 and enabled receiver KYC. Source KYC and denylist status — a partial freeze's floor included — are
 deliberately overridden, and pause does not block seizure. Against a fully frozen or expired
 holder, drain whole UTxOs: the base layer returns a partial UTxO residual to its source, which
-then fails this deployment's destination checks. See
+then fails this deployment's destination checks. A seizure may not leave tokens at the approval
+vault: drain a pending transfer whole, the remainder to its `sender`. See
 [`types/third_party_transfer_logic_script.ak`](../lib/types/third_party_transfer_logic_script.ak).
 
 ## Upgrades and operator checks

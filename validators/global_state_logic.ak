@@ -18,14 +18,16 @@ use cardano/transaction.{
 }
 use constants
 use types/global_state.{
-  AddTrustedEntity, DeactivateContract, GlobalStateDatum,
+  AddTrustedEntity, DeactivateContract, DelegateApproval,
   GlobalStateSpendRedeemer, LockUpgrades, MintSecurity, ModifySecurityInfo,
-  PauseTransfers, RemoveTrustedEntity, RotateAdmin, RotateGlobalStateScript,
-  RotateMintingScript, SetMintableAmount, SetRequiresReceiverKyc,
+  PauseTransfers, RemoveTrustedEntity, RotateAdmin, RotateApprovalLogic,
+  RotateGlobalStateScript, RotateMintingScript, SetApprovalRequired,
+  SetApprovalThreshold, SetMintableAmount, SetRequiresReceiverKyc,
   SetRequiresSenderKyc, UpdateMemberRootHash, UpdateTrustedEntity,
-  decode_global_state, decode_global_state_core, idx_admin_credential_hash,
-  idx_deactivated, idx_minting_script_credential_hash,
+  approval_view_from_output, decode_global_state, decode_global_state_core,
+  idx_admin_credential_hash, idx_deactivated, idx_minting_script_credential_hash,
   idx_power_user_linked_list_policy_id, set_admin_credential_hash,
+  set_approval_logic_hash, set_approval_required, set_approval_threshold,
   set_deactivated, set_global_state_script_credential_hash, set_member_root_hash,
   set_mintable_amount, set_minting_script_credential_hash,
   set_requires_receiver_kyc, set_requires_sender_kyc, set_security_info,
@@ -72,10 +74,26 @@ use utils.{must_be_signed_by_credential, must_run_script_withdrawal}
 //   5. The logic's own hash is never accepted as the admin, the minting
 //      authority or an operator: every GlobalState transaction carries this
 //      withdrawal, and `must_be_signed_by_credential` accepts a withdrawal as
-//      a signature. Admin and minting authority are kept distinct from field 0
-//      when written; an operator credential is refused where the role is USED
-//      (PauseTransfers here, mint/burn in the minting authority, seizure in
-//      the third-party transfer logic, sanctions in the denylist), so a later rotation cannot reopen it.
+//      a signature. Since `DelegateApproval`, this withdrawal is no longer tied
+//      to GlobalState being spent at all: anyone can produce it (and the
+//      approval logic's and the approval proxy's) with an ADA-only vault UTxO
+//      and its Cancel. All three are FREE credentials. The approval logic and
+//      the approval proxy are kept distinct from field 0, the admin and the
+//      minting authority at every write that can see the pair (the admin and
+//      the minting authority are NOT checked against each other), and an
+//      operator equal to one of them is refused where the use site knows it:
+//      PauseTransfers here, mint/burn. The denylist reads only the core, and
+//      seizure (owner decision 2026-10-27) checks field 0 only; neither refuses
+//      the approval logic or the proxy — never grant a role to either. A
+//      RETIRED approval logic does not run (it checks that GlobalState names
+//      it), but treat it as free all the same: a successor without that check,
+//      or a rotation back, frees it again. Never send tokens to, or grant a
+//      role to, any approval-logic hash ever installed. Admin and minting
+//      authority are kept distinct from field 0 when written; an operator
+//      credential is refused where the role is USED (PauseTransfers here,
+//      mint/burn in the minting authority, seizure in the third-party transfer
+//      logic, sanctions in the denylist), so a later rotation cannot reopen
+//      it.
 //   6. `publish` accepts registration only, so nobody can deregister the
 //      stake credential the proxy's withdraw-0 depends on.
 //   7. It acts only when it is the input's field 0, except as the incoming
@@ -92,9 +110,16 @@ use utils.{must_be_signed_by_credential, must_run_script_withdrawal}
 //  11. Field 3's VALUE (`power_user_linked_list_policy_id`) never changes after
 //      genesis — invariant 4 freezes only its position and type. It is the
 //      sole anchor for which list's nodes are power users: the minting
-//      authority, the denylist, the third-party transfer logic and
-//      PauseTransfers here all authenticate operators under it with no
-//      compile-time copy to check against.
+//      authority, the denylist, the third-party transfer logic, the approval
+//      logic (`can_approve`) and PauseTransfers here all authenticate
+//      operators under it with no compile-time copy to check against.
+//  12. `DelegateApproval` succeeds only when GlobalState is spent NOWHERE in
+//      the transaction (no input holds the NFT, none is minted) and this logic
+//      is field 0; it then requires the approval logic's withdraw-0. It is
+//      the only way this withdraw-0 succeeds without a spent GlobalState after
+//      genesis — which is what keeps it from ever authorising a GlobalState
+//      spend. A successor must keep both properties, and keep the branch:
+//      without it no pending transfer can settle (seizure is the only exit).
 validator global_state_logic(
   security_asset_name: ByteArray,
   issuance_policy_id: ByteArray,
@@ -114,6 +139,15 @@ validator global_state_logic(
   /// this keeps room in the 16 KiB transaction for everything else. 8192 is
   /// the recommended value.
   max_global_state_datum_bytes: Int,
+  /// The permanent approval proxy's script hash
+  /// (validators/approval_proxy.ak), the owner of every pending transfer. Not
+  /// circular: the proxy depends only on the GlobalState policy, and the
+  /// GlobalState mint's parameters do not include this logic. Used to keep the
+  /// approval logic, the minting authority and the admin from ever naming it —
+  /// its withdrawal is a free credential, and an approval logic equal to it
+  /// would make the proxy and `DelegateApproval` satisfy each other with no
+  /// approval rule ever running.
+  approval_proxy_hash: ByteArray,
 ) {
   withdraw(
     redeemer: GlobalStateSpendRedeemer,
@@ -122,23 +156,41 @@ validator global_state_logic(
   ) {
     expect Script(own_hash) = credential
 
-    // GENESIS (one-shot): the GlobalState NFT is minted in this very
-    // transaction, so no GlobalState input exists yet. The genesis mint
-    // requires the logic its datum names to run, and this branch is that run:
-    // a field 0 that cannot run — a typo, an unregistered credential, a build
-    // for another GlobalState policy or with a cap below the genesis datum —
-    // now fails genesis instead of bricking every later action. A build with
-    // any other wrong parameter still passes: only re-deriving the hash
-    // off-chain catches that.
-    // Reachable exactly once — the NFT is one-shot and can never be minted or
-    // burned again — so outside genesis this logic's withdrawal still proves
-    // nothing without a spent GlobalState. The redeemer's action is ignored;
-    // its `global_state_output_index` names the GlobalState output.
-    if quantity_of(
+    // DELEGATION (approval proxy -> approval logic): no GlobalState is spent,
+    // so it is dispatched before the two branches that govern one. See
+    // invariant 12 and `delegate_approval`.
+    let is_delegation = when redeemer.action is {
+      DelegateApproval { .. } -> True
+      _ -> False
+    }
+
+    if is_delegation {
+      expect DelegateApproval { global_state_ref_input_index } = redeemer.action
+      delegate_approval(
+        global_state_ref_input_index,
+        own_hash,
+        global_state_policy_id,
+        approval_proxy_hash,
+        self,
+      )
+    } else if quantity_of(
       self.mint,
       global_state_policy_id,
       constants.global_state_asset_name,
     ) == 1 {
+      // GENESIS (one-shot): the GlobalState NFT is minted in this very
+      // transaction, so no GlobalState input exists yet. The genesis mint
+      // requires the logic its datum names to run, and this branch is that
+      // run: a field 0 that cannot run — a typo, an unregistered credential, a
+      // build for another GlobalState policy or with a cap below the genesis
+      // datum — now fails genesis instead of bricking every later action. A
+      // build with any other wrong parameter still passes: only re-deriving the
+      // hash off-chain catches that. Reachable exactly once — the NFT is
+      // one-shot and can never be minted or burned again — so outside genesis
+      // this logic's withdrawal still proves nothing without a spent
+      // GlobalState (`DelegateApproval`, which runs without one, authorises no
+      // GlobalState write). The redeemer's action is ignored; its
+      // `global_state_output_index` names the GlobalState output.
       let genesis_output = utils.safe_list_at(
         self.outputs,
         redeemer.global_state_output_index,
@@ -156,6 +208,17 @@ validator global_state_logic(
         // ...and its own cap accepts the genesis datum, so the mint's and the
         // logic's `max_global_state_datum_bytes` agree at birth.
         bytearray.length(builtin.serialise_data(genesis_datum)) <= max_global_state_datum_bytes,
+        // The pairs the GlobalState mint cannot see: it precedes the approval
+        // proxy, whose hash only this logic knows. A free credential may never
+        // be the admin, the minting authority or the approval logic.
+        {
+          let genesis = decode_global_state(genesis_datum)
+          and {
+            genesis.approval_logic_hash != approval_proxy_hash,
+            genesis.minting_script_credential_hash != approval_proxy_hash,
+            genesis.admin_credential_hash != approval_proxy_hash,
+          }
+        },
       }
     } else {
       // The GlobalState input is the one holding the NFT. Exactly one exists, so
@@ -341,6 +404,9 @@ validator global_state_logic(
                 // alone would then satisfy the minting proxy) or as the admin.
                 new_global_state_script_hash != input_datum.minting_script_credential_hash,
                 new_global_state_script_hash != input_datum.admin_credential_hash,
+                // Nor as the approval logic or the approval proxy (invariant 5).
+                new_global_state_script_hash != input_datum.approval_logic_hash,
+                new_global_state_script_hash != approval_proxy_hash,
                 output_datum.global_state_script_credential_hash == new_global_state_script_hash,
                 // The rest of the core is not the rotation's to change.
                 // `deactivated` and the admin keep their own rules, the power-users
@@ -441,6 +507,9 @@ validator global_state_logic(
                   // Never this logic's own hash: its withdrawal is in this very
                   // transaction and would sign for the operator.
                   power_user_credential_hash != own_hash,
+                  // Nor a credential anyone can produce (invariant 5).
+                  power_user_credential_hash != input_datum.approval_logic_hash,
+                  power_user_credential_hash != approval_proxy_hash,
                   //Must be signed by the power user
                   must_be_signed_by_credential(self, power_user_credential_hash),
                   builtin.equals_data(
@@ -634,6 +703,9 @@ validator global_state_logic(
                   // Never this logic's own hash: its withdrawal is in every
                   // GlobalState transaction and would sign for the admin.
                   new_admin_credential_hash != own_hash,
+                  // Nor any other free credential (invariant 5).
+                  new_admin_credential_hash != input_datum.approval_logic_hash,
+                  new_admin_credential_hash != approval_proxy_hash,
                   //Dual-sig: both old (from input datum) and new admins must sign.
                   //Prevents silent takeover; prevents lost-key soft-brick by
                   //forcing continuity.
@@ -658,6 +730,10 @@ validator global_state_logic(
                   // Never this logic's own hash: MintSecurity alone would then
                   // satisfy the minting proxy, skipping every authority rule.
                   new_minting_script_credential_hash != own_hash,
+                  // Nor a free credential: the approval logic's or the approval
+                  // proxy's withdrawal would then satisfy the minting proxy.
+                  new_minting_script_credential_hash != input_datum.approval_logic_hash,
+                  new_minting_script_credential_hash != approval_proxy_hash,
                   // The one-way upgrade lock closes this path permanently. See
                   // `upgrades_locked` on GlobalStateDatum.
                   !input_datum.upgrades_locked,
@@ -737,8 +813,73 @@ validator global_state_logic(
                   ),
                 }
               }
+              SetApprovalRequired { enabled } -> {
+                let expected_output_datum = set_approval_required(
+                  input_fields,
+                  enabled,
+                )
+                and {
+                  // Must flip (F11 pattern): no silent no-op write.
+                  enabled != input_datum.approval_required,
+                  // Open after `upgrades_locked`: switching approval off is
+                  // the way out if the installed approval logic cannot run.
+                  must_be_signed_by_credential(
+                    self,
+                    input_datum.admin_credential_hash,
+                  ),
+                  builtin.equals_data(
+                    expected_output_datum,
+                    global_state_output_datum,
+                  ),
+                }
+              }
+              SetApprovalThreshold { threshold } -> {
+                let expected_output_datum = set_approval_threshold(
+                  input_fields,
+                  threshold,
+                )
+                and {
+                  threshold >= 0,
+                  must_be_signed_by_credential(
+                    self,
+                    input_datum.admin_credential_hash,
+                  ),
+                  builtin.equals_data(
+                    expected_output_datum,
+                    global_state_output_datum,
+                  ),
+                }
+              }
+              RotateApprovalLogic { new_approval_logic_hash } -> {
+                let expected_output_datum = set_approval_logic_hash(
+                  input_fields,
+                  new_approval_logic_hash,
+                )
+                and {
+                  bytearray.length(new_approval_logic_hash) == 28,
+                  // Closed by the one-way upgrade lock: once locked, the gate's
+                  // rules are as final as every other rule.
+                  !input_datum.upgrades_locked,
+                  // Never a free credential or a role (invariant 5); above all
+                  // never the proxy, which would loop back to this logic.
+                  new_approval_logic_hash != own_hash,
+                  new_approval_logic_hash != approval_proxy_hash,
+                  new_approval_logic_hash != input_datum.admin_credential_hash,
+                  new_approval_logic_hash != input_datum.minting_script_credential_hash,
+                  must_be_signed_by_credential(
+                    self,
+                    input_datum.admin_credential_hash,
+                  ),
+                  builtin.equals_data(
+                    expected_output_datum,
+                    global_state_output_datum,
+                  ),
+                }
+              }
               // Handled above, before the installed-logic check.
               RotateGlobalStateScript { .. } -> fail
+              // Dispatched before any of this; never governs a spent GlobalState.
+              DelegateApproval { .. } -> fail
             }
           }
         },
@@ -761,5 +902,55 @@ validator global_state_logic(
 
   else(_) {
     fail
+  }
+}
+
+/// `DelegateApproval`: the hop from the permanent approval proxy to the
+/// current approval logic. See invariant 12.
+fn delegate_approval(
+  global_state_ref_input_index: Int,
+  own_hash: ByteArray,
+  global_state_policy_id: ByteArray,
+  approval_proxy_hash: ByteArray,
+  self: Transaction,
+) -> Bool {
+  // GlobalState is spent nowhere and not minted. This is what keeps the branch
+  // from ever standing in for a GlobalState spend: the proxy requires this
+  // withdraw-0, and under this redeemer nothing about a spent GlobalState
+  // would be checked.
+  let not_spent = !list.any(
+    self.inputs,
+    fn(input) {
+      quantity_of(
+        input.output.value,
+        global_state_policy_id,
+        constants.global_state_asset_name,
+      ) > 0
+    },
+  )
+  let not_minted = quantity_of(
+    self.mint,
+    global_state_policy_id,
+    constants.global_state_asset_name,
+  ) == 0
+  // Authenticated by the NFT; only the core and the gate fields are decoded.
+  let gs = approval_view_from_output(
+    utils.safe_list_at(self.reference_inputs, global_state_ref_input_index).output,
+    global_state_policy_id,
+  )
+  and {
+    not_spent?,
+    not_minted?,
+    // A decommissioned protocol settles nothing.
+    !gs.core.deactivated,
+    // Only the installed logic delegates; a rotated-out one never does.
+    (gs.core.global_state_script_credential_hash == own_hash)?,
+    // The pointer must name something else than the free credentials around
+    // it — above all the proxy, or proxy and delegate satisfy each other.
+    gs.approval_logic_hash != own_hash,
+    gs.approval_logic_hash != approval_proxy_hash,
+    gs.approval_logic_hash != gs.core.admin_credential_hash,
+    gs.approval_logic_hash != gs.core.minting_script_credential_hash,
+    must_run_script_withdrawal(self, gs.approval_logic_hash)?,
   }
 }

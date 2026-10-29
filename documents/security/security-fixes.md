@@ -42,10 +42,11 @@ the wrong asset name, a list root that did not link to the node being removed, a
 | [15](#15-genesis-never-ran-the-field-0-logic-and-rotation-accepted-any-script-that-runs) | Genesis never ran the field-0 logic, and rotation accepted any script that runs | — | Fixed |
 | [16](#16-the-power-users-list-policy-id-was-held-twice-on-the-mint-path) | The power-users list policy id was held twice on the mint path | — | Fixed |
 | [17](#17-partial-freeze-a-denylist-entry-can-freeze-an-amount-not-only-the-whole-holding) | Partial freeze: a denylist entry can freeze an amount | Feature | Added 2026-10-23 |
+| [18](#18-two-step-transfer-approval-hazards-closed-before-release) | Two-step transfer approval: hazards closed before release | — | Designed out |
 
 Findings 12 and 13 come from the 2026-08-28 re-audit; 1–11 from the original review; 14 from the
 2026-10-15 audit (F08) and 15–16 from the review of PR #29, which assigned them no severity; 17 is a
-feature. Then:
+feature, and 18 the design record of the two-step transfer approval. Then:
 [acknowledged and not changed](#acknowledged-and-deliberately-not-changed),
 [the linked-list dependency](#the-linked-list-dependency),
 [what the base layer guarantees](#what-the-cip-113-base-layer-actually-guarantees),
@@ -1097,6 +1098,46 @@ does not matter", but three behaviours of `ERC20EnforcementModuleInternal` are n
 `validators/minting_authority.ak`, and the `denylist_insert_*_freeze` / `denylist_update_*` tests in
 `validators/denylist.ak`. Every new guard was mutation-checked: replacing it with `True` (or the
 memo's per-party check with a cached verdict) makes at least one of these tests fail.
+
+## 18. Two-step transfer approval: hazards closed before release
+
+Not a defect in shipped code. The [two-step transfer approval](../../README.md#two-step-transfer-approval)
+went through repeated spec reviews and an invariant review before it was written; each hazard below
+was found there, is closed in the code, and is pinned by a test that was checked to go red when its
+guard is replaced by a no-op (mutation-tested; no guard survived).
+
+| Hazard | How it was closed | Pinned by |
+|---|---|---|
+| In a `MintSecurity` transaction the GlobalState logic's withdrawal is present, so a proxy that only required it would settle pending transfers without any approver | The proxy requires GlobalState as a reference input and refuses any transaction whose inputs hold the GlobalState NFT; `DelegateApproval` refuses a spent or minted GlobalState too | `proxy_rejects_a_spent_global_state`, `delegate_refuses_a_spent_global_state` |
+| An approval-logic pointer equal to the proxy makes proxy and delegate satisfy each other — no approval rule ever runs | `DelegateApproval`, `RotateApprovalLogic` and genesis refuse it. A pointer to the transfer logic itself is a deployment rule (README), not checked | `delegate_refuses_a_pointer_to_a_free_credential_or_role` |
+| The withdrawals of the approval logic, the proxy and the GlobalState logic are free (anyone can produce them) | The approval logic and the proxy stay distinct from fields 0, 2 and 4 at every writer that sees the pair; operators equal to them are refused by `PauseTransfers`, mint/burn and seizure (seizure checks the GlobalState logic only; the denylist cannot check — a deployment rule); mint refuses them as owners. **Accepted risk, owner decision 2026-10-27:** holder transfers and seizure do not check owners — sending tokens there loses only the sender's own tokens. A retired approval logic does not run (`retired_logic_never_runs`), but is still treated as free: a successor without that check, or a rotation back, would free it again | `rotate_minting_script_refuses_a_free_credential`, `pause_refuses_an_operator_that_is_a_free_credential`, `mint_to_a_free_credential_is_rejected`, `seizure_rejects_an_operator_that_is_the_global_state_logic` |
+| A settlement that also spends the holder's own tokens skips the request rules | The approval logic rejects a holder token input next to any vault input (ADA-only included), whatever the switch | `mixing_rejected_with_the_switch_on`, `mixing_rejected_with_the_switch_off`, `mixing_rejected_with_an_ada_only_vault_input` |
+| A request redeemer shaped like a settlement could skip the binding | The approval logic binds every new pending transfer and settles every vault input on every run, whatever the redeemer | `lock_binds_whatever_the_redeemer_says` |
+| A datum that misstates its sender or amount | Binding: sender = the only holder, amount = held, nothing else beside it; settlement moves the exact tokens | `lock_rejects_a_datum_naming_another_sender`, `lock_rejects_an_understated_amount` |
+| Double satisfaction, skipped vault inputs | One action per vault input, positional; strictly increasing output indices | `settle_rejects_one_output_for_two_inputs`, `settle_rejects_decreasing_output_indices`, `settle_rejects_a_missing_action` |
+| An approval logic built with another programmable-base hash recognised the vault by its full address, saw no vault input, settled nothing and — with the switch off — let anyone take every pending transfer | The approval logic recognises the vault by its owner alone (stake credential `Script(approval_proxy)`), as the transfer logic does; the base layer keeps every token at the programmable base, so the PLB hash is no longer a parameter. The remaining parameters (proxy, policy, asset name) are a deployment checklist and two smoke tests (README) | `vault_is_recognised_by_its_owner_alone` |
+| Exact lovelace pairing freezes every pending transfer if min-ADA rises | Tokens exact, lovelace `>=` | `settle_accepts_a_lovelace_top_up_and_refuses_a_shortfall` |
+| A holder sanctioned after the request still completes it | **Accepted risk, owner decision 2026-10-27 (D6):** the vault is no party, so the original sender is not re-vetted on-chain at settlement; the signature of the GlobalState admin or a `can_approve` operator on Approve is the sanctions screen. Reject and Cancel to a sanctioned sender still fail (the sender is vetted as the payee) | `settlement_does_not_vet_the_original_sender`, `approval_settlement_revets_the_recipient` |
+| Threshold bypass by a dust input, or by two recipients under a `max` | Net gain per credential, summed (in the approval logic) | `threshold_counts_a_recipient_that_adds_a_dust_input`, `threshold_sums_every_recipient` |
+| A gated transfer that skips the approval logic, so the threshold never runs | With the switch on the transfer logic requires the approval logic GlobalState names in every transaction, the CIP-68 metadata update included | `approval_on_requires_the_approval_logic_in_every_transfer`, `approval_on_metadata_update_needs_the_approval_logic`, `metadata_update_runs_the_logic` |
+| The admin is a free credential (the approval logic, the proxy or the GlobalState logic), so anyone approves | The approval logic refuses such an admin before reading its consent (Cancel never reads it) | `admin_never_a_free_credential`, `cancel_needs_no_admin_and_works_switched_off` |
+| A `can_approve` operator's consent produced by a script anyone can run (the transfer logic, the CIP-113 global logic, the approval logic, the proxy and the GlobalState logic all run in a settlement) | The operator path accepts only the operator's KEY signature (`extra_signatories`), never a withdrawal; `can_approve` is deliberately not gated by `must_be_signed_by_credential` | `operator_withdrawal_is_not_a_signature`, `operator_must_sign_with_its_own_key` |
+| A removed or forged operator entry still approving | The entry is authenticated by the shared `authenticated_power_user`: the list NFT of GlobalState field 3's policy, and still at the list's script address; removal consumes it | `revoked_operator_entry_off_the_list_address_is_refused`, `operator_entry_without_the_list_nft_is_refused`, `operator_without_can_approve_is_refused` |
+| An operator sweeping stray vault UTxOs, or a bad operator index blocking Cancel or an admin approval | Close stays admin-only; the operator entry is read once per run and only when an Approve or Reject needs it and the admin did not sign | `operator_cannot_close`, `cancel_ignores_the_operator_index`, `admin_approval_ignores_the_operator_index` |
+| A retired approval logic's free withdrawal used to settle | The approval logic runs only while GlobalState names it | `retired_logic_never_runs` |
+| Unbound pending transfers created while approval is off | With the switch off, no security token can be sent to the vault; the switch is read from the pre-transaction GlobalState | `approval_request_is_refused_with_the_switch_off`, `approval_switch_read_from_the_spent_pre_state` (positive control `approval_request_with_global_state_spent_and_on_is_accepted`) |
+| Partial seizure leaves a residual whose datum misstates what it holds | Seizure refuses token-holding vault outputs; pending transfers are seized whole | `partial_seizure_of_a_pending_transfer_is_rejected`, `full_seizure_of_a_pending_transfer_succeeds` |
+| The CIP-68 metadata token stranded at the vault, or taken from a free credential | Registration refuses the vault. **Accepted risk, owner decision 2026-10-27:** a metadata update may send the token to the vault or a free credential; only its owner (the issuer) can, and only its own token is lost | `register_mint_rejects_a_reference_nft_owned_by_the_vault` |
+| A recipient that is a free credential freezing the request | The recipient is checked only where it is paid (Approve); Reject and Cancel still return the tokens | `settle_a_bad_recipient_does_not_block_reject_or_cancel` |
+
+Lessons kept from writing it: Aiken drops a discarded `let _ = f(...)` together with every `expect`
+inside `f` — consume validating calls' results; and a `fail` test passes on any trap, so each
+negative test here was mutation-checked to fail for its own guard.
+
+**Accepted limit.** The threshold applies per transaction; splitting a transfer below it is not
+prevented, because that needs per-holder state over time.
+
+---
 
 ## Acknowledged, and deliberately not changed
 
