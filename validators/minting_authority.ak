@@ -12,9 +12,10 @@ use cardano/transaction.{
 }
 use cip68
 use constants
-use denylist/absence.{verify_denylist_absence}
+use denylist/absence.{verify_denylist_permits}
 use kyc/verify.{verify_kyc_proof}
 use types/cip68.{Cip68Datum} as types_cip68
+use types/denylist.{Denylist}
 use types/global_state.{
   GlobalStateDatum, GlobalStateReferenced, GlobalStateSpent, decode_global_state,
   gs_datum_from_location,
@@ -127,8 +128,8 @@ validator minting_authority_validator(
   /// Not circular: `gs_policy → proxy hash → issuance_policy_id → this
   /// validator`, and this validator is compiled last (it is the swappable one).
   expected_issuance_policy_id: ByteArray,
-  /// The DENYLIST SPEND VALIDATOR's script hash, threaded into
-  /// `verify_denylist_absence`. See its doc comment.
+  /// The DENYLIST SPEND VALIDATOR's script hash, which every denylist element
+  /// a party cites must sit at. See `absence.with_denylist_element`.
   denylist_script_hash: ByteArray,
   /// The POWER-USERS SPEND VALIDATOR's script hash — not the list
   /// policy id (they are separate validators with separate hashes).
@@ -810,7 +811,8 @@ fn verify_mint_or_burn(
   // gate): CMTAT v3.2.0 refuses to mint to a frozen address (core) and to
   // a non-allowlisted receiver (Allowlist variant). When minting, every
   // unique destination stake credential among outputs carrying the
-  // security token needs a denylist-absence covering proof, plus — when
+  // security token needs a denylist proof (a covering node, or the holder's
+  // own node when only partially frozen), plus — when
   // GS.requires_receiver_kyc — a KYC check that passes if EITHER a valid
   // KYC proof is presented OR the receiver is the power user authorising
   // this mint (`power_user_node_key`, already resolved above; it holds
@@ -823,7 +825,7 @@ fn verify_mint_or_burn(
   // model the destination's stake credential IS the owner identity, and this
   // is a signed, list-authenticated operator minting to itself; requiring the
   // operator to also hold an off-chain KYC attestation adds no compliance
-  // value. The denylist-absence check still applies to the operator, so a
+  // value. The denylist gate still applies to the operator, so a
   // sanctioned operator cannot mint to itself. (If you prefer exact CMTAT
   // Allowlist behaviour, drop this branch and issue the treasury a KYC
   // attestation at setup.)
@@ -879,7 +881,7 @@ fn verify_mint_or_burn(
     } else {
       power_user_data.can_burn
     }?,
-    //Mint destinations must be vetted (denylist absence + optional KYC)
+    //Mint destinations must be vetted (denylist gate + optional KYC)
     destinations_ok?,
     // Nor an operator anyone can impersonate: the approval logic's and the
     // approval proxy's withdrawals are free credentials.
@@ -997,12 +999,16 @@ fn verify_mint_destinations(
             } else {
               True
             },
-            verify_denylist_absence(
+            // Not listed, or only PARTIALLY frozen: a partial freeze limits
+            // sending, never receiving, so newly issued tokens may land with
+            // such a holder. A fully frozen (`None`) holder is still refused.
+            verify_denylist_permits(
               dest_pkh,
-              action.destination_denylist_covering_ref_input_index,
+              action.destination_denylist_ref_input_index,
               self.reference_inputs,
               gs_datum.denylist_linked_list_policy_id,
               denylist_script_hash,
+              fn(_, _) { True },
             ),
             verify_mint_destinations(
               rest_outputs,
@@ -1445,7 +1451,11 @@ fn make_denylist_root_ref_input() -> Input {
 // Denylist NODE keyed exactly at `pkh` — the target IS denylisted, so this
 // node cannot witness its absence.
 fn make_denylist_node_ref_input(pkh: ByteArray) -> Input {
-  let node_info: Data = builtin.constr_data(0, [])
+  // A well-formed FULL freeze of `pkh`.
+  let node_info: Data = Denylist {
+    frozen_amount: None,
+    metadata: builtin.constr_data(0, []),
+  }
   let element: Element<Data, Data> = Element {
     data: Node { data: node_info },
     link: None,
@@ -1571,7 +1581,7 @@ fn dummy_proof() {
 fn clean_dest_action() -> MintingLogicDestinationAction {
   MintingLogicDestinationAction {
     destination_proof: dummy_proof(),
-    destination_denylist_covering_ref_input_index: 2,
+    destination_denylist_ref_input_index: 2,
   }
 }
 
@@ -1888,7 +1898,7 @@ test mint_succeeds_without_any_registry_reference_input() {
     destination_actions: [
       MintingLogicDestinationAction {
         destination_proof: dummy_proof(),
-        destination_denylist_covering_ref_input_index: 1,
+        destination_denylist_ref_input_index: 1,
       },
     ],
   }
@@ -1962,7 +1972,7 @@ fn register_mint_redeemer(amount: Int) -> MintingAuthorityWithdrawRedeemer {
     destination_actions: [
       MintingLogicDestinationAction {
         destination_proof: dummy_proof(),
-        destination_denylist_covering_ref_input_index: 1,
+        destination_denylist_ref_input_index: 1,
       },
     ],
   }
@@ -3374,4 +3384,53 @@ test mint_refuses_an_operator_that_is_the_approval_logic() {
       ),
     },
   )
+}
+
+// ── Partial freeze (denylist `frozen_amount`) ─────────────────────────────────
+//
+// A partial freeze limits sending, never receiving: newly issued tokens may
+// land with a partially frozen holder, citing its own node. A fully frozen
+// holder is still refused.
+
+fn make_frozen_dest_node_ref_input(frozen_amount: Option<Int>) -> Input {
+  let element: Element<Data, Denylist> = Element {
+    data: Node {
+      data: Denylist { frozen_amount, metadata: builtin.constr_data(0, []) },
+    },
+    link: None,
+  }
+  let node = make_denylist_node_ref_input(test_dest_stake_hash)
+  Input {
+    ..node,
+    output: Output { ..node.output, datum: InlineDatum(element) },
+  }
+}
+
+fn mint_to_frozen_dest(frozen_amount: Option<Int>) -> Bool {
+  let amount = 1_000
+  run_withdraw(
+    MintBurn {
+      global_state_input_index: 0,
+      power_user_node_ref_input_index: 0,
+      minted_amount: amount,
+      destination_actions: [clean_dest_action()],
+    },
+    make_withdraw_tx(
+      amount,
+      True,
+      False,
+      False,
+      make_frozen_dest_node_ref_input(frozen_amount),
+      [make_dest_output(amount)],
+      [test_pu_credential_hash],
+    ),
+  )
+}
+
+test mint_to_a_partially_frozen_destination_succeeds() {
+  mint_to_frozen_dest(Some(1))
+}
+
+test mint_to_a_fully_frozen_destination_fails() {
+  !mint_to_frozen_dest(None)
 }

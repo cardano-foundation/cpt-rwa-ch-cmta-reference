@@ -133,10 +133,23 @@ node proof are version-specific; construct them using the deployed CIP-113 imple
 
 The CIP-113 base layer spends the programmable-base token UTxOs and invokes the registered
 `transfer_logic_validator` as a zero-value withdrawal. Include GlobalState as a reference input
-for an ordinary transfer, plus a genuine denylist covering-node reference input for every unique
-sender and receiver. A covering node's key must be below the holder's hash and its `next` link
+for an ordinary transfer, plus a genuine denylist reference input for every unique sender and
+receiver: a covering node, or a partially frozen holder's own node (below). A covering node's key must be below the holder's hash and its `next` link
 above it; the root covers the initial empty list. The node must still sit at the denylist spend
 validator address. One node can cover several holders.
+
+A **partially frozen** holder (denylist entry with `frozen_amount: Some(f)`) has no covering node:
+its action cites **its own node** in the same index field. As a destination that is enough. As a
+sender, the transaction must also pay to outputs whose inline stake credential hash equals the node
+key (either credential form counts) either at least `f` of the security token, or at least as much
+of it as the transaction spends from that hash. To send tokens out, select enough of the holder's
+own token UTxOs as inputs to pay `f` back. If the holder's balance is below `f` — the validators
+never check `f` against it, so an admin can set it higher — no send can lower its balance, but the
+holder can still consolidate (pay back everything it spends); surface that to the holder instead of
+building a send that will fail. A balance spread over too many small UTxOs to reach `f` in one
+transaction can be consolidated the same way first. The pay-back output makes the holder one of the transaction's destinations, so when
+`requires_receiver_kyc` is set its destination action needs a valid KYC proof, even if
+`requires_sender_kyc` is off: a partially frozen holder with lapsed KYC must renew it first. A fully frozen holder (`None`) cannot appear on either side.
 
 For one sender and one destination, the repository's withdrawal redeemer has this shape:
 
@@ -145,11 +158,11 @@ TransferLogicScriptWithdrawRedeemer {
   global_state_location: GlobalStateReferenced { global_state_ref_input_index },
   actions_for_each_input: [TransferLogicScriptAction {
     source_proof,
-    source_denylist_covering_ref_input_index,
+    source_denylist_ref_input_index,
   }],
   destination_actions: [TransferLogicScriptDestinationAction {
     destination_proof,
-    destination_denylist_covering_ref_input_index,
+    destination_denylist_ref_input_index,
   }],
 }
 ```
@@ -163,7 +176,8 @@ transaction; the example does not apply once another reference input is inserted
 For multiple parties, build one source action per unique **full stake credential** among token
 inputs, and one destination action per unique full stake credential among token outputs. Preserve
 the first-occurrence order in the transaction input and output lists; the validator matches
-actions positionally. Both sides always need denylist absence. The corresponding KYC proof is
+actions positionally. Both sides always need the denylist gate (absence, or a partially frozen
+holder's own node). The corresponding KYC proof is
 checked only when `requires_sender_kyc` or `requires_receiver_kyc` is true. The transaction fails
 while paused or deactivated. See the actual schemas in
 [`types/transfer_logic_script.ak`](../lib/types/transfer_logic_script.ak).
@@ -388,15 +402,16 @@ MintBurn {
   minted_amount,
   destination_actions: [MintingLogicDestinationAction {
     destination_proof,
-    destination_denylist_covering_ref_input_index,
+    destination_denylist_ref_input_index,
   }],
 }
 ```
 
 `minted_amount` must equal the actual signed quantity under `security_asset_name`. Supply
-increases require one action per unique token destination, with denylist absence and receiver KYC
-when enabled. The authenticated, signing `can_mint` operator may mint to their own stake credential
-without a separate KYC proof; their destination still needs denylist absence. Only the security
+increases require one action per unique token destination, with the denylist gate (a covering
+node, or a partially frozen holder's own node) and receiver KYC when enabled. The authenticated,
+signing `can_mint` operator may mint to their own stake credential without a separate KYC proof;
+their destination still needs the denylist gate. Only the security
 asset name can be minted in a steady-state `MintBurn` transaction;
 the CIP-68 reference NFT is a registration-time artefact.
 
@@ -411,8 +426,9 @@ third-party withdrawal redeemer, since GlobalState is spent in this transaction.
 A forced transfer invokes `third_party_transfer_logic_validator` with
 `ThirdPartyTransferLogicScriptWithdrawRedeemer { global_state_location,
 power_user_node_ref_input_index, destination_actions }`. The `can_force_transfer` operator signs;
-destinations supply denylist absence and enabled receiver KYC. Source KYC and denylist status are
-deliberately overridden, and pause does not block seizure. Against a sanctioned or expired
+destinations supply the denylist gate (a covering node, or a partially frozen holder's own node)
+and enabled receiver KYC. Source KYC and denylist status — a partial freeze's floor included — are
+deliberately overridden, and pause does not block seizure. Against a fully frozen or expired
 holder, drain whole UTxOs: the base layer returns a partial UTxO residual to its source, which
 then fails this deployment's destination checks. A seizure may not leave tokens at the approval
 vault: drain a pending transfer whole, the remainder to its `sender`. See

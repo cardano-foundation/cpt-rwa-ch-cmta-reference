@@ -38,9 +38,15 @@ the wrong asset name, a list root that did not link to the node being removed, a
 | [11](#11-the-power-user-authority-footgun-was-undocumented) | The power-user authority footgun was undocumented | Info | Fixed |
 | [12](#12-dismantling-either-linked-list-was-a-one-way-freeze-of-a-live-protocol) | Dismantling either linked list was a one-way freeze of a live protocol | Medium | Fixed |
 | [13](#13-cip-68-metadata-tokens-were-governed-by-an-exact-name-not-by-their-kind) | CIP-68 metadata tokens were governed by an exact name, not by their kind | Medium | Fixed |
-| [14](#14-two-step-transfer-approval-hazards-closed-before-release) | Two-step transfer approval: hazards closed before release | — | Designed out |
+| [14](#14-registry-fields-3-and-4-accepted-any-script-f08) | Registry fields 3 and 4 accepted any script (F08) | Medium | Fixed |
+| [15](#15-genesis-never-ran-the-field-0-logic-and-rotation-accepted-any-script-that-runs) | Genesis never ran the field-0 logic, and rotation accepted any script that runs | — | Fixed |
+| [16](#16-the-power-users-list-policy-id-was-held-twice-on-the-mint-path) | The power-users list policy id was held twice on the mint path | — | Fixed |
+| [17](#17-partial-freeze-a-denylist-entry-can-freeze-an-amount-not-only-the-whole-holding) | Partial freeze: a denylist entry can freeze an amount | Feature | Added 2026-10-23 |
+| [18](#18-two-step-transfer-approval-hazards-closed-before-release) | Two-step transfer approval: hazards closed before release | — | Designed out |
 
-Findings 12 and 13 come from the 2026-08-28 re-audit; 1–11 from the original review. Then:
+Findings 12 and 13 come from the 2026-08-28 re-audit; 1–11 from the original review; 14 from the
+2026-10-15 audit (F08) and 15–16 from the review of PR #29, which assigned them no severity; 17 is a
+feature, and 18 the design record of the two-step transfer approval. Then:
 [acknowledged and not changed](#acknowledged-and-deliberately-not-changed),
 [the linked-list dependency](#the-linked-list-dependency),
 [what the base layer guarantees](#what-the-cip-113-base-layer-actually-guarantees),
@@ -335,9 +341,10 @@ exactly one extra input, so they isolate the count),
 `validators/global_state_logic_tests.ak` — `pause_fails_when_the_power_user_node_is_in_a_wallet` and
 `pause_fails_when_the_power_user_node_is_at_the_wrong_script`, each with a positive control.
 
-The two `*_spend_handler_is_pure_delegation` tests are deliberate records that the `spend` handlers
-were **not** changed — the constraint lives in the mint validators, which must run for any list
-mutation.
+The two `*_spend_handler_is_pure_delegation` tests are deliberate records that the `spend` handlers'
+`StateTransition` path was **not** changed — the constraint lives in the mint validators, which must
+run for any insert or remove. The denylist's later in-place `UpdateDenylistEntry` (§17) runs no mint;
+it binds each spend to its own continuation, which must keep the address, the NFT and the link.
 
 ---
 
@@ -990,7 +997,109 @@ control, re-purposed: field 3 names a policy the node is not under, so `authenti
 traps. Mutation-checked: authenticating under a fixed policy instead of field 3 makes the negative
 test fail.
 
-## 14. Two-step transfer approval: hazards closed before release
+## 17. Partial freeze: a denylist entry can freeze an amount, not only the whole holding
+
+A feature, not a defect, recorded here because it changes what a denylist entry means and adds a
+mutation path to a permanent validator. Requested to match CMTAT `freezePartialTokens`: "this
+address has that many tokens frozen; which ones does not matter".
+
+**Changed (2026-10-23):**
+
+* The node datum is `Denylist { frozen_amount: Option<Int>, metadata }`. `None` is a full freeze,
+  exactly what every entry meant before. `Some(f)` with `f > 0` is a partial freeze. `Some(f)` with
+  `f <= 0` is refused at every write (`AddToDenylist`, `UpdateDenylistEntry`).
+* A party's denylist index may now name **its own node** as well as a covering node
+  (`absence.party_permitted`). Own node with `None`: rejected on every side. Own node with
+  `Some(f)`: every destination gate accepts (transfer, mint, seizure); the transfer path's sender
+  gate accepts only if the outputs whose inline stake credential hash is the node key carry at
+  least `f` of the security token. The on-chain redeemer encoding does not change, and an unlisted
+  party's proof is byte-identical to before; the index fields are renamed in the blueprint, though
+  (see [what this changes for off-chain](#the-2026-10-23-partial-freeze-one-datum-change-one-redeemer-variant-two-new-parameters)).
+* `denylist_validator` (spend) gains `UpdateDenylistEntry`, which rewrites one node's data in place
+  through the library's `spend_for_updating_elements_data`, gated like Add/Remove (an `is_admin`
+  power user, signed, protocol not deactivated), nodes only, strict decode, metadata ≤ 512 B, and
+  the node's ADA may not decrease. Remove-then-add cannot do this: the burn and re-mint of the same
+  node NFT cancel out, so it would take two transactions with the holder unlisted in between. The
+  validator gains two parameters, `global_state_policy_id` and `power_user_list_script_hash`
+  (README row 5), so its hash moves, and with it every hash that pins it (rows 8–10).
+
+**Invariants** (complexity-specialist review, 2026-10-23):
+
+1. *Freeze floor.* In a `TransferAct` transaction that spends hash `h`'s security tokens, the
+   outputs to stake hash `h` carry at least `f`, or at least what the transaction spends from `h`
+   (amended 2026-10-29, PR #30 review). So `post ≥ min(pre, f)`: a holder at or above `f` keeps
+   `f`, and one below `f` cannot lower its balance. The guarantee is net per transaction — tokens
+   paid to `h` in the same transaction count — where CMTAT checks each gross transfer. The only
+   ways below `min(pre, f)` are a seizure (`can_force_transfer`) or an `is_admin` Remove/Update,
+   which change `f` and move nothing. The second arm reuses `paid_back_to_holder` over the inputs'
+   outputs and runs only when the first fails. Reusing it rather than a dedicated early-exit walk
+   keeps the script at +81 B instead of +190 B, which every transfer pays as reference-script fee.
+   A send that pays back `f` costs a constant +2 201 mem / +428 049 cpu over the old rule, however
+   many inputs it has; every other transfer pays a constant +200 mem / +32 000 cpu (≈ 14 lovelace,
+   against ≈ 1 600 lovelace of reference-script fee saved by the smaller script). The complexity-specialist review (2026-10-29: sound, no counterexample)
+   covered the rule with a dedicated walk; the shipped fold computes the same `spent` (bare hash,
+   security token only), and its `expect` cannot trap where the sender fold has not already.
+2. *Full freeze unchanged.* `None` rejects `h` as a sender and as every kind of destination.
+3. *Exact membership.* A party's element is authenticated (list policy from GlobalState field 7,
+   list spend address pinned) and is either the party's own node or covers it — never both, since
+   keys are unique and strictly ascending and `covers_key` is strict.
+4. *Writes are strict, reads fail closed.* Writers `expect` a well-formed `Denylist`; a reader that
+   meets an own node it cannot decode rejects that party (a strict soft cast returning False)
+   rather than trapping the whole transaction.
+5. *The memo caches the element, never a verdict.* `compliance.vet_remembering` — since
+   2026-10-27 one self-recursive function walking every party after the first — re-decides membership for
+   each party's own hash, so one party's membership proof cannot pass another.
+6. *Update and insert/remove never share a transaction.* One requires a list-policy mint, the
+   other forbids it.
+
+**A dependency worth stating plainly.** The sender rule reads only the *stake* credential of the
+paid-back outputs. On Cardano the *payment* credential controls spending, so the rule is sound only
+because the CIP-113 base layer keeps this token at programmable-base outputs on every path
+(`no_escape` on mint, transfer conservation, seizure pairing, unfracking disabled by registry
+field 5) — the same premise the destination fold has always relied on.
+
+**Costs, accepted.** Every send that lowers a partially frozen holder's balance must pay `f`
+back, so it normally includes at least `f` of the holder's own tokens; a balance in many small
+UTxOs can be consolidated first, which the second arm of the rule always allows (16 KiB limit per
+transaction). Neither `AddToDenylist` nor `UpdateDenylistEntry` can see the holder's balance, so
+`f` is not bounded by it: an `f` above the balance blocks every send that would lower it until the
+balance reaches `f` (receiving and consolidating still work). The pay-back output makes the
+holder a destination of its own transaction, so with `requires_receiver_kyc` set it needs valid
+receiver KYC to send even when `requires_sender_kyc` is off; a partially frozen holder with lapsed
+KYC must renew it first (pinned by
+`partially_frozen_sender_without_valid_kyc_is_blocked_by_receiver_kyc`). Exempting that change from
+receiver KYC was considered and deferred to keep the gate simple. An update
+changes the node's UTxO reference, so in-flight transactions that cite it — the holder's own, or a
+neighbour's absence proof — must be rebuilt. A seizure can leave the holder below `f`; update `f`
+afterwards if that is not intended. A partially frozen holder can now take a partial seizure's
+residual, which a fully frozen one still cannot (see the operational constraints below).
+
+**Where this differs from CMTAT v3.2.0.** The model is CMTAT's "an amount is frozen, which tokens
+does not matter", but three behaviours of `ERC20EnforcementModuleInternal` are not reproduced:
+
+* *Forced transfer does not reduce `f`.* CMTAT's `_forcedTransfer` (and its forced burn, the
+  `to == address(0)` case) calls `_unfreezeTokens`, which lowers the frozen amount by however much
+  the transfer exceeds the active balance. Here a seizure moves tokens without touching the denylist
+  node, so `f` survives it: a holder seized below `f` cannot lower its balance until an `is_admin` power user
+  lowers `f` with `UpdateDenylistEntry` or the holder's balance climbs back to `f`. An operator
+  wanting CMTAT behaviour updates `f` in the same operating procedure as the seizure. Burning goes
+  through the same forced-transfer path here, so the same applies.
+* *Freezing is not bounded by the balance.* CMTAT's `_freezePartialTokens` reverts when the frozen
+  amount would exceed the balance. No denylist write can see a holder's balance, so `f` is
+  unbounded (see costs above).
+* *Full and partial freeze are one field, not two.* CMTAT keeps the address freeze and the frozen
+  amount independently, so lifting a full freeze restores the earlier partial one. Here
+  `frozen_amount` is either `None` or `Some(f)`: escalating to a full freeze discards `f`, and
+  relaxing back must write it again.
+
+**Pinned by** the `partially_frozen_*` / `fully_frozen_*` / `memo_*` / `paid_back_*` / `both_*` /
+`each_*` / `own_node_*` / `undecodable_*` / `below_floor_*` tests in `validators/transfer_logic_script.ak`, the partial-seizure tests in
+`validators/third_party_transfer_logic_script.ak`, `mint_to_a_*_frozen_destination_*` in
+`validators/minting_authority.ak`, and the `denylist_insert_*_freeze` / `denylist_update_*` tests in
+`validators/denylist.ak`. Every new guard was mutation-checked: replacing it with `True` (or the
+memo's per-party check with a cached verdict) makes at least one of these tests fail.
+
+## 18. Two-step transfer approval: hazards closed before release
 
 Not a defect in shipped code. The [two-step transfer approval](../../README.md#two-step-transfer-approval)
 went through repeated spec reviews and an invariant review before it was written; each hazard below
@@ -1246,6 +1355,29 @@ weakens the gate. But nothing works until off-chain moves:
    `valid_until_ms ‖ security_policy_id ‖ network_id`. Use the exported encoders. Rebuild the root
    **before** calling `UpdateMemberRootHash`.
 
+### The 2026-10-23 partial freeze: one datum change, one redeemer variant, two new parameters
+
+* **Datum, breaking for encoders.** `Denylist` is now `{ frozen_amount: Option<Int>, metadata }`,
+  `frozen_amount` first. `AddToDenylist` and `UpdateDenylistEntry` builders must encode it; an entry
+  written in the old one-field shape does not decode, so readers reject its holder and
+  `RemoveFromDenylist`'s `expect` traps on it. No deployment exists, so there is nothing to migrate.
+* **Spend redeemer.** `SpendRedeemer` gains `UpdateDenylistEntry { own_input_index,
+  own_output_index, global_state_ref_input_index, power_user_node_ref_input_index }`;
+  `StateTransition` keeps its encoding.
+* **Parameters.** `denylist_validator` goes from 1 to 3, in the same positions as `denylist.mint`'s:
+  `(global_state_policy_id, denylist_linked_list_policy_id, power_user_list_script_hash)` — the list
+  policy id moves from first to second (README row 5). Its hash moves, and with it every script
+  that pins it: transfer logic, third-party logic, minting authority (rows 8–10).
+* **Proofs.** The per-party denylist index may name the party's own node (partially frozen) as
+  well as a covering node. An unlisted party's proof is unchanged.
+* **Blueprint field names, breaking for generated types.** The per-party index fields lose
+  `covering`: `source_denylist_covering_ref_input_index` → `source_denylist_ref_input_index` in
+  `TransferLogicScriptAction`, and `destination_denylist_covering_ref_input_index` →
+  `destination_denylist_ref_input_index` in `TransferLogicScriptDestinationAction`,
+  `MintingLogicDestinationAction` and `ThirdPartyDestinationAction`. Plutus data is positional, so
+  the on-chain encoding is unchanged and hand-written encoders keep working; types generated from
+  `plutus.json` change their field names and their call sites must follow.
+
 ### The 2026-08-28 fixes: no schema change, one dropped parameter, five moved hashes
 
 **No redeemer or datum schema changed.** Every redeemer constructor, field order and datum shape in
@@ -1322,13 +1454,20 @@ composing them, they are not visible from either file alone, and off-chain proce
 for them. Found by working through each operation's full transaction shape against the vendored
 CIP-113 source.
 
-### Seizure is all-or-nothing per UTxO, against a sanctioned holder
+### Seizure is all-or-nothing per UTxO, against a fully frozen holder
 
 The base layer pairs each spent programmable-base input with an output at the **same address**, so a
 partial seizure's residual necessarily returns to the holder. This deployment vets every
-token-bearing output as a destination, and a sanctioned holder cannot produce a denylist-absence
-proof for their own address. So a partial seizure that leaves a residual with a sanctioned holder is
-rejected.
+token-bearing output as a destination, and a sanctioned (fully frozen, `frozen_amount: None`) holder
+cannot clear the denylist gate for their own address: it has no covering node, and its own node
+rejects it. So a partial seizure that leaves a residual with a fully frozen holder is rejected.
+
+A **partially frozen** holder (`Some(f)`, [§17](#17-partial-freeze-a-denylist-entry-can-freeze-an-amount-not-only-the-whole-holding))
+is not bound by this: it clears the destination gate by citing its own node, so it can take a
+partial seizure's residual, and the seizure ignores its floor `f`. Pinned by
+`partial_seizure_leaving_a_residual_with_a_partially_frozen_holder_succeeds` and
+`seizure_may_take_a_partially_frozen_holder_below_the_floor`. With `requires_receiver_kyc` set, the
+residual still needs the holder's valid KYC, as for any destination.
 
 **Full-draining a UTxO works**, because a paired output holding none of the security token is not a
 destination at all. A position can therefore still be partially seized at the *account* level, by
