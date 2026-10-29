@@ -6,8 +6,9 @@ use aiken/primitive/bytearray
 use aiken_design_patterns/linked_list.{
   Element, Node, Root, deinit, init, insert_ascending, remove, run_element_with,
   run_root_with, spend_for_adding_or_removing_an_element,
+  spend_for_updating_elements_data,
 }
-use cardano/address.{Address, Script}
+use cardano/address.{Address, Script, VerificationKey}
 use cardano/assets.{PolicyId, from_asset, from_lovelace, merge, tokens, zero}
 use cardano/transaction.{
   InlineDatum, Input, NoDatum, Output, OutputReference, Transaction, find_input,
@@ -16,7 +17,7 @@ use constants
 use tests
 use types/denylist.{
   AddToDenylist, Deinit, Denylist, Init, MintRedeemer, RemoveFromDenylist,
-  SpendRedeemer, StateTransition,
+  SpendRedeemer, StateTransition, UpdateDenylistEntry, valid_frozen_amount,
 }
 use types/global_state.{
   GlobalStateDatum, genesis_global_state, gs_core_from_ref_input,
@@ -61,37 +62,124 @@ fn power_user_from_refs(
   (power_user_credential_hash, power_user_data)
 }
 
-validator denylist_validator(denylist_linked_list_policy_id: ByteArray) {
+/// Parameters sit in the same positions as `mint`'s: GlobalState policy first,
+/// then what identifies THIS list (here its policy id, there the one-shot
+/// nonce), then the power-users spend hash.
+validator denylist_validator(
+  /// Needed only by `UpdateDenylistEntry`, which — unlike Add/Remove — runs no
+  /// mint and so must authorise the sanctions officer here. Not circular: the
+  /// GlobalState policy depends on neither denylist hash.
+  global_state_policy_id: ByteArray,
+  denylist_linked_list_policy_id: ByteArray,
+  /// The POWER-USERS SPEND VALIDATOR's script hash, for the same reason. Not
+  /// circular: the power-users validators never depend on the denylist.
+  power_user_list_script_hash: ByteArray,
+) {
   spend(
     _datum_opt: Option<Data>,
     redeemer: SpendRedeemer,
     input_out_ref: OutputReference,
     self: Transaction,
   ) {
-    let StateTransition = redeemer
-    // Delegate to mint validator. No ModifyUser action — presence IS the
-    // state, there's nothing to toggle.
-    //
-    // `spend_for_adding_or_removing_an_element` only asks whether SOME
-    // denylist-policy mint/burn happens anywhere in this transaction — it
-    // says nothing about the UTxO actually being spent under this redeemer.
-    // Without pinning that, a stray value-bearing UTxO parked at the list
-    // address (holding no list NFT, and therefore not list state at all)
-    // could be swept up and spent here, riding along with any genuine list
-    // mutation elsewhere in the same transaction. Resolving this validator's
-    // own input and requiring it to carry the list's NFT closes that: only a
-    // genuine list element (root or node) may be spent under
-    // `StateTransition`.
-    expect Some(own_input) = find_input(self.inputs, input_out_ref)
-    and {
-      (quantity_of_policy_id(
-        own_input.output.value,
-        denylist_linked_list_policy_id,
-      ) > 0)?,
-      spend_for_adding_or_removing_an_element(
-        denylist_linked_list_policy_id,
-        self.mint,
-      ),
+    when redeemer is {
+      StateTransition -> {
+        // Delegate to mint validator.
+        //
+        // `spend_for_adding_or_removing_an_element` only asks whether SOME
+        // denylist-policy mint/burn happens anywhere in this transaction — it
+        // says nothing about the UTxO actually being spent under this
+        // redeemer. Without pinning that, a stray value-bearing UTxO parked at
+        // the list address (holding no list NFT, and therefore not list state
+        // at all) could be swept up and spent here, riding along with any
+        // genuine list mutation elsewhere in the same transaction. Resolving
+        // this validator's own input and requiring it to carry the list's NFT
+        // closes that: only a genuine list element (root or node) may be spent
+        // under `StateTransition`.
+        expect Some(own_input) = find_input(self.inputs, input_out_ref)
+        and {
+          (quantity_of_policy_id(
+            own_input.output.value,
+            denylist_linked_list_policy_id,
+          ) > 0)?,
+          spend_for_adding_or_removing_an_element(
+            denylist_linked_list_policy_id,
+            self.mint,
+          ),
+        }
+      }
+      UpdateDenylistEntry {
+        own_input_index,
+        own_output_index,
+        global_state_ref_input_index,
+        power_user_node_ref_input_index,
+      } -> {
+        // Change a node's frozen amount and/or metadata IN PLACE. Removing and
+        // re-adding cannot do this: the burn and the re-mint of the same node
+        // NFT cancel out in one transaction, so it would take two, with the
+        // holder unlisted in between.
+        //
+        // Gated exactly like Add/Remove: a power user holding `is_admin`,
+        // signed by that user, on a protocol that is not deactivated.
+        let (power_user_credential_hash, power_user_data) = power_user_from_refs(
+          self,
+          global_state_ref_input_index,
+          global_state_policy_id,
+          power_user_node_ref_input_index,
+          power_user_list_script_hash,
+        )
+        and {
+          power_user_data.is_admin?,
+          must_be_signed_by_credential(self, power_user_credential_hash)?,
+          // The library binds this spend to its own input (`one_to_one` on
+          // `input_out_ref`), forbids any list-policy mint in the transaction
+          // — which is what keeps this apart from `StateTransition` — and
+          // requires the continuation to keep the address, the NFT (so the
+          // key), the element constructor and the link. What it leaves to us
+          // is the lovelace change and the data.
+          //
+          // There is no "wanted state" in the redeemer, unlike
+          // `ModifyPowerUser`: the officer's signature covers the whole
+          // transaction body, the continuation's datum included.
+          spend_for_updating_elements_data(
+            own_input_index,
+            own_output_index,
+            input_out_ref,
+            self.inputs,
+            self.outputs,
+            self.mint,
+            fn(
+              _address,
+              lovelace_change,
+              node_key_opt,
+              _old_data,
+              new_data,
+              _link,
+            ) {
+              // Nodes only: the root carries no entry, and its data is frozen
+              // for life by insert and remove.
+              expect Some(_node_key) = node_key_opt
+              // Strict: malformed data must never enter the list. A reader
+              // meeting it would reject the holder outright, but a write is
+              // where it is refused.
+              expect denylist_data: Denylist = new_data
+              and {
+                valid_frozen_amount(denylist_data.frozen_amount)?,
+                (bytearray.length(
+                  builtin.serialise_data(denylist_data.metadata),
+                ) <= constants.max_denylist_metadata_bytes)?,
+                // The node's ADA is the list's, not the officer's to take.
+                (lovelace_change >= 0)?,
+              }
+            },
+          )
+            |> run_element_with(
+                denylist_linked_list_policy_id,
+                constants.linked_list_root_key,
+                constants.linked_list_node_key_prefix,
+                constants.linked_list_node_key_prefix_length,
+              ),
+        }
+      }
     }
   }
 
@@ -258,6 +346,8 @@ validator mint(
               expect denylist_data: Denylist = node_data
               and {
                 node_key == user_pkh,
+                // `None` (full freeze) or a strictly positive partial freeze.
+                valid_frozen_amount(denylist_data.frozen_amount)?,
                 bytearray.length(builtin.serialise_data(denylist_data.metadata)) <= constants.max_denylist_metadata_bytes,
               }
             },
@@ -494,7 +584,7 @@ fn t_dl_sanction_node_output_with_metadata(
   metadata: Data,
 ) -> Output {
   let element: Element<Data, Denylist> = Element {
-    data: Node { data: Denylist { metadata } },
+    data: Node { data: Denylist { frozen_amount: None, metadata } },
     link: None,
   }
   Output { ..t_dl_node_input(0, key).output, datum: InlineDatum(element) }
@@ -617,7 +707,9 @@ test denylist_spend_accepts_a_genuine_node_spend_alongside_a_mutation() {
     mint: from_asset(t_dl_policy, t_ll_asset_name(t_key_28), 1),
   }
   denylist_validator.spend(
+    t_gs_policy,
     t_dl_policy,
+    t_pu_script_hash,
     no_datum,
     StateTransition,
     t_oref(0),
@@ -643,7 +735,9 @@ test denylist_spend_rejects_a_stray_no_token_utxo_swept_alongside_a_mutation() {
     mint: from_asset(t_dl_policy, t_ll_asset_name(t_key_28), 1),
   }
   !denylist_validator.spend(
+    t_gs_policy,
     t_dl_policy,
+    t_pu_script_hash,
     no_datum,
     StateTransition,
     t_oref(0),
@@ -810,5 +904,372 @@ test denylist_insert_rejects_a_malformed_deactivated_flag() fail {
   t_run_denylist_add(
     t_key_28,
     tests.with_malformed_gs_deactivated(t_dl_insert_tx(t_key_28), t_gs_policy),
+  )
+}
+
+// ── Partial freeze: `frozen_amount` on insert ────────────────────────────────
+
+fn t_dl_entry_output(key: ByteArray, frozen_amount: Option<Int>) -> Output {
+  let element: Element<Data, Denylist> = Element {
+    data: Node {
+      data: Denylist { frozen_amount, metadata: builtin.constr_data(0, []) },
+    },
+    link: None,
+  }
+  Output { ..t_dl_node_input(0, key).output, datum: InlineDatum(element) }
+}
+
+fn t_dl_insert_frozen(frozen_amount: Option<Int>) -> Bool {
+  let tx = Transaction {
+    ..t_dl_insert_tx(t_key_28),
+    outputs: [
+      t_dl_root_output(Some(t_key_28)),
+      t_dl_entry_output(t_key_28, frozen_amount),
+    ],
+  }
+  t_run_denylist_add(t_key_28, tx)
+}
+
+test denylist_insert_accepts_a_partial_freeze() {
+  t_dl_insert_frozen(Some(1))
+}
+
+test denylist_insert_accepts_a_full_freeze() {
+  t_dl_insert_frozen(None)
+}
+
+// The insert callback's verdict is `expect`ed by the library, so a rejected
+// entry traps — `fail`, not `!`.
+test denylist_insert_rejects_a_zero_partial_freeze() fail {
+  t_dl_insert_frozen(Some(0))
+}
+
+test denylist_insert_rejects_a_negative_partial_freeze() fail {
+  t_dl_insert_frozen(Some(-1))
+}
+
+// ── Partial freeze: `UpdateDenylistEntry` ────────────────────────────────────
+//
+// Reference inputs: 0 GlobalState, 1 power-user node. Input 0 is the node
+// being updated, output 0 its continuation.
+
+fn t_entry_input(ix: Int, key: ByteArray, data: Data, lovelace: Int) -> Input {
+  let element: Element<Data, Data> = Element { data: Node { data }, link: None }
+  Input {
+    output_reference: t_oref(ix),
+    output: Output {
+      ..t_dl_node_input(ix, key).output,
+      value: merge(
+        from_lovelace(lovelace),
+        from_asset(t_dl_policy, t_ll_asset_name(key), 1),
+      ),
+      datum: InlineDatum(element),
+    },
+  }
+}
+
+fn t_entry(frozen_amount: Option<Int>) -> Data {
+  let entry: Data = Denylist {
+    frozen_amount,
+    metadata: builtin.constr_data(0, []),
+  }
+  entry
+}
+
+fn t_update_tx(old: Data, new: Data, new_lovelace: Int) -> Transaction {
+  Transaction {
+    ..t_base_tx(),
+    inputs: [t_entry_input(0, t_key_28, old, 2_000_000)],
+    reference_inputs: [
+      t_gs_utxo(0, t_gs_datum(False)),
+      t_pu_node_input(1, t_power_user(True)),
+    ],
+    outputs: [t_entry_input(0, t_key_28, new, new_lovelace).output],
+    extra_signatories: [t_pu_cred],
+  }
+}
+
+fn t_run_update(tx: Transaction) -> Bool {
+  let no_datum: Option<Data> = None
+  denylist_validator.spend(
+    t_gs_policy,
+    t_dl_policy,
+    t_pu_script_hash,
+    no_datum,
+    UpdateDenylistEntry {
+      own_input_index: 0,
+      own_output_index: 0,
+      global_state_ref_input_index: 0,
+      power_user_node_ref_input_index: 1,
+    },
+    t_oref(0),
+    tx,
+  )
+}
+
+test denylist_update_changes_the_frozen_amount() {
+  t_run_update(t_update_tx(t_entry(Some(400)), t_entry(Some(500)), 2_000_000))
+}
+
+test denylist_update_escalates_a_partial_freeze_to_a_full_freeze() {
+  t_run_update(t_update_tx(t_entry(Some(400)), t_entry(None), 2_000_000))
+}
+
+test denylist_update_relaxes_a_full_freeze_to_a_partial_one() {
+  t_run_update(t_update_tx(t_entry(None), t_entry(Some(10)), 2_000_000))
+}
+
+test denylist_update_accepts_more_lovelace() {
+  t_run_update(t_update_tx(t_entry(None), t_entry(None), 3_000_000))
+}
+
+test denylist_update_rejects_a_power_user_without_is_admin() {
+  let tx = Transaction {
+    ..t_update_tx(t_entry(None), t_entry(Some(10)), 2_000_000),
+    reference_inputs: [
+      t_gs_utxo(0, t_gs_datum(False)),
+      t_pu_node_input(1, t_power_user(False)),
+    ],
+  }
+  !t_run_update(tx)
+}
+
+test denylist_update_rejects_a_missing_signature() {
+  let tx = Transaction {
+    ..t_update_tx(t_entry(None), t_entry(Some(10)), 2_000_000),
+    extra_signatories: [],
+  }
+  !t_run_update(tx)
+}
+
+test denylist_update_rejects_a_deactivated_protocol() fail {
+  let tx = Transaction {
+    ..t_update_tx(t_entry(None), t_entry(Some(10)), 2_000_000),
+    reference_inputs: [
+      t_gs_utxo(0, t_gs_datum(True)),
+      t_pu_node_input(1, t_power_user(True)),
+    ],
+  }
+  t_run_update(tx)
+}
+
+test denylist_update_rejects_a_power_user_node_outside_its_list() fail {
+  let pu = t_pu_node_input(1, t_power_user(True))
+  let tx = Transaction {
+    ..t_update_tx(t_entry(None), t_entry(Some(10)), 2_000_000),
+    reference_inputs: [
+      t_gs_utxo(0, t_gs_datum(False)),
+      Input {
+        ..pu,
+        output: Output {
+          ..pu.output,
+          address: Address {
+            payment_credential: VerificationKey(t_pu_cred),
+            stake_credential: None,
+          },
+        },
+      },
+    ],
+  }
+  t_run_update(tx)
+}
+
+test denylist_update_rejects_a_zero_partial_freeze() fail {
+  t_run_update(t_update_tx(t_entry(None), t_entry(Some(0)), 2_000_000))
+}
+
+test denylist_update_rejects_a_negative_partial_freeze() fail {
+  t_run_update(t_update_tx(t_entry(None), t_entry(Some(-1)), 2_000_000))
+}
+
+test denylist_update_rejects_data_that_is_not_an_entry() fail {
+  t_run_update(
+    t_update_tx(t_entry(None), builtin.constr_data(0, []), 2_000_000),
+  )
+}
+
+test denylist_update_rejects_oversized_metadata() fail {
+  let new: Data = Denylist {
+    frozen_amount: None,
+    metadata: t_data_of_raw_length(t_metadata_len_over_cap),
+  }
+  t_run_update(t_update_tx(t_entry(None), new, 2_000_000))
+}
+
+test denylist_update_accepts_metadata_at_the_size_cap() {
+  let new: Data = Denylist {
+    frozen_amount: None,
+    metadata: t_data_of_raw_length(t_metadata_len_at_cap),
+  }
+  t_run_update(t_update_tx(t_entry(None), new, 2_000_000))
+}
+
+test denylist_update_rejects_taking_lovelace() fail {
+  t_run_update(t_update_tx(t_entry(None), t_entry(None), 1_999_999))
+}
+
+// The root carries a well-formed entry here, so the node-only guard is the
+// only thing that can reject the update.
+test denylist_update_rejects_the_root() fail {
+  let root: Element<Data, Data> = Element {
+    data: Root { data: t_entry(None) },
+    link: None,
+  }
+  let root_output = Output {
+    ..t_dl_root_input(0).output,
+    datum: InlineDatum(root),
+  }
+  let tx = Transaction {
+    ..t_update_tx(t_entry(None), t_entry(None), 2_000_000),
+    inputs: [Input { output_reference: t_oref(0), output: root_output }],
+    outputs: [root_output],
+  }
+  t_run_update(tx)
+}
+
+// Exclusivity with `StateTransition`: any list-policy mint in the transaction
+// and the update refuses to run.
+test denylist_update_rejects_a_list_mint_in_the_same_transaction() fail {
+  let tx = Transaction {
+    ..t_update_tx(t_entry(None), t_entry(Some(10)), 2_000_000),
+    mint: from_asset(t_dl_policy, t_ll_asset_name(t_key_28), 1),
+  }
+  t_run_update(tx)
+}
+
+// Two updates cannot share one continuation: the second spend's own node NFT
+// is not in the output both cite.
+test denylist_update_rejects_two_spends_sharing_one_continuation() fail {
+  let other_key = #"05050505050505050505050505050505050505050505050505050505"
+  let no_datum: Option<Data> = None
+  let tx = Transaction {
+    ..t_update_tx(t_entry(None), t_entry(Some(10)), 2_000_000),
+    inputs: [
+      t_entry_input(0, t_key_28, t_entry(None), 2_000_000),
+      t_entry_input(1, other_key, t_entry(None), 2_000_000),
+    ],
+  }
+  denylist_validator.spend(
+    t_gs_policy,
+    t_dl_policy,
+    t_pu_script_hash,
+    no_datum,
+    UpdateDenylistEntry {
+      own_input_index: 1,
+      own_output_index: 0,
+      global_state_ref_input_index: 0,
+      power_user_node_ref_input_index: 1,
+    },
+    t_oref(1),
+    tx,
+  )
+}
+
+// Positive control for the test above: the same transaction, first spend.
+test denylist_update_accepts_the_first_of_two_spends() {
+  let other_key = #"05050505050505050505050505050505050505050505050505050505"
+  let tx = Transaction {
+    ..t_update_tx(t_entry(None), t_entry(Some(10)), 2_000_000),
+    inputs: [
+      t_entry_input(0, t_key_28, t_entry(None), 2_000_000),
+      t_entry_input(1, other_key, t_entry(None), 2_000_000),
+    ],
+  }
+  t_run_update(tx)
+}
+
+// ── `UpdateDenylistEntry`: what the continuation must keep ───────────────────
+//
+// The library pins these; the tests make a library bump or a refactor that
+// loosens them fail here rather than reopen NFT escape through the officer
+// path.
+
+// The NFT may not leave the list address.
+test denylist_update_rejects_a_continuation_at_another_address() fail {
+  let out = t_entry_input(0, t_key_28, t_entry(Some(10)), 2_000_000).output
+  let tx = Transaction {
+    ..t_update_tx(t_entry(None), t_entry(Some(10)), 2_000_000),
+    outputs: [
+      Output {
+        ..out,
+        address: Address {
+          payment_credential: VerificationKey(t_pu_cred),
+          stake_credential: None,
+        },
+      },
+    ],
+  }
+  t_run_update(tx)
+}
+
+// The link may not change: an update must never re-order the list.
+test denylist_update_rejects_a_changed_link() fail {
+  let other_key = #"05050505050505050505050505050505050505050505050505050505"
+  let relinked: Element<Data, Data> = Element {
+    data: Node { data: t_entry(Some(10)) },
+    link: Some(other_key),
+  }
+  let out = t_entry_input(0, t_key_28, t_entry(Some(10)), 2_000_000).output
+  let tx = Transaction {
+    ..t_update_tx(t_entry(None), t_entry(Some(10)), 2_000_000),
+    outputs: [Output { ..out, datum: InlineDatum(relinked) }],
+  }
+  t_run_update(tx)
+}
+
+// A stray UTxO at the list address without the list NFT is not list state and
+// may not be spent under the update.
+test denylist_update_rejects_an_own_input_without_the_list_nft() fail {
+  let entry = t_entry_input(0, t_key_28, t_entry(None), 2_000_000)
+  let tx = Transaction {
+    ..t_update_tx(t_entry(None), t_entry(Some(10)), 2_000_000),
+    inputs: [
+      Input {
+        ..entry,
+        output: Output { ..entry.output, value: from_lovelace(2_000_000) },
+      },
+    ],
+  }
+  t_run_update(tx)
+}
+
+// The redeemer's input and output indices are honoured as given: the entry is
+// input 1 and its continuation output 0, so swapping the two in the validator
+// would point at the wrong input and trap.
+test denylist_update_accepts_distinct_input_and_output_indices() {
+  let no_datum: Option<Data> = None
+  let wallet_input = Input {
+    output_reference: t_oref(5),
+    output: Output {
+      address: Address {
+        payment_credential: VerificationKey(t_pu_cred),
+        stake_credential: None,
+      },
+      value: from_lovelace(5_000_000),
+      datum: NoDatum,
+      reference_script: None,
+    },
+  }
+  let tx = Transaction {
+    ..t_update_tx(t_entry(None), t_entry(Some(10)), 2_000_000),
+    inputs: [wallet_input, t_entry_input(1, t_key_28, t_entry(None), 2_000_000)],
+    outputs: [
+      t_entry_input(1, t_key_28, t_entry(Some(10)), 2_000_000).output,
+      wallet_input.output,
+    ],
+  }
+  denylist_validator.spend(
+    t_gs_policy,
+    t_dl_policy,
+    t_pu_script_hash,
+    no_datum,
+    UpdateDenylistEntry {
+      own_input_index: 1,
+      own_output_index: 0,
+      global_state_ref_input_index: 0,
+      power_user_node_ref_input_index: 1,
+    },
+    t_oref(1),
+    tx,
   )
 }

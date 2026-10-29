@@ -1,7 +1,7 @@
 use cardano/address.{Credential}
 use cardano/transaction.{Transaction}
 use denylist/absence.{
-  covers_key, verify_denylist_absence, with_covering_node_bounds,
+  party_permitted, verify_denylist_permits, with_denylist_element,
 }
 use kyc/verify.{verify_kyc_proof}
 use types/global_state.{GlobalStateDatum}
@@ -11,8 +11,15 @@ use utils
 /// Vet one party per compliance action, walking both lists in LOCKSTEP.
 ///
 /// Every party that sends or receives the security token has to clear the same
-/// two gates — denylist absence, and KYC when the corresponding GlobalState
-/// flag is set — and the redeemer supplies one action per party, positionally.
+/// two gates — the denylist, and KYC when the corresponding GlobalState flag is
+/// set — and the redeemer supplies one action per party, positionally.
+///
+/// The denylist gate (`absence.party_permitted`): the element a party's action
+/// cites is either a covering node (the party is not listed: pass) or the
+/// party's OWN node. An own node with `frozen_amount: None` rejects; with
+/// `Some(f)` it hands `(party_hash, f)` to `on_partially_frozen`, which is the
+/// only thing that differs between the sides — receivers pass
+/// `fn(_, _) { True }`, the transfer path's senders pass the paid-back rule.
 /// Three call sites need exactly this: the transfer path's senders, the
 /// transfer path's destinations, and the seizure path's destinations. They used
 /// to carry three copies of it.
@@ -44,7 +51,8 @@ pub fn verify_parties(
   parties: List<Credential>,
   actions: List<action>,
   proof_of: fn(action) -> KycProof,
-  covering_index_of: fn(action) -> Int,
+  denylist_index_of: fn(action) -> Int,
+  on_partially_frozen: fn(ByteArray, Int) -> Bool,
   requires_kyc: Bool,
   gs_datum: GlobalStateDatum,
   issuance_policy_id: ByteArray,
@@ -70,27 +78,55 @@ pub fn verify_parties(
           // plain proof with no memo machinery at all, so it costs exactly
           // what it did before the memo existed.
           [] ->
-            verify_denylist_absence(
+            verify_denylist_permits(
               utils.credential_hash(party),
-              covering_index_of(action),
+              denylist_index_of(action),
               self.reference_inputs,
               gs_datum.denylist_linked_list_policy_id,
               denylist_script_hash,
+              on_partially_frozen,
             )
-          _ ->
-            vet_with_fresh_node(
-              party,
-              action,
-              rest_parties,
-              rest_actions,
-              proof_of,
-              covering_index_of,
-              requires_kyc,
-              gs_datum,
-              issuance_policy_id,
+          // Several parties: authenticate this party's element and start the
+          // walk with it remembered (`vet_remembering`).
+          _ -> {
+            let element_index = denylist_index_of(action)
+            with_denylist_element(
+              element_index,
+              self.reference_inputs,
+              gs_datum.denylist_linked_list_policy_id,
               denylist_script_hash,
-              self,
+              fn(element_key, element_link, element_data) {
+                and {
+                  // The denylist keys on the BARE HASH: listing a hash must
+                  // list both credential forms, which is the conservative
+                  // direction. Only the KYC path distinguishes them.
+                  party_permitted(
+                    element_key,
+                    element_link,
+                    element_data,
+                    utils.credential_hash(party),
+                    on_partially_frozen,
+                  ),
+                  vet_remembering(
+                    rest_parties,
+                    rest_actions,
+                    proof_of,
+                    denylist_index_of,
+                    on_partially_frozen,
+                    requires_kyc,
+                    gs_datum,
+                    issuance_policy_id,
+                    denylist_script_hash,
+                    self,
+                    element_index,
+                    element_key,
+                    element_link,
+                    element_data,
+                  ),
+                }
+              },
             )
+          }
         },
       }
     }
@@ -125,19 +161,21 @@ fn kyc_ok(
   }
 }
 
-/// Authenticate the covering node `action` cites, vet `party` against it, and
-/// continue the walk with that node remembered.
+/// The walk after the first of several parties: `last_index` / `last_key` /
+/// `last_link` / `last_data` are the reference-input index, bounds and data of
+/// the denylist element this walk most recently authenticated. A party citing
+/// the same index reuses them; any other index is authenticated afresh and
+/// becomes the remembered element.
 ///
-/// Authenticating a covering node — the library re-reading the UTxO's value,
+/// Authenticating an element — the library re-reading the UTxO's value,
 /// re-parsing its datum, re-deriving its key — was the dominant per-party cost,
 /// and it depends only on the reference input, never on the party. A
 /// transaction with a short denylist cites the same covering node for most or
 /// all of its parties, so the node was being authenticated once PER PARTY for
 /// the same bytes. Now a party that cites the index the previous party cited
-/// pays only the `covers_key` comparison (`vet_remembering`); a different index
-/// comes back here, is authenticated afresh, and becomes the remembered node.
+/// pays only the per-party decision, `party_permitted`.
 ///
-/// Why only the last node and not a map of all of them: three plain arguments
+/// Why only the last element and not a map of all of them: four plain arguments
 /// cost nothing to carry, whereas a lookup structure costs an allocation per
 /// call even for the one-party transfers that dominate real traffic. A builder
 /// that orders parties so that those sharing a node are adjacent gets the full
@@ -145,63 +183,27 @@ fn kyc_ok(
 ///
 /// This cannot widen the accepted set: the element at a given index is one
 /// immutable UTxO for the whole transaction, so re-authenticating it would
-/// return the same bounds (or trap the same way), and the remembered node is
-/// ALWAYS one this very call authenticated — there is no "nothing yet"
+/// return the same bounds (or trap the same way), and the remembered element
+/// is ALWAYS one this walk authenticated — `verify_parties` seeds it from its
+/// own authentication, this function is private, and there is no "nothing yet"
 /// sentinel a redeemer could collide with. A party citing an index that fails
 /// authentication still traps, on its first use.
-fn vet_with_fresh_node(
-  party: Credential,
-  action: action,
-  rest_parties: List<Credential>,
-  rest_actions: List<action>,
-  proof_of: fn(action) -> KycProof,
-  covering_index_of: fn(action) -> Int,
-  requires_kyc: Bool,
-  gs_datum: GlobalStateDatum,
-  issuance_policy_id: ByteArray,
-  denylist_script_hash: ByteArray,
-  self: Transaction,
-) -> Bool {
-  let covering_index = covering_index_of(action)
-  with_covering_node_bounds(
-    covering_index,
-    self.reference_inputs,
-    gs_datum.denylist_linked_list_policy_id,
-    denylist_script_hash,
-    fn(covering_key, covering_link) {
-      and {
-        // The denylist keys on the BARE HASH: sanctioning a hash must sanction
-        // both credential forms, which is the conservative direction. Only the
-        // KYC path distinguishes them.
-        covers_key(covering_key, covering_link, utils.credential_hash(party)),
-        vet_remembering(
-          rest_parties,
-          rest_actions,
-          proof_of,
-          covering_index_of,
-          requires_kyc,
-          gs_datum,
-          issuance_policy_id,
-          denylist_script_hash,
-          self,
-          covering_index,
-          covering_key,
-          covering_link,
-        ),
-      }
-    },
-  )
-}
-
-/// The walk after the first party: `last_index` / `last_key` / `last_link` are
-/// the reference-input index and bounds of the covering node this call most
-/// recently authenticated. A party citing the same index reuses the bounds;
-/// any other index goes through `vet_with_fresh_node`.
+///
+/// Why the fresh-element case is written out here rather than in a helper: the
+/// walk is then a SELF-recursive function, whose eight arguments that never
+/// change are not re-applied per party by the compiled code. With a helper the
+/// two functions recursed into each other and paid for every argument on every
+/// party (measured: about 2% of memory at 30 parties per side). In the
+/// fresh-element arm both the remembered `last_*` and the new `element_*` are
+/// in scope: the decision and the recursion take `element_*`, never `last_*`
+/// (pinned by `memo_never_judges_a_party_against_another_index_element` and
+/// `memo_never_judges_a_party_against_a_stale_element`).
 fn vet_remembering(
   parties: List<Credential>,
   actions: List<action>,
   proof_of: fn(action) -> KycProof,
-  covering_index_of: fn(action) -> Int,
+  denylist_index_of: fn(action) -> Int,
+  on_partially_frozen: fn(ByteArray, Int) -> Bool,
   requires_kyc: Bool,
   gs_datum: GlobalStateDatum,
   issuance_policy_id: ByteArray,
@@ -210,6 +212,7 @@ fn vet_remembering(
   last_index: Int,
   last_key: Option<ByteArray>,
   last_link: Option<ByteArray>,
+  last_data: Data,
 ) -> Bool {
   when parties is {
     [] -> True
@@ -225,38 +228,78 @@ fn vet_remembering(
           issuance_policy_id,
           self,
         ),
-        if covering_index_of(action) == last_index {
-          and {
-            covers_key(last_key, last_link, utils.credential_hash(party)),
-            vet_remembering(
-              rest_parties,
-              rest_actions,
-              proof_of,
-              covering_index_of,
-              requires_kyc,
-              gs_datum,
-              issuance_policy_id,
+        // Bound inside this conjunct, so a party failing KYC evaluates no
+        // more than it did before.
+        {
+          let element_index = denylist_index_of(action)
+          if element_index == last_index {
+            // Only the ELEMENT is remembered, never a verdict: whether it is
+            // this party's own node, and what that means, is decided afresh for
+            // this party's hash. A node one party proved membership with can
+            // only ever cover — or reject — anyone else.
+            and {
+              party_permitted(
+                last_key,
+                last_link,
+                last_data,
+                utils.credential_hash(party),
+                on_partially_frozen,
+              ),
+              vet_remembering(
+                rest_parties,
+                rest_actions,
+                proof_of,
+                denylist_index_of,
+                on_partially_frozen,
+                requires_kyc,
+                gs_datum,
+                issuance_policy_id,
+                denylist_script_hash,
+                self,
+                last_index,
+                last_key,
+                last_link,
+                last_data,
+              ),
+            }
+          } else {
+            with_denylist_element(
+              element_index,
+              self.reference_inputs,
+              gs_datum.denylist_linked_list_policy_id,
               denylist_script_hash,
-              self,
-              last_index,
-              last_key,
-              last_link,
-            ),
+              fn(element_key, element_link, element_data) {
+                and {
+                  // The denylist keys on the BARE HASH: listing a hash must list
+                  // both credential forms, which is the conservative direction.
+                  // Only the KYC path distinguishes them.
+                  party_permitted(
+                    element_key,
+                    element_link,
+                    element_data,
+                    utils.credential_hash(party),
+                    on_partially_frozen,
+                  ),
+                  vet_remembering(
+                    rest_parties,
+                    rest_actions,
+                    proof_of,
+                    denylist_index_of,
+                    on_partially_frozen,
+                    requires_kyc,
+                    gs_datum,
+                    issuance_policy_id,
+                    denylist_script_hash,
+                    self,
+                    element_index,
+                    element_key,
+                    element_link,
+                    element_data,
+                  ),
+                }
+              },
+            )
           }
-        } else {
-          vet_with_fresh_node(
-            party,
-            action,
-            rest_parties,
-            rest_actions,
-            proof_of,
-            covering_index_of,
-            requires_kyc,
-            gs_datum,
-            issuance_policy_id,
-            denylist_script_hash,
-            self,
-          )
         },
       }
     }
