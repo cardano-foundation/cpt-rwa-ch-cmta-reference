@@ -114,6 +114,12 @@ pub type GlobalStateDatum {
   // credentials set to a permissive script hash is satisfiable by a stranger.
   // After granting or rotating any role, assert that an operation exercising
   // it without that operator's signature is REJECTED.
+  //
+  // `can_approve` is the exception: the approval logic accepts only the
+  // operator's KEY signature, so a script hash can never satisfy it. Its smoke
+  // test after a grant: the operator's key can Approve (this also catches a
+  // wrong `power_user_list_script_hash` in the approval logic), and a
+  // withdrawal of the operator's hash without its key is REJECTED.
   minting_script_credential_hash: ByteArray,
   // ── LOGIC-OWNED TAIL (5+) — v1 layout; a later logic may reshape it ──────────
   //If true, no transfer can be executed
@@ -166,6 +172,56 @@ pub type GlobalStateDatum {
   // this is set, the only remaining lever over the token is
   // `DeactivateContract`. Lock only when the deployment is considered final.
   upgrades_locked: Bool,
+  // ── Two-step transfer approval (validators/approval_logic.ak) ──────────────
+  // Logic-owned tail fields, appended so that no earlier index moves. The
+  // permanent `approval_proxy` never reads them: it reaches the approval logic
+  // through field 0 (`DelegateApproval`), so a later GlobalState logic may
+  // reshape these like any other tail field.
+  //
+  // The switch. While False, holder transfers are not gated and no new pending
+  // transfer can be created (the transfer logic refuses vault outputs);
+  // pending ones still settle. While True, the transfer logic requires the
+  // approval logic's withdraw-0 in every transaction it validates.
+  // `SetApprovalRequired`, admin-signed, must flip it. Stays open after
+  // `upgrades_locked`: rotation is closed then, so if the installed approval
+  // logic cannot run, switching approval off is the only way ordinary
+  // transfers resume. It releases nothing pending.
+  approval_required: Bool,
+  // While `approval_required`, the largest NET movement of the security token
+  // to other credentials a holder transaction may make without going through
+  // the vault, in base units. 0 = every transfer needs approval. >= 0.
+  // `SetApprovalThreshold`, admin-signed; open after `upgrades_locked`.
+  approval_threshold: Int,
+  // The replaceable approval logic (validators/approval_logic.ak): the script
+  // whose withdraw-0 enforces the threshold, binds every new pending transfer,
+  // refuses mixing, and decides every settlement (Approve / Reject by the
+  // admin or a `can_approve` operator, Close by the admin, Cancel by the
+  // sender). It reads this datum (admin, power-user list policy, switch,
+  // threshold) — a GlobalState logic that reshapes these tail fields must
+  // rotate it in lockstep. `RotateApprovalLogic`, admin-signed, closed by
+  // `upgrades_locked`. Pending transfers follow a rotation: they are owned by
+  // the permanent `approval_proxy`, which delegates to whatever this names.
+  //
+  // DEPLOYMENT REQUIREMENT, not enforceable on-chain: this must name an
+  // `approval_logic` that genuinely decides, compiled for THIS deployment's
+  // `approval_proxy`, GlobalState policy, power-user list script, issuance
+  // policy and security asset name, with a `close_payout` it controls. A wrong
+  // proxy, policy or asset name passes every run and switches the gate off. It
+  // is the ONLY place the threshold is enforced: a logic that skips it
+  // switches the threshold off.
+  // Never the transfer logic, third-party logic, minting proxy or authority, a
+  // base-layer delegate, or any script whose withdraw-0 passes without the
+  // admin — anyone could then settle every pending transfer. Its withdrawal is
+  // a FREE credential (anyone can produce it with an ADA-only vault UTxO), so
+  // it must never be an admin, authority or operator. A retired one does not
+  // run, but treat every approval logic ever installed as free all the same.
+  // After every rotation, smoke-test: a settlement WITHOUT the admin is
+  // REJECTED; spending a pending transfer with NO action is REJECTED; Approve /
+  // Reject / Close WITH the admin and Cancel WITH the sender are ACCEPTED; a
+  // holder transfer above the threshold is REJECTED and one within it
+  // ACCEPTED; a `can_approve` operator's Approve is ACCEPTED with its key
+  // signature and REJECTED with only a withdrawal of its hash.
+  approval_logic_hash: ByteArray,
 }
 
 // ============================================================================
@@ -206,6 +262,12 @@ pub const idx_requires_receiver_kyc = 12
 pub const idx_network_id = 13
 
 pub const idx_upgrades_locked = 14
+
+pub const idx_approval_required = 15
+
+pub const idx_approval_threshold = 16
+
+pub const idx_approval_logic_hash = 17
 
 // Getters take the already-unconstr'd field list (`builtin.unconstr_fields`),
 // hiding the index + builtin unwrap behind a typed name. Reading several fields?
@@ -279,6 +341,10 @@ pub fn get_minting_script_credential_hash(fields: List<Data>) -> ByteArray {
   builtin.un_b_data(
     utils.safe_list_at(fields, idx_minting_script_credential_hash),
   )
+}
+
+pub fn get_approval_logic_hash(fields: List<Data>) -> ByteArray {
+  builtin.un_b_data(utils.safe_list_at(fields, idx_approval_logic_hash))
 }
 
 pub fn get_upgrades_locked(fields: List<Data>) -> Bool {
@@ -402,6 +468,39 @@ pub fn set_upgrades_locked(fields: List<Data>, value: Bool) -> Data {
   )
 }
 
+pub fn set_approval_required(fields: List<Data>, value: Bool) -> Data {
+  builtin.constr_data(
+    0,
+    utils.replace_data_field(
+      fields,
+      idx_approval_required,
+      utils.bool_to_data(value),
+    ),
+  )
+}
+
+pub fn set_approval_threshold(fields: List<Data>, value: Int) -> Data {
+  builtin.constr_data(
+    0,
+    utils.replace_data_field(
+      fields,
+      idx_approval_threshold,
+      builtin.i_data(value),
+    ),
+  )
+}
+
+pub fn set_approval_logic_hash(fields: List<Data>, value: ByteArray) -> Data {
+  builtin.constr_data(
+    0,
+    utils.replace_data_field(
+      fields,
+      idx_approval_logic_hash,
+      builtin.b_data(value),
+    ),
+  )
+}
+
 pub fn set_minting_script_credential_hash(
   fields: List<Data>,
   value: ByteArray,
@@ -433,13 +532,23 @@ pub fn gs_datum_from_location(
   location: GlobalStateLocation,
   global_state_policy_id: ByteArray,
 ) -> GlobalStateDatum {
-  let gs_output = when location is {
+  gs_datum_from_output(
+    gs_output_at(inputs, reference_inputs, location),
+    global_state_policy_id,
+  )
+}
+
+fn gs_output_at(
+  inputs: List<Input>,
+  reference_inputs: List<Input>,
+  location: GlobalStateLocation,
+) -> Output {
+  when location is {
     GlobalStateSpent { global_state_input_index } ->
       utils.safe_list_at(inputs, global_state_input_index).output
     GlobalStateReferenced { global_state_ref_input_index } ->
       utils.safe_list_at(reference_inputs, global_state_ref_input_index).output
   }
-  gs_datum_from_output(gs_output, global_state_policy_id)
 }
 
 /// Authenticates a UTxO as the real GlobalState and returns its datum.
@@ -491,7 +600,7 @@ pub fn genesis_global_state(
 }
 
 /// Number of `GlobalStateDatum` fields this version defines and reads.
-pub const gs_field_count = 15
+pub const gs_field_count = 18
 
 /// Decode a GlobalState datum, IGNORING any fields after the first
 /// `gs_field_count`. The strict-decode choke point for the v1 readers.
@@ -507,7 +616,7 @@ pub const gs_field_count = 15
 ///
 /// Nothing is lost by ignoring the tail: the datum is authenticated by the
 /// NFT and only ever written by genesis (strictly sanitised) and by GlobalState
-/// branches. The 15 known fields are still decoded strictly — a wrong type or
+/// branches. The 18 known fields are still decoded strictly — a wrong type or
 /// a short datum traps, and the constructor must be 0.
 pub fn decode_global_state(raw: Data) -> GlobalStateDatum {
   let constr = builtin.un_constr_data(raw)
@@ -569,6 +678,62 @@ pub fn gs_core_from_ref_input(
 ) -> GlobalStateCore {
   gs_core_from_output(
     utils.safe_list_at(reference_inputs, ref_index).output,
+    global_state_policy_id,
+  )
+}
+
+/// The GlobalState fields the two-step transfer approval reads: the frozen
+/// core and the three gate fields of the v1 tail. FOR THE REPLACEABLE READERS
+/// ONLY (the GlobalState logic's `DelegateApproval`, the approval logic), like
+/// `gs_datum_from_location`.
+pub type ApprovalGateView {
+  core: GlobalStateCore,
+  approval_required: Bool,
+  approval_threshold: Int,
+  approval_logic_hash: ByteArray,
+}
+
+/// Authenticates the UTxO by the GlobalState NFT and decodes only what the
+/// approval gate needs, instead of the whole v1 datum (whose trusted-entity
+/// list alone may hold 64 entries). Strict where it reads: the core as
+/// `decode_global_state_core`, the switch by a typed `expect` (never
+/// `utils.data_to_bool`, which would read a malformed flag as False).
+pub fn approval_view_from_output(
+  gs_output: Output,
+  global_state_policy_id: ByteArray,
+) -> ApprovalGateView {
+  expect
+    quantity_of(
+      gs_output.value,
+      global_state_policy_id,
+      constants.global_state_asset_name,
+    ) == 1
+  expect InlineDatum(gs_raw) = gs_output.datum
+  let core = decode_global_state_core(gs_raw)
+  expect [required,
+        threshold,
+        logic_hash, ..] = list.drop(
+    builtin.unconstr_fields(gs_raw),
+    idx_approval_required,
+  )
+  expect approval_required: Bool = required
+  ApprovalGateView {
+    core,
+    approval_required,
+    approval_threshold: builtin.un_i_data(threshold),
+    approval_logic_hash: builtin.un_b_data(logic_hash),
+  }
+}
+
+/// `approval_view_from_output` for the GlobalState at `location`.
+pub fn approval_view_from_location(
+  inputs: List<Input>,
+  reference_inputs: List<Input>,
+  location: GlobalStateLocation,
+  global_state_policy_id: ByteArray,
+) -> ApprovalGateView {
+  approval_view_from_output(
+    gs_output_at(inputs, reference_inputs, location),
     global_state_policy_id,
   )
 }
@@ -707,6 +872,28 @@ pub type GlobalStateSpendAction {
   /// tooling must pin the target to a reviewed build. Appended last: the
   /// constructor index is the redeemer encoding.
   RotateGlobalStateScript { new_global_state_script_hash: ByteArray }
+  // ── Two-step transfer approval. Appended after constructor 14, which
+  // invariant 10 pins: the constructor index is the redeemer encoding. ──────
+  /// Switch transfer approval on or off (`approval_required`). Admin-signed;
+  /// the flag must flip. Open after `LockUpgrades` — switching approval off is
+  /// the way out if the installed approval logic cannot run.
+  SetApprovalRequired { enabled: Bool }
+  /// Set `approval_threshold` (>= 0). Admin-signed; open after `LockUpgrades`.
+  SetApprovalThreshold { threshold: Int }
+  /// Point `approval_logic_hash` at a new approval logic. Admin-signed and
+  /// closed by `LockUpgrades`, like `RotateMintingScript`; the outgoing logic's
+  /// consent is not required. The new hash is 28 bytes and differs from the
+  /// GlobalState logic, the admin, the minting authority and the approval
+  /// proxy. Register its stake credential, and run the settlement smoke tests,
+  /// before relying on it — see `approval_logic_hash`.
+  RotateApprovalLogic { new_approval_logic_hash: ByteArray }
+  /// NOT a spend action: the GlobalState logic's withdraw-0 under this action
+  /// is how the permanent `approval_proxy` reaches the current approval logic.
+  /// GlobalState must be a REFERENCE input here and spent nowhere in the
+  /// transaction; the logic then requires `approval_logic_hash`'s withdraw-0.
+  /// Every successor GlobalState logic must keep this branch (invariant 12),
+  /// or no pending transfer can settle.
+  DelegateApproval { global_state_ref_input_index: Int }
 }
 
 /// The redeemer of every `global_state_logic` withdraw-0. A rotation passes
@@ -745,6 +932,9 @@ fn test_gs_input_with(transfers_paused: Bool, deactivated: Bool) -> Input {
     network_id: 1,
     minting_script_credential_hash: #"",
     upgrades_locked: False,
+    approval_required: False,
+    approval_threshold: 0,
+    approval_logic_hash: #"a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7",
   }
   Input {
     output_reference: OutputReference {
@@ -800,6 +990,9 @@ fn test_layout_datum() -> GlobalStateDatum {
     network_id: 9,
     minting_script_credential_hash: #"a8",
     upgrades_locked: True,
+    approval_required: False,
+    approval_threshold: 0,
+    approval_logic_hash: #"a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7",
   }
 }
 
@@ -912,7 +1105,7 @@ test decode_global_state_reads_the_exact_layout() {
   decode_global_state(raw) == test_layout_datum()
 }
 
-// A future version's appended fields are ignored, and the 15 known ones read
+// A future version's appended fields are ignored, and the 18 known ones read
 // exactly as before — what keeps the v1 replaceable readers working when a
 // later logic only appends.
 test decode_global_state_ignores_trailing_fields() {
@@ -974,6 +1167,45 @@ fn core_with_field(idx: Int, value: Data) -> Data {
     0,
     utils.replace_data_field(builtin.unconstr_fields(raw), idx, value),
   )
+}
+
+// ── approval_view_from_output: core + the three gate fields ──────────────────
+
+fn gs_utxo(raw: Data) -> Output {
+  Output {
+    address: Address(Script(#"9a"), None),
+    value: from_asset(#"f0", constants.global_state_asset_name, 1),
+    datum: InlineDatum(raw),
+    reference_script: None,
+  }
+}
+
+test approval_view_reads_the_gate_fields() {
+  let d = test_layout_datum()
+  let raw: Data = d
+  approval_view_from_output(gs_utxo(raw), #"f0") == ApprovalGateView {
+    core: test_layout_core(),
+    approval_required: d.approval_required,
+    approval_threshold: d.approval_threshold,
+    approval_logic_hash: d.approval_logic_hash,
+  }
+}
+
+test approval_view_rejects_a_malformed_switch() fail {
+  // Constructor 2 is no Bool. `utils.data_to_bool` would read it as False
+  // (switch off, gate open) and this test would return True; the typed
+  // `expect` traps.
+  let view = approval_view_from_output(
+    gs_utxo(core_with_field(idx_approval_required, builtin.constr_data(2, []))),
+    #"f0",
+  )
+  !view.approval_required
+}
+
+test approval_view_needs_the_nft() fail {
+  let raw: Data = test_layout_datum()
+  let view = approval_view_from_output(gs_utxo(raw), #"f1")
+  view.approval_required || !view.approval_required
 }
 
 // The core is the front of the v1 layout: positions match the record.
@@ -1081,4 +1313,33 @@ test gs_core_from_output_rejects_a_datum_that_is_not_inline() fail {
     ),
     #"aa",
   ) == test_layout_core()
+}
+
+// The approval tail fields sit at 15–17, after every v1 field.
+test gs_approval_fields_sit_at_15_to_17() {
+  let datum = GlobalStateDatum {
+    ..test_layout_datum(),
+    approval_required: True,
+    approval_threshold: 77,
+    approval_logic_hash: #"51515151515151515151515151515151515151515151515151515151",
+  }
+  let raw: Data = datum
+  let fields = builtin.unconstr_fields(raw)
+  let threshold_5: Data = GlobalStateDatum { ..datum, approval_threshold: 5 }
+  let not_required: Data = GlobalStateDatum {
+    ..datum,
+    approval_required: False,
+  }
+  let other_logic: Data = GlobalStateDatum {
+    ..datum,
+    approval_logic_hash: #"52",
+  }
+  and {
+    utils.data_to_bool(utils.safe_list_at(fields, idx_approval_required)),
+    builtin.un_i_data(utils.safe_list_at(fields, idx_approval_threshold)) == 77,
+    get_approval_logic_hash(fields) == datum.approval_logic_hash,
+    set_approval_threshold(fields, 5) == threshold_5,
+    set_approval_required(fields, False) == not_required,
+    set_approval_logic_hash(fields, #"52") == other_logic,
+  }
 }

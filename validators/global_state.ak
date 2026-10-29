@@ -102,6 +102,16 @@ fn sanitise_initial_datum(datum: GlobalStateDatum, self_mint: Value) -> Bool {
     bytearray.length(datum.global_state_script_credential_hash) == 28,
     datum.global_state_script_credential_hash != datum.minting_script_credential_hash,
     datum.global_state_script_credential_hash != datum.admin_credential_hash,
+    // The approval logic (tail) is a delegate credential too, and a FREE one:
+    // anyone can produce its withdrawal with an ADA-only vault UTxO. Never the
+    // GlobalState logic, the admin or the minting authority. (Never the
+    // approval proxy either — that pair this mint cannot see, since the proxy
+    // depends on it; the GlobalState logic checks it at genesis instead.)
+    bytearray.length(datum.approval_logic_hash) == 28,
+    datum.approval_logic_hash != datum.global_state_script_credential_hash,
+    datum.approval_logic_hash != datum.admin_credential_hash,
+    datum.approval_logic_hash != datum.minting_script_credential_hash,
+    datum.approval_threshold >= 0,
     // Born unlocked. Locking is a single admin transaction away, so a
     // deployment that wants immutability from day one loses nothing — but a
     // token that started locked could never be corrected at all.
@@ -267,6 +277,9 @@ fn sanitise_datum(
     network_id,
     minting_script_credential_hash: t_minting_script,
     upgrades_locked: False,
+    approval_required: False,
+    approval_threshold: 0,
+    approval_logic_hash: #"a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7",
   }
 }
 
@@ -743,4 +756,33 @@ test global_state_mint_fails_without_the_global_state_logic_withdrawal() {
 
 test global_state_mint_fails_when_only_another_script_withdraws() {
   !genesis_withdrawing([Pair(Script(t_new_gs_logic), 0)])
+}
+
+// ── Two-step transfer approval: the approval-logic pointer at genesis ───────
+// POSITIVE CONTROL: `sanitise_accepts_valid_config`. The approval logic is a
+// free credential: never the GlobalState logic, the admin or the minting
+// authority, and the threshold is never negative.
+
+test sanitise_rejects_an_approval_logic_doubling_as_a_role() {
+  let base = sanitise_datum(#"", 1)
+  let with = fn(pointer) {
+    sanitise_initial_datum(
+      GlobalStateDatum { ..base, approval_logic_hash: pointer },
+      sanitise_mint(),
+    )
+  }
+  and {
+    !with(base.global_state_script_credential_hash),
+    !with(base.admin_credential_hash),
+    !with(base.minting_script_credential_hash),
+    !with(#"a7a7"),
+  }
+}
+
+test sanitise_rejects_a_negative_approval_threshold() {
+  let base = sanitise_datum(#"", 1)
+  !sanitise_initial_datum(
+    GlobalStateDatum { ..base, approval_threshold: -1 },
+    sanitise_mint(),
+  )
 }

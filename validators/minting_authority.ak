@@ -159,6 +159,19 @@ validator minting_authority_validator(
   /// that registry field 4 must name. Must differ from
   /// `transfer_logic_script_hash`. See that parameter.
   third_party_transfer_logic_script_hash: ByteArray,
+  /// The permanent approval proxy's script hash
+  /// (validators/approval_proxy.ak), the owner of every pending transfer.
+  ///
+  /// A mint never runs the approval logic, so a token-holding output owned
+  /// by the proxy would carry a datum nobody bound — and the base layer's
+  /// paired residual of a partially seized pending transfer would keep its old
+  /// datum while holding less than it states. Refused, together with outputs
+  /// owned by the other FREE credentials (the GlobalState logic and the
+  /// approval logic, whose withdrawals anyone can produce). A pending transfer
+  /// is therefore seized WHOLE: the court-ordered part to its destination, the
+  /// remainder to the request's sender; the sender's Cancel closes the
+  /// token-free residual.
+  approval_proxy_hash: ByteArray,
 ) {
   withdraw(
     redeemer: MintingAuthorityWithdrawRedeemer,
@@ -228,6 +241,7 @@ validator minting_authority_validator(
             power_user_linked_list_policy_id,
             denylist_script_hash,
             power_user_list_script_hash,
+            approval_proxy_hash,
             self,
           ),
         }
@@ -298,7 +312,13 @@ validator minting_authority_validator(
           // wants no CIP-68 token simply does not mint one, and this arm is
           // skipped.
           if cip68.value_has_protected(self.mint, issuance_policy_id) {
-            cip68_output_is_pinned(self, issuance_policy_id)?
+            cip68_output_is_pinned(
+              self,
+              issuance_policy_id,
+              approval_proxy_hash,
+              global_state.get_global_state_script_credential_hash(fields),
+              global_state.get_approval_logic_hash(fields),
+            )?
           } else {
             True
           },
@@ -320,6 +340,7 @@ validator minting_authority_validator(
             power_user_linked_list_policy_id,
             denylist_script_hash,
             power_user_list_script_hash,
+            approval_proxy_hash,
             self,
           ),
         }
@@ -589,6 +610,9 @@ fn only_permitted_assets_minted(
 fn cip68_output_is_pinned(
   self: Transaction,
   issuance_policy_id: ByteArray,
+  approval_proxy_hash: ByteArray,
+  global_state_logic_hash: ByteArray,
+  approval_logic_hash: ByteArray,
 ) -> Bool {
   let carriers = list.filter(
     self.outputs,
@@ -597,7 +621,19 @@ fn cip68_output_is_pinned(
   when carriers is {
     [output] -> {
       expect Some(Inline(_owner)) = output.address.stake_credential
-      cip68.output_is_well_formed(output, issuance_policy_id)?
+      and {
+        // Never owned by the vault or another free credential: at the vault
+        // nothing could release it (no `PendingTransfer` datum, not
+        // lovelace-only, and seizure refuses protected tokens); at the others
+        // anyone could take it.
+        !free_owner(
+          output,
+          approval_proxy_hash,
+          global_state_logic_hash,
+          approval_logic_hash,
+        ),
+        cip68.output_is_well_formed(output, issuance_policy_id)?,
+      }
     }
     _ -> False
   }
@@ -747,6 +783,7 @@ fn verify_mint_or_burn(
   power_user_linked_list_policy_id: ByteArray,
   denylist_script_hash: ByteArray,
   power_user_list_script_hash: ByteArray,
+  approval_proxy_hash: ByteArray,
   self: Transaction,
 ) -> Bool {
   // Ledger truth, derived here rather than accepted from a caller so the
@@ -813,6 +850,13 @@ fn verify_mint_or_burn(
     True
   }
 
+  // Read once: `list.any` below would otherwise walk to them per output.
+  let gs_fields = builtin.unconstr_fields(gs_raw)
+  let gs_logic_hash = global_state.get_global_state_script_credential_hash(
+    gs_fields,
+  )
+  let approval_logic_hash = global_state.get_approval_logic_hash(gs_fields)
+
   and {
     //Redeemer contains the amount just for easy reference for eventual other contracts
     (minted_amount == expected_minted_amount)?,
@@ -820,9 +864,7 @@ fn verify_mint_or_burn(
     // GlobalState, so that logic's withdrawal is in this transaction and
     // would sign for the operator. Checked here, at use, rather than when the
     // role is granted, so a later logic rotation cannot reopen it.
-    (power_user_node_key != global_state.get_global_state_script_credential_hash(
-      builtin.unconstr_fields(gs_raw),
-    ))?,
+    (power_user_node_key != gs_logic_hash)?,
     //A power user must have signed the transaction
     must_be_signed_by_credential(self, power_user_node_key)?,
     // A zero-amount mint — e.g. a `RegisterMint` that mints only the CIP-68
@@ -839,6 +881,47 @@ fn verify_mint_or_burn(
     }?,
     //Mint destinations must be vetted (denylist absence + optional KYC)
     destinations_ok?,
+    // Nor an operator anyone can impersonate: the approval logic's and the
+    // approval proxy's withdrawals are free credentials.
+    and {
+      power_user_node_key != approval_logic_hash,
+      power_user_node_key != approval_proxy_hash,
+      // No security token minted to the vault or another free credential —
+      // see `approval_proxy_hash`.
+      !list.any(
+        self.outputs,
+        fn(output) {
+          and {
+            quantity_of(output.value, issuance_policy_id, security_asset_name) > 0,
+            free_owner(
+              output,
+              approval_proxy_hash,
+              gs_logic_hash,
+              approval_logic_hash,
+            ),
+          }
+        },
+      ),
+    }?,
+  }
+}
+
+/// The output is owned (stake credential) by a credential whose withdrawal
+/// anyone can produce: the approval proxy (the vault), the GlobalState logic or
+/// the approval logic.
+fn free_owner(
+  output: Output,
+  approval_proxy_hash: ByteArray,
+  global_state_logic_hash: ByteArray,
+  approval_logic_hash: ByteArray,
+) -> Bool {
+  when output.address.stake_credential is {
+    Some(Inline(owner)) -> or {
+        owner == Script(approval_proxy_hash),
+        owner == Script(global_state_logic_hash),
+        owner == Script(approval_logic_hash),
+      }
+    _ -> False
   }
 }
 
@@ -1015,6 +1098,10 @@ const test_dest_stake_hash: ByteArray =
 const test_denylist_script_hash: ByteArray =
   #"d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0"
 
+// The permanent approval proxy's hash: owner of every pending transfer.
+const test_approval_proxy_hash: ByteArray =
+  #"b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0"
+
 const test_pu_script_hash: ByteArray =
   #"d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1"
 
@@ -1063,6 +1150,9 @@ fn make_gs_input(requires_receiver_kyc: Bool) -> Input {
     // self-authorisation guard, which this validator never checks.
     minting_script_credential_hash: test_authority_hash,
     upgrades_locked: False,
+    approval_required: False,
+    approval_threshold: 0,
+    approval_logic_hash: #"a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7",
   }
   Input {
     output_reference: test_out_ref(0),
@@ -1232,6 +1322,7 @@ fn make_pu_node_ref_input(can_mint: Bool, can_burn: Bool) -> Input {
     can_burn,
     can_pause: False,
     can_force_transfer: False,
+    can_approve: False,
   }
   let element: Element<Data, PowerUser> = Element {
     data: Node { data: pu },
@@ -1503,6 +1594,7 @@ fn run_withdraw(redeemer: MintingAuthorityWithdrawRedeemer, tx: Transaction) {
     test_pu_script_hash,
     pinned_transfer_logic_hash,
     test_third_party_logic_hash,
+    test_approval_proxy_hash,
     redeemer,
     Script(test_authority_hash),
     tx,
@@ -2853,6 +2945,7 @@ test publish_accepts_credential_registration() {
     test_pu_script_hash,
     test_transfer_logic_hash,
     test_third_party_logic_hash,
+    test_approval_proxy_hash,
     builtin.constr_data(0, []),
     RegisterCredential {
       credential: Script(test_authority_hash),
@@ -2881,6 +2974,7 @@ test publish_rejects_credential_deregistration() {
     test_pu_script_hash,
     test_transfer_logic_hash,
     test_third_party_logic_hash,
+    test_approval_proxy_hash,
     builtin.constr_data(0, []),
     UnregisterCredential {
       credential: Script(test_authority_hash),
@@ -2953,6 +3047,7 @@ fn run_withdraw_with_protected_security_name(
     test_pu_script_hash,
     test_transfer_logic_hash,
     test_third_party_logic_hash,
+    test_approval_proxy_hash,
     redeemer,
     Script(test_authority_hash),
     tx,
@@ -3142,6 +3237,7 @@ test an_authority_built_with_one_hash_for_both_scripts_refuses_registration() fa
     test_pu_script_hash,
     test_transfer_logic_hash,
     test_transfer_logic_hash,
+    test_approval_proxy_hash,
     register_structural_redeemer(),
     Script(test_authority_hash),
     Transaction {
@@ -3152,6 +3248,130 @@ test an_authority_built_with_one_hash_for_both_scripts_refuses_registration() fa
           Script(test_transfer_logic_hash),
         ),
       ],
+    },
+  )
+}
+
+// ── Two-step transfer approval: nothing minted to a free credential ──────────
+// POSITIVE CONTROLS: `mint_succeeds_with_clean_destination_no_receiver_kyc` and
+// `register_mint_may_also_mint_the_cip68_reference_nft`. Each negative below
+// differs from its control only in who owns the output, or in GlobalState's
+// approval-logic pointer.
+
+const test_approval_logic: ByteArray =
+  #"a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7"
+
+fn owned_by(output: Output, credential: Credential) -> Output {
+  Output {
+    ..output,
+    address: Address {
+      payment_credential: Script(test_plb_hash),
+      stake_credential: Some(Inline(credential)),
+    },
+  }
+}
+
+fn clean_mint_to(output: Output) -> Bool {
+  let amount = 1_000
+  run_withdraw(
+    MintBurn {
+      global_state_input_index: 0,
+      power_user_node_ref_input_index: 0,
+      minted_amount: amount,
+      destination_actions: [clean_dest_action()],
+    },
+    make_withdraw_tx(
+      amount,
+      True,
+      False,
+      False,
+      make_denylist_root_ref_input(),
+      [output],
+      [test_pu_credential_hash],
+    ),
+  )
+}
+
+test mint_to_a_free_credential_is_rejected() {
+  // The vault (a datum nobody bound), the approval logic and the GlobalState
+  // logic (anyone can produce their withdrawals).
+  let gs_logic = {
+    let gs_input = make_gs_input(False)
+    expect InlineDatum(raw) = gs_input.output.datum
+    expect d: GlobalStateDatum = raw
+    d.global_state_script_credential_hash
+  }
+  and {
+    clean_mint_to(make_dest_output(1_000)),
+    !clean_mint_to(
+      owned_by(make_dest_output(1_000), Script(test_approval_proxy_hash)),
+    ),
+    !clean_mint_to(
+      owned_by(make_dest_output(1_000), Script(test_approval_logic)),
+    ),
+    !clean_mint_to(owned_by(make_dest_output(1_000), Script(gs_logic))),
+  }
+}
+
+test register_mint_rejects_a_reference_nft_owned_by_the_vault() {
+  // Nothing could release it there: no `PendingTransfer` datum, not
+  // lovelace-only, and seizure refuses protected tokens.
+  !run_withdraw(
+    register_mint_redeemer(1_000),
+    register_mint_with_reference_tx(
+      1,
+      owned_by(make_reference_nft_output(), Script(test_approval_proxy_hash)),
+    ),
+  )
+}
+
+test mint_refuses_an_operator_that_is_the_approval_logic() {
+  // The minter's key named as GlobalState's approval logic: that withdrawal
+  // is free, so it would sign for the operator.
+  let amount = 1_000
+  let tx = make_withdraw_tx(
+    amount,
+    True,
+    False,
+    False,
+    make_denylist_root_ref_input(),
+    [make_dest_output(amount)],
+    [test_pu_credential_hash],
+  )
+  !run_withdraw(
+    MintBurn {
+      global_state_input_index: 0,
+      power_user_node_ref_input_index: 0,
+      minted_amount: amount,
+      destination_actions: [clean_dest_action()],
+    },
+    Transaction {
+      ..tx,
+      inputs: list.map(
+        tx.inputs,
+        fn(input) {
+          when input.output.datum is {
+            InlineDatum(raw) ->
+              if raw is d: GlobalStateDatum {
+                Input {
+                  ..input,
+                  output: Output {
+                    ..input.output,
+                    datum: InlineDatum(
+                      GlobalStateDatum {
+                        ..d,
+                        approval_logic_hash: test_pu_credential_hash,
+                      },
+                    ),
+                  },
+                }
+              } else {
+                input
+              }
+            _ -> input
+          }
+        },
+      ),
     },
   )
 }

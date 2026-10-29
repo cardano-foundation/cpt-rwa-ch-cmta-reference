@@ -7,6 +7,7 @@ use aiken/collection/dict
 use aiken/collection/list
 use aiken/interval.{Interval, IntervalBound, NegativeInfinity, PositiveInfinity}
 use aiken/primitive/bytearray
+use aiken_design_patterns/linked_list.{Element, Node}
 use cardano/address.{Address, Script}
 use cardano/assets.{Value, from_asset, from_lovelace, merge, zero}
 use cardano/transaction.{
@@ -14,6 +15,7 @@ use cardano/transaction.{
 }
 use constants
 use types/global_state.{GlobalStateDatum, TrustedEntityMetadata}
+use types/power_users.{PowerUser}
 
 // ── One GlobalState UTxO at the proxy, and a transaction spending it ────────
 
@@ -60,6 +62,9 @@ pub fn t_datum(transfers_paused: Bool, deactivated: Bool) -> GlobalStateDatum {
     network_id: 1,
     minting_script_credential_hash: t_minting_script,
     upgrades_locked: False,
+    approval_required: False,
+    approval_threshold: 0,
+    approval_logic_hash: #"a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7",
   }
 }
 
@@ -192,8 +197,57 @@ pub fn rotated(datum: GlobalStateDatum, logic: ByteArray) -> GlobalStateDatum {
 /// deployment value (8 KiB).
 pub const t_max_datum_bytes: Int = 8192
 
+/// The permanent approval proxy's hash (validators/approval_proxy.ak).
+pub const t_approval_proxy_hash: ByteArray =
+  #"b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0"
+
 /// The CBOR-serialised size of a GlobalState datum, as the cap measures it.
 pub fn t_datum_size(datum: GlobalStateDatum) -> Int {
   let data: Data = datum
   bytearray.length(builtin.serialise_data(data))
+}
+
+// ── An operator's power-user list entry (approval operator tests) ───────────
+
+/// The power-user list's spend script.
+pub const t_pu_script: ByteArray =
+  #"d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1"
+
+/// The approving operator's key hash.
+pub const t_operator: ByteArray =
+  #"0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e"
+
+/// `t_operator`'s entry in the power-user list (policy `t_pu_ll_policy`), at
+/// the list's script address, with only `can_approve` as given.
+pub fn t_operator_entry(can_approve: Bool) -> Output {
+  let element: Element<Data, PowerUser> = Element {
+    data: Node {
+      data: PowerUser {
+        credential_hash: t_operator,
+        is_admin: False,
+        can_mint: False,
+        can_burn: False,
+        can_pause: False,
+        can_force_transfer: False,
+        can_approve,
+      },
+    },
+    link: None,
+  }
+  Output {
+    address: Address {
+      payment_credential: Script(t_pu_script),
+      stake_credential: None,
+    },
+    value: merge(
+      from_lovelace(2_000_000),
+      from_asset(
+        t_pu_ll_policy,
+        bytearray.concat(constants.linked_list_node_key_prefix, t_operator),
+        1,
+      ),
+    ),
+    datum: InlineDatum(element),
+    reference_script: None,
+  }
 }

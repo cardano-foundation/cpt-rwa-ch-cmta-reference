@@ -53,10 +53,12 @@ fn power_user_from_refs(
     power_user_list_script_hash,
   )
   // Never the GlobalState logic named in field 0: its withdrawal would sign
-  // for the operator. Today it cannot appear here — it needs GlobalState
-  // SPENT (or, once, minted at genesis, before any GlobalState exists to
-  // read), and this reads GlobalState as a reference input, which the ledger
-  // keeps disjoint from the inputs — but that is a ledger rule, not ours.
+  // for the operator, and since `DelegateApproval` anyone can make it appear
+  // with GlobalState merely referenced (an ADA-only vault UTxO and its
+  // Cancel). The approval logic and the approval proxy are equally free
+  // credentials, but this script reads only the frozen core and has no proxy
+  // parameter, so it cannot refuse them: never grant `is_admin` (or any role)
+  // to either — a DEPLOYMENT REQUIREMENT, see `approval_logic_hash`.
   expect power_user_credential_hash != gs.global_state_script_credential_hash
   (power_user_credential_hash, power_user_data)
 }
@@ -542,6 +544,9 @@ fn t_gs_datum(deactivated: Bool) -> GlobalStateDatum {
     network_id: 1,
     minting_script_credential_hash: t_admin,
     upgrades_locked: False,
+    approval_required: False,
+    approval_threshold: 0,
+    approval_logic_hash: #"a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7",
   }
 }
 
@@ -571,6 +576,7 @@ fn t_power_user(is_admin: Bool) -> PowerUser {
     can_burn: False,
     can_pause: False,
     can_force_transfer: False,
+    can_approve: False,
   }
 }
 

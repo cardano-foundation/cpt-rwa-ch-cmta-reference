@@ -425,6 +425,7 @@ fn t_power_user(
     can_burn,
     can_pause,
     can_force_transfer,
+    can_approve: False,
   }
 }
 
@@ -530,6 +531,7 @@ fn t_pu_new_node_output_with_credential(
     can_burn: False,
     can_pause: False,
     can_force_transfer: False,
+    can_approve: False,
   }
   let element: Element<Data, PowerUser> = Element {
     data: Node { data: pu },
@@ -570,6 +572,9 @@ fn t_gs_datum(deactivated: Bool) -> GlobalStateDatum {
     network_id: 1,
     minting_script_credential_hash: t_admin,
     upgrades_locked: False,
+    approval_required: False,
+    approval_threshold: 0,
+    approval_logic_hash: #"a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7",
   }
 }
 

@@ -8,6 +8,8 @@
 /// is gated by the single GS admin credential. Sanctions (denylist) add/remove
 /// is delegated to any power user holding `is_admin` + their signature, so a
 /// compliance role can be granted without handing over the master admin key.
+/// Approving or rejecting pending transfers is delegated the same way to any
+/// power user holding `can_approve`, signing with its KEY.
 pub type PowerUser {
   credential_hash: ByteArray,
   //Holders can add/remove entries from the denylist (sanction wallets),
@@ -21,6 +23,10 @@ pub type PowerUser {
   can_pause: Bool,
   //Force-transferers can move tokens between KYC'd non-denylisted addresses
   can_force_transfer: Bool,
+  //Approvers can Approve or Reject pending transfers (validators/approval_logic.ak).
+  //KEY signature only: unlike every other role, a script withdrawal never
+  //counts, so no script that runs in a settlement can approve for anyone.
+  can_approve: Bool,
 }
 
 pub type SpendRedeemer {

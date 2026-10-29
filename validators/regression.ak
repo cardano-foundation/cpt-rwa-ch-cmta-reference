@@ -96,6 +96,10 @@ const pu_policy: ByteArray =
 const proxy_hash: ByteArray =
   #"f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1"
 
+// The permanent approval proxy's hash: owner of every pending transfer.
+const approval_proxy_hash: ByteArray =
+  #"b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0"
+
 const transfer_hash: ByteArray =
   #"f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2"
 
@@ -246,6 +250,9 @@ fn gs_datum(
     network_id: 1,
     minting_script_credential_hash: authority_hash,
     upgrades_locked: False,
+    approval_required: False,
+    approval_threshold: 0,
+    approval_logic_hash: #"a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7",
   }
 }
 
@@ -438,6 +445,7 @@ fn power_user(
     can_burn,
     can_pause,
     can_force_transfer,
+    can_approve: False,
   }
 }
 
@@ -477,6 +485,7 @@ fn pu_new_node_output(key: ByteArray) -> Output {
     can_burn: False,
     can_pause: False,
     can_force_transfer: False,
+    can_approve: False,
   }
   let element: Element<Data, PowerUser> = Element {
     data: Node { data: pu },
@@ -676,6 +685,7 @@ fn run_transfer(
     gs_policy,
     issuance_policy,
     denylist_script_hash,
+    approval_proxy_hash,
     redeemer,
     Script(transfer_hash),
     tx,
@@ -696,6 +706,7 @@ fn run_authority(
     pu_script_hash,
     transfer_hash,
     third_party_hash,
+    approval_proxy_hash,
     redeemer,
     Script(authority_hash),
     tx,

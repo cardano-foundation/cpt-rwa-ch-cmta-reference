@@ -18,6 +18,7 @@ use cip68
 use compliance
 use constants
 use kyc/verify.{membership_leaf_key, membership_leaf_value}
+use types/approval.{PendingTransfer}
 use types/global_state.{
   GlobalStateDatum, GlobalStateLocation, GlobalStateReferenced, GlobalStateSpent,
   gs_datum_from_location,
@@ -87,6 +88,17 @@ validator third_party_transfer_logic_validator(
   /// signs for. Requiring the node to still live at the list's script address
   /// is what makes revocation stick.
   power_user_list_script_hash: ByteArray,
+  /// The permanent approval proxy's script hash
+  /// (validators/approval_proxy.ak), the owner of every pending transfer.
+  ///
+  /// This path never runs the approval logic, so a token-holding output owned
+  /// by the proxy would carry a datum nobody bound — and the base layer's
+  /// paired residual of a partially seized pending transfer would keep its old
+  /// datum while holding less than it states. Refused, so a pending transfer
+  /// is seized WHOLE: the court-ordered part to its destination, the
+  /// remainder to the request's sender; the sender's Cancel closes the
+  /// token-free residual.
+  approval_proxy_hash: ByteArray,
 ) {
   withdraw(
     redeemer: ThirdPartyTransferLogicScriptWithdrawRedeemer,
@@ -113,6 +125,7 @@ validator third_party_transfer_logic_validator(
     // deduplicated during the fold (see `transfer_logic_script.ak` for why
     // this replaced `list.unique` and why the first-occurrence order is
     // kept).
+    let vault = Script(approval_proxy_hash)
     let outputs_user_credentials = list.reverse(
       list.foldl(
         self.outputs,
@@ -126,6 +139,8 @@ validator third_party_transfer_logic_validator(
             // Carry the full `Credential`; the constructor is part of the
             // holder's identity.
             expect Some(Inline(stake_cred)) = output.address.stake_credential
+            // Never to the vault: see `approval_proxy_hash`.
+            expect stake_cred != vault
             if list.has(result, stake_cred) {
               result
             } else {
@@ -270,6 +285,10 @@ const p_third_party_hash: ByteArray =
 const p_denylist_script_hash: ByteArray =
   #"d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0"
 
+// The permanent approval proxy's hash: owner of every pending transfer.
+const p_approval_proxy_hash: ByteArray =
+  #"b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0"
+
 const p_pu_script_hash: ByteArray =
   #"d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1"
 
@@ -321,6 +340,9 @@ fn p_gs_ref_input(paused: Bool, deactivated: Bool, req_receiver: Bool) -> Input 
     network_id: 1,
     minting_script_credential_hash: #"",
     upgrades_locked: False,
+    approval_required: False,
+    approval_threshold: 0,
+    approval_logic_hash: #"a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7",
   }
   Input {
     output_reference: p_out_ref(1),
@@ -424,6 +446,7 @@ fn p_pu_node_ref_input(can_force_transfer: Bool) -> Input {
     can_burn: False,
     can_pause: False,
     can_force_transfer,
+    can_approve: False,
   }
   let element: Element<Data, PowerUser> = Element {
     data: Node { data: pu },
@@ -569,6 +592,7 @@ fn run_third_party(
     p_issuance_policy,
     p_denylist_script_hash,
     p_pu_script_hash,
+    p_approval_proxy_hash,
     redeemer,
     Script(p_third_party_hash),
     tx,
@@ -834,6 +858,9 @@ fn p_gs_ref_input_with_pu_policy(pu_policy_field: ByteArray) -> Input {
     network_id: 1,
     minting_script_credential_hash: #"",
     upgrades_locked: False,
+    approval_required: False,
+    approval_threshold: 0,
+    approval_logic_hash: #"a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7",
   }
   Input {
     output_reference: p_out_ref(1),
@@ -922,6 +949,9 @@ fn p_gs_ref_input_with_member_root(
     network_id: 1,
     minting_script_credential_hash: #"",
     upgrades_locked: False,
+    approval_required: False,
+    approval_threshold: 0,
+    approval_logic_hash: #"a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7",
   }
   Input {
     output_reference: p_out_ref(1),
@@ -1215,5 +1245,85 @@ test seizure_rejects_an_operator_that_is_the_global_state_logic() {
       withdrawals: [Pair(Script(p_pu_cred), 0), ..tx.withdrawals],
       extra_signatories: [],
     },
+  )
+}
+
+// ── Two-step transfer approval: seizure and the vault ────────────────────────
+// POSITIVE CONTROL: `force_transfer_succeeds_when_clean`. A pending transfer is
+// a PLB UTxO owned by `Script(p_approval_proxy_hash)` with a `PendingTransfer`
+// datum.
+
+fn p_owned_by(credential: Credential, amount: Int) -> Output {
+  Output {
+    ..p_token_utxo(p_dest_stake, amount),
+    address: Address {
+      payment_credential: Script(p_plb_hash),
+      stake_credential: Some(Inline(credential)),
+    },
+  }
+}
+
+fn p_vault_utxo(amount: Int) -> Output {
+  Output {
+    ..p_owned_by(Script(p_approval_proxy_hash), amount),
+    datum: InlineDatum(
+      PendingTransfer {
+        sender: VerificationKey(p_source_stake),
+        recipient: VerificationKey(p_dest_stake),
+        amount,
+      },
+    ),
+  }
+}
+
+fn p_seize_to(outputs: List<Output>, inputs: List<Input>) -> Bool {
+  run_third_party(
+    ThirdPartyTransferLogicScriptWithdrawRedeemer {
+      ..p_redeemer(),
+      destination_actions: [p_dest_action(), p_dest_action()],
+    },
+    Transaction {
+      ..p_tx(False, False, False, True, inputs, [p_pu_cred]),
+      outputs,
+    },
+  )
+}
+
+test seizure_into_the_approval_vault_is_rejected() fail {
+  // A fresh seizure destination at the vault would carry an unbound datum.
+  p_seize_to([p_vault_utxo(1_000)], [p_seized_input()])
+}
+
+test partial_seizure_of_a_pending_transfer_is_rejected() fail {
+  // The base layer's paired residual would stay at the vault with its old
+  // datum while holding less than `amount`. One action per destination, so
+  // the vault guard is the only reason it fails.
+  let vault_input = Input {
+    output_reference: p_out_ref(12),
+    output: p_vault_utxo(1_000),
+  }
+  p_seize_to(
+    [
+      Output { ..p_vault_utxo(600), datum: vault_input.output.datum },
+      p_token_utxo(p_dest_stake, 400),
+    ],
+    [vault_input],
+  )
+}
+
+test full_seizure_of_a_pending_transfer_succeeds() {
+  // Drained whole: the court-ordered part to its destination, the remainder
+  // to the request's sender; the residual at the vault holds no token.
+  let vault_input = Input {
+    output_reference: p_out_ref(12),
+    output: p_vault_utxo(1_000),
+  }
+  p_seize_to(
+    [
+      Output { ..vault_input.output, value: from_lovelace(2_000_000) },
+      p_token_utxo(p_dest_stake, 400),
+      p_token_utxo(p_source_stake, 600),
+    ],
+    [vault_input],
   )
 }

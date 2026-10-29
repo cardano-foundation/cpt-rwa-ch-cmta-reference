@@ -100,12 +100,14 @@ in this repository.
 | [`validators/global_state.ak`](validators/global_state.ak) | Mints the one-shot GlobalState NFT at genesis, with a sanitised initial datum, into the permanent spend proxy. |
 | [`validators/global_state_proxy.ak`](validators/global_state_proxy.ak) | Permanent, unparameterised home of the GlobalState NFT. Reads only datum field 0 and requires that script's withdraw-0 in the same transaction. |
 | [`validators/global_state_logic.ak`](validators/global_state_logic.ak) | Replaceable GlobalState logic (the withdraw-0 script named by datum field 0) that controls the continuing state UTxO: remaining mintable supply, pause, KYC settings, trusted issuers, admin rotation, upgrades, logic rotation and deactivation. Its tests are in `global_state_logic_tests.ak`. |
-| [`validators/power_users.ak`](validators/power_users.ak) | Maintains the operator linked list. The GlobalState admin grants or changes the five independent role flags. |
+| [`validators/power_users.ak`](validators/power_users.ak) | Maintains the operator linked list. The GlobalState admin grants or changes the six independent role flags. |
 | [`validators/denylist.ak`](validators/denylist.ak) | Maintains the sanctions linked list. An `is_admin` power user can add or remove an entry; presence means sanctioned. |
 | [`validators/minting_logic_script.ak`](validators/minting_logic_script.ak) | Permanent CIP-113 minting proxy. It reads GlobalState and requires the currently named minting authority to run. Its hash, applied to the base layer's issuance template, yields this token's issuance policy ID. |
 | [`validators/minting_authority.ak`](validators/minting_authority.ak) | Replaceable authority for registration, mint, burn and registry-node upgrades. It checks supply-changing transactions against roles, destinations, the denylist and KYC. |
 | [`validators/transfer_logic_script.ak`](validators/transfer_logic_script.ak) | Checks ordinary transfers for pause, deactivation, sender and receiver denylist absence, and enabled KYC gates. |
 | [`validators/third_party_transfer_logic_script.ak`](validators/third_party_transfer_logic_script.ak) | Checks forced transfers: `can_force_transfer` authority and vetted destinations, while allowing a sanctioned or expired source and remaining available during a pause. |
+| [`validators/approval_proxy.ak`](validators/approval_proxy.ak) | Permanent owner of every pending transfer of the [two-step transfer approval](#two-step-transfer-approval). Reads GlobalState field 0 from a reference input and requires that logic's withdraw-0 (`DelegateApproval`). |
+| [`validators/approval_logic.ak`](validators/approval_logic.ak) | Replaceable approval rules named by GlobalState's `approval_logic_hash`: enforces the threshold, binds every new pending transfer and decides every settlement (the GlobalState admin or a `can_approve` operator approves, sender Cancels). |
 | [`lib/types/`](lib/types/) | On-chain datum and redeemer schemas consumed by transaction builders, including GlobalState, operator roles and KYC proofs. |
 | [`lib/kyc/verify.ak`](lib/kyc/verify.ak), [`lib/denylist/absence.ak`](lib/denylist/absence.ak), [`lib/compliance.ak`](lib/compliance.ak) | Verify attestations or membership proofs, prove denylist absence using a covering node, and apply those checks to each party. |
 | [`lib/cip68.ak`](lib/cip68.ak), [`lib/constants.ak`](lib/constants.ak), [`lib/utils.ak`](lib/utils.ak) | Enforce metadata-token shape and provide shared protocol constants and transaction helpers. |
@@ -123,7 +125,8 @@ transfer, a supply cap, mint and burn, role-split operators, and an irreversible
 switch.
 
 Optional CMTA modules — snapshots, distributions, debt terms, delegated approval — are **not**
-implemented. EVM-specific machinery (the allowance mechanic, gasless relaying, cross-chain
+implemented. An issuer-side **two-step transfer approval** above a configurable threshold is
+implemented; see [Two-step transfer approval](#two-step-transfer-approval). EVM-specific machinery (the allowance mechanic, gasless relaying, cross-chain
 messaging, interface conformance) does not apply on eUTxO.
 
 One item is a deliberate deployment responsibility rather than a contract feature: `security_info`
@@ -188,13 +191,20 @@ referenced by compact identifiers or hashes.
 * **Power user** — a node in the power-users linked list, carrying independently grantable flags
   (a credential equal to GlobalState datum field 0, the GlobalState logic hash, is refused
   wherever the role is used — that logic's withdrawal is in every GlobalState transaction and
-  would otherwise sign for it):
+  would otherwise sign for it; `can_approve` needs no such check, since only a key signature
+  counts for it):
   * `is_admin` — add and remove denylist entries. Deliberately split from the master admin key, so a
     compliance function can be delegated without handing over control of the protocol.
   * `can_mint` — mint new tokens, up to the remaining supply cap
   * `can_burn` — burn tokens, restoring headroom under the cap
   * `can_pause` — pause and unpause all standard transfers (each write must flip the flag)
   * `can_force_transfer` — seize tokens, moving them to a vetted address
+  * `can_approve` — approve or reject pending transfers. **Key signature only**: unlike every other
+    role, a script's withdrawal never counts, so granting it to a script hash grants nothing
+* **Approver** — the GlobalState **admin**, or an operator holding `can_approve`. With [two-step
+  transfer approval](#two-step-transfer-approval) on, either approves or rejects pending transfers;
+  only the admin sweeps stray vault UTxOs. The approver's signature is the sanctions screen for a
+  release, so protect `can_approve` keys like the admin key (hardware wallet).
 * **Trusted entity** — an off-chain KYC attestor whose Ed25519 verification key is listed in the
   GlobalState datum. It signs the KYC proofs that transfers present. Not an on-chain role: it never
   submits transactions, it only signs attestations.
@@ -211,6 +221,9 @@ referenced by compact identifiers or hashes.
 * A transfer must clear the pause gate, then per sender and per receiver: denylist absence, plus a
   valid KYC proof whenever `requires_sender_kyc` / `requires_receiver_kyc` is set. The two are
   toggled independently.
+* With [two-step transfer approval](#two-step-transfer-approval) switched on, a transfer above the
+  configured threshold must first be parked at the vault and is delivered only by a second
+  transaction signed by the admin or a `can_approve` operator.
 * Forced transfers move tokens to a vetted destination. They intentionally remain available while
   transfers are paused, so enforcement is not blocked by a pause.
 * **The pause gate covers transfers only.** Minting and burning stay available during a pause, for
@@ -308,7 +321,11 @@ The GlobalState admin has three distinct upgrade paths, plus control over the su
   logic — all before `LockUpgrades`. The invariants every replacement logic must keep are listed in
   `validators/global_state_logic.ak`.
 
-`LockUpgrades` is an admin-signed, one-way GlobalState action that closes **all four** for later
+`RotateApprovalLogic { new_approval_logic_hash }` replaces the approval rules of the
+[two-step transfer approval](#two-step-transfer-approval); it is closed by `LockUpgrades` like the
+paths above. `SetApprovalRequired` and `SetApprovalThreshold` stay open after the lock.
+
+`LockUpgrades` is an admin-signed, one-way GlobalState action that closes **all five** for later
 transactions — after it, `mintable_amount` moves only through mint and burn and the GlobalState
 logic can no longer be replaced. It does not deactivate transfers, minting or burning. If a registry upgrade is bundled
 with the lock in one transaction, the upgrade reads the pre-lock GlobalState input and can still
@@ -321,6 +338,165 @@ without that role's authorised signature is rejected. A permissive script creden
 or minting authority can silently weaken the checks. See the
 [integration guide](documents/integration-guide.md#upgrades-and-operator-checks) for an operator
 checklist.
+
+## Two-step transfer approval
+
+An issuer can require that a holder's transfer is **approved on-chain before it reaches the
+recipient**. Everything about it is configured in GlobalState, and its rules are replaceable without
+moving a single pending transfer.
+
+**The two steps.**
+
+1. **Request** — the holder sends the tokens to the **vault**: the programmable-base address owned
+   by the permanent [`approval_proxy`](validators/approval_proxy.ak)
+   (`PLB + Inline(Script(approval_proxy))`), with an inline [`PendingTransfer`](lib/types/approval.ak)
+   datum `{ sender, recipient, amount }`. The tokens never leave the programmable base: the proxy is
+   simply another owner, which the CIP-113 base layer authorises by its withdraw-0.
+2. **Decision** — per pending transfer:
+   * **Approve** (GlobalState admin or a `can_approve` operator) — every token, and at least the
+     lovelace, go to `recipient`;
+   * **Reject** (GlobalState admin or a `can_approve` operator) — back to `sender`;
+   * **Cancel** (sender, at any time, without the admin and whatever the switch says) — back to
+     `sender`. A Cancel that returns tokens runs the transfer logic, so it waits out a pause, needs
+     the sender to pass the denylist (and receiver KYC, if required) as the payee, and stops at
+     deactivation.
+
+The paid-out output carries no datum and sits at the programmable base. Several decisions can share
+one transaction; each pending transfer names its own output, at strictly increasing indices. "At
+least the lovelace" lets the settler top up if the minimum-ADA requirement has risen since the
+request.
+
+**What it is configured by** — three GlobalState tail fields, each changed by an admin-signed
+action:
+
+| Field | Action | After `LockUpgrades` |
+|---|---|---|
+| `approval_required` — the switch | `SetApprovalRequired` (must flip) | open — switching off is the way out if the installed approval logic cannot run; it releases nothing pending |
+| `approval_threshold` — largest net movement without approval, base units; `0` = all | `SetApprovalThreshold` (`>= 0`) | open |
+| `approval_logic_hash` — the replaceable rules | `RotateApprovalLogic` | **closed** |
+
+**What needs approval.** With the switch on, a transaction that spends a holder's tokens may move at
+most `approval_threshold` of them, **net**, to other credentials. Per credential, the gain is what
+outputs give it minus what its own inputs held; the movement is the sum of the positive gains.
+Change back to the sender nets to zero, and a recipient that adds an input of its own gains just as
+much. Sending to the vault is the approval route and is not counted. **With the switch off,
+transfers behave as before and no security token can be sent to the vault** (pending transfers created while
+it was on still settle).
+
+**Who decides.** [`approval_logic`](validators/approval_logic.ak) holds **every** approval rule; the
+transfer logic only skips the vault as a party, refuses vault outputs while the switch is off, and
+— while it is on — requires the withdraw-0 of the approval logic GlobalState names in **every**
+transfer. The approval logic also runs in every settlement, through this chain:
+
+```
+vault UTxO spent → approval_proxy (permanent) → GlobalState logic, action DelegateApproval
+                 → approval_logic named by approval_logic_hash
+```
+
+On every run it reads GlobalState (admin, switch, threshold), enforces the **threshold**, refuses
+**mixing** (a holder's token input never shares a transaction with a vault input), **binds** every new
+pending transfer (sender = the transaction's only holder, `amount` = the security quantity held,
+nothing else beside it but ADA) and **settles** every pending transfer spent — Approve and Reject
+need the GlobalState admin's signature or a `can_approve` operator's KEY signature (its power-user
+entry, still in the list, named by the redeemer), Close the admin's, Cancel only the sender's. It
+runs only while it is the installed logic. To change the rules, compile a new instance and
+`RotateApprovalLogic`; to change the approvers, `RotateAdmin` or grant/revoke `can_approve` in the
+power-user list (a revoked operator's next approval fails at once). Pending transfers follow,
+because the proxy that owns them delegates to whatever GlobalState names. The transfer logic and
+the approval logic both recognise a pending transfer by its owner alone (stake credential
+`Script(approval_proxy)`); the CIP-113 base layer keeps every token at the programmable base.
+
+**Compliance.** The vault is no party: the transfer logic never KYC- or denylist-checks it. At the
+request it vets the holder as the sender; the recipient is vetted only when it is paid, at
+settlement. **The original sender is not re-vetted at settlement** — the signature of the admin or
+of a `can_approve` operator is the sanctions screen for a release (owner decision, 2026-10-27; the
+operator role 2026-10-28): screen the sender before signing an Approve. Pause and deactivation
+apply to both steps.
+
+**Why GlobalState is never spent in a settlement.** The proxy requires GlobalState as a reference
+input and refuses any transaction in which an input holds the GlobalState NFT. In a transaction that
+spends GlobalState — `MintSecurity` above all — the GlobalState logic's withdrawal is present under a
+spend redeemer, and the approval would be skipped. The consequence: a settlement can never share a
+transaction with any action that spends GlobalState — a mint, a burn or a GlobalState admin action.
+(Power-user and denylist changes read GlobalState only and are unaffected.)
+
+**Free credentials.** Anyone can make the withdrawals of `approval_logic`, `approval_proxy` and the
+GlobalState logic appear in a transaction (an ADA-only vault UTxO and its Cancel is enough). So none
+of them may ever be the admin, the minting authority, an operator or the approval logic, and nothing
+of this policy should be owned by one:
+
+* every writer of fields 0, 2 and 4 and of `approval_logic_hash` keeps the approval logic and the
+  proxy distinct from the GlobalState logic, the admin and the minting authority wherever it can see
+  the pair (the admin and the minting authority are not checked against each other);
+* `PauseTransfers` and mint/burn refuse an operator equal to any of them; seizure refuses only the
+  GlobalState logic. **The denylist and seizure do not check the approval logic or the proxy**, so
+  never grant `is_admin`, `can_force_transfer` (or any role) to the approval logic's or the proxy's
+  hash;
+* the mint path refuses them as owners of the security token (and of the CIP-68 token at
+  registration). Seizure and mint also refuse
+  the vault itself as a destination: neither runs the approval logic, so their vault outputs would
+  be unbound;
+* **holder transfers and seizure do not check owners** (owner decision 2026-10-27): tokens a holder
+  or an operator sends to the GlobalState logic or the approval logic can be taken by anyone who
+  passes the recipient checks, and a CIP-68 metadata token sent to the vault (whatever the switch
+  says) can never leave it. Both only lose the sender's own tokens; wallets and the operator tooling must
+  refuse these destinations. With receiver KYC on, no attestation exists for them, so such a
+  transfer fails anyway;
+* the transfer logic does not check that `approval_logic_hash` differs from its own hash or the
+  proxy's. The proxy case is refused by every GlobalState writer and by `DelegateApproval`; the
+  transfer-logic case is the deployment requirement below. Seizure checks neither an operator
+  equal to the current or a retired approval logic, nor one equal to the proxy: such an operator
+  could be impersonated by anyone on the seizure path.
+
+**Treat every approval logic ever installed as a free credential.** A retired one does not run (it
+checks that GlobalState names it), but its stake credential can never be deregistered, the checks
+compare against the current one only, and a successor without that check — or a rotation back —
+frees it again. Never send tokens to, or grant a role to, a retired approval-logic hash.
+
+> **Deployment requirement, not enforceable on-chain:** `approval_logic_hash` must name an
+> `approval_logic` compiled with **every** parameter of this deployment (row 11 of the parameter
+> table): the `approval_proxy` hash, the GlobalState policy ID, the power-user list script hash,
+> the issuance policy ID, the security asset name and a `close_payout` you control. Only
+> `close_payout` is checked on-chain; a wrong proxy hash, policy ID or asset name passes every run
+> and switches the gate off. It is the **only** place the threshold is enforced: a logic that skips
+> it switches the threshold off. Never the transfer logic, the third-party logic, the minting proxy
+> or authority, a base-layer delegate, or any script whose withdraw-0 passes without the admin.
+> After every rotation, and before `LockUpgrades`, smoke-test: a settlement **without** the admin
+> is rejected; spending a pending transfer with **no** action is rejected; Approve, Reject and Close
+> **with** the admin and Cancel **with** the sender are accepted; a holder transfer **above** the
+> threshold is rejected and one **within** it accepted; a `can_approve` operator's Approve is
+> accepted with its key signature and rejected with only a withdrawal of its hash. Rotate only to a
+> fresh hash, and record every retired one (see *Free credentials*). On a live deployment, rotate
+> the approval logic **before** the transfer logic: the new transfer logic no longer enforces the
+> threshold itself.
+
+**Limits to plan around:**
+
+* **Splitting.** The threshold applies per transaction. Splitting a large transfer into several
+  below it is not prevented; that needs per-holder state over time and is not implemented.
+* **The register.** While a transfer is pending, the on-chain owner is the proxy; the legal holder is
+  the datum's `sender`. Attribute vault UTxOs that hold the token to their `sender`, and ignore vault
+  UTxOs that hold none (anyone can pay ADA to the vault address).
+* **Seizure of a pending transfer is whole-UTxO only.** Drain it, sending the court-ordered part to
+  its destination and the remainder to the `sender`, in one transaction; the token-free residual is
+  closed by the sender's Cancel. If the sender is sanctioned, the remainder cannot go back to them,
+  so the UTxO is seized whole or not at all — as with any sanctioned holding.
+* **Liveness.** If the sender is denylisted while a request is pending, Reject and Cancel fail (the
+  sender is vetted as the payee); the admin or a `can_approve` operator may still Approve — screen
+  before signing — or an operator may seize. If the recipient's KYC lapses, Approve fails and the
+  admin or a `can_approve` operator Rejects. Deactivation freezes pending
+  transfers like every other holding.
+* **GlobalState-logic successors** must keep `DelegateApproval` (invariant 12 in
+  [`global_state_logic.ak`](validators/global_state_logic.ak)); one without it freezes every pending
+  transfer until rotated back (seizure is the only other exit). Switch approval off and let pending
+  transfers drain before rotating the GlobalState logic.
+* **Clean-up.** A vault UTxO that holds only lovelace and whose datum is not a `PendingTransfer` can
+  be swept by the admin (`Close`) to the approval logic's `close_payout` address.
+* **`PendingTransfer` is frozen in practice**: every approval logic must settle what earlier ones
+  bound. Changing it means draining every pending transfer first. The transfer logic never reads it.
+* **GlobalState tail layout.** The approval logic reads `approval_required`, `approval_threshold` and
+  `approval_logic_hash`; a GlobalState logic that reshapes those fields must rotate it in lockstep.
+* **Cost.** With the switch on, every transfer runs the approval logic as well.
 
 ## Building the scripts
 
@@ -348,10 +524,10 @@ obtain them before applying any parameters:
   minting proxy's hash (row 6) it yields this token's issuance policy ID; see
   [What the derived parameters must equal](#what-the-derived-parameters-must-equal).
 
-**`plb_script_hash`** — the CIP-113 programmable-logic-base (PLB) script hash — is **off-chain
-only**: the address of every programmable-token UTxO. No validator in this repo takes it as a
-compile-time parameter any more; the base layer's own custody guarantees cover mint, ordinary
-transfer and seizure alike (see
+**`plb_script_hash`** — the CIP-113 programmable-logic-base (PLB) script hash — is the address of
+every programmable-token UTxO. Only `approval_logic` takes it as a compile-time parameter, to
+recognise pending transfers by their exact address; the other validators rely on the base layer's
+own custody guarantees for mint, ordinary transfer and seizure (see
 [What is delegated to the CIP-113 base layer](#what-is-delegated-to-the-cip-113-base-layer)).
 
 ### Parameter order
@@ -376,10 +552,12 @@ exact order the blueprint (`plutus.json`) declares them; apply top to bottom.
 | 4 | `denylist.mint` | `global_state_policy_id`, `init_input_out_ref`, `power_user_list_script_hash` | Row 1; a genesis UTxO reserved for this list; the hash of `power_users_validator` (row 3, **spend** — not row 2's policy id). |
 | 5 | `denylist.denylist_validator` (spend) | `denylist_linked_list_policy_id` | The hash of `denylist.mint` (row 4) — this is the **denylist policy ID**. |
 | 6 | `minting_logic_script.minting_logic_validator` | `global_state_policy_id` | Row 1. Its only parameter. |
-| 7 | `global_state_logic.global_state_logic` (withdraw) | `security_asset_name`, `issuance_policy_id`, `global_state_policy_id`, `power_user_list_script_hash`, `max_global_state_datum_bytes` | Operator choice; the **issuance policy ID**, i.e. the security token's policy ID, derived from row 6's hash (see below; **not** row 6's hash itself); row 1; the hash of `power_users_validator` (row 3); the datum-size cap (same value as row 1; a rotated-in logic may choose another). Its hash goes into GlobalState datum **field 0** at genesis. |
-| 8 | `transfer_logic_script.transfer_logic_validator` | `security_asset_name`, `global_state_policy_id`, `expected_issuance_policy_id`, `denylist_script_hash` | Operator choice; row 1; the issuance policy ID (as row 7); the hash of `denylist_validator` (row 5). |
-| 9 | `third_party_transfer_logic_script.third_party_transfer_logic_validator` | `security_asset_name`, `global_state_policy_id`, `expected_issuance_policy_id`, `denylist_script_hash`, `power_user_list_script_hash` | Operator choice; row 1; the issuance policy ID (as row 7); row 5's hash; row 3's hash. (The power-users policy id is read from the GlobalState datum at run time, not compiled in.) |
-| 10 | `minting_authority.minting_authority_validator` | `security_asset_name`, `global_state_policy_id`, `registry_policy_id`, `minting_logic_script_credential_hash`, `expected_issuance_policy_id`, `denylist_script_hash`, `power_user_list_script_hash`, `transfer_logic_script_hash`, `third_party_transfer_logic_script_hash` | Operator choice; row 1; Prerequisites; row 6's hash; the issuance policy ID (as row 7 — it **differs** from row 6's hash, see below); row 5's hash; row 3's hash; row 8's hash; row 9's hash (the scripts registry fields 3 and 4 must name). The power-users policy id is read from the GlobalState datum at run time, not compiled in. |
+| 6a | `approval_proxy.approval_proxy` (withdraw) | `global_state_policy_id` | Row 1. Its hash is the **approval proxy hash**; the vault address is `PLB + Inline(Script(<this hash>))`. |
+| 7 | `global_state_logic.global_state_logic` (withdraw) | `security_asset_name`, `issuance_policy_id`, `global_state_policy_id`, `power_user_list_script_hash`, `max_global_state_datum_bytes`, `approval_proxy_hash` | Operator choice; the **issuance policy ID**, i.e. the security token's policy ID, derived from row 6's hash (see below; **not** row 6's hash itself); row 1; the hash of `power_users_validator` (row 3); the datum-size cap (same value as row 1; a rotated-in logic may choose another); row 6a's hash. Its hash goes into GlobalState datum **field 0** at genesis. |
+| 8 | `transfer_logic_script.transfer_logic_validator` | `security_asset_name`, `global_state_policy_id`, `expected_issuance_policy_id`, `denylist_script_hash`, `approval_proxy_hash` | Operator choice; row 1; the issuance policy ID (as row 7); the hash of `denylist_validator` (row 5); row 6a's hash. |
+| 9 | `third_party_transfer_logic_script.third_party_transfer_logic_validator` | `security_asset_name`, `global_state_policy_id`, `expected_issuance_policy_id`, `denylist_script_hash`, `power_user_list_script_hash`, `approval_proxy_hash` | Operator choice; row 1; the issuance policy ID (as row 7); row 5's hash; row 3's hash; row 6a's hash. (The power-users policy id is read from the GlobalState datum at run time, not compiled in.) |
+| 10 | `minting_authority.minting_authority_validator` | `security_asset_name`, `global_state_policy_id`, `registry_policy_id`, `minting_logic_script_credential_hash`, `expected_issuance_policy_id`, `denylist_script_hash`, `power_user_list_script_hash`, `transfer_logic_script_hash`, `third_party_transfer_logic_script_hash`, `approval_proxy_hash` | Operator choice; row 1; Prerequisites; row 6's hash; the issuance policy ID (as row 7 — it **differs** from row 6's hash, see below); row 5's hash; row 3's hash; row 8's hash; row 9's hash (the scripts registry fields 3 and 4 must name); row 6a's hash. The power-users policy id is read from the GlobalState datum at run time, not compiled in. |
+| 11 | `approval_logic.approval_logic` (withdraw) | `approval_proxy_hash`, `global_state_policy_id`, `power_user_list_script_hash`, `issuance_policy_id`, `security_asset_name`, `close_payout` | Row 6a's hash; the GlobalState NFT policy ID; the power-user list's spend script hash (as seizure's — a wrong value only shuts the operator path off); the issuance policy ID (as row 7); as row 7; the address `Close` pays stray lovelace to. Its hash goes into GlobalState's `approval_logic_hash` at genesis and on every `RotateApprovalLogic`. |
 
 ### What the derived parameters must equal
 
@@ -404,6 +582,14 @@ exact order the blueprint (`plutus.json`) declares them; apply top to bottom.
   and 4 to name exactly these (F08), and the two must differ. The pin is only as good as row 10's
   build: assert the order in the deploy script, and include "a seizure without a
   `can_force_transfer` operator is rejected" in the post-deploy smoke test.
+* `approval_proxy_hash` — the hash of row 6a, **identical** in rows 7–11. A mismatch fails closed
+  for transfers that create or settle a pending transfer in rows 7, 8 and 11, but would silently
+  leave the vault unprotected on the seizure (row 9) or mint (row 10) path; assert all five
+  off-chain.
+* `approval_logic_hash` (GlobalState tail) — the hash of row 11, never equal to field 0, the admin,
+  the minting authority or the approval proxy (genesis, the GlobalState logic and every writer check
+  the pairs they can see). See the deployment requirement under
+  [Two-step transfer approval](#two-step-transfer-approval).
 * `security_asset_name` — an operator choice, with one constraint: it must **not** carry a protected
   CIP-67 prefix (see [CIP-68 metadata tokens](#cip-68-metadata-tokens)). Registration asserts this
   and fails closed if it is violated, because a protected supply name would make every rule meant
@@ -417,13 +603,14 @@ exact order the blueprint (`plutus.json`) declares them; apply top to bottom.
 
 ### Deployment: reference scripts
 
-Five validators are withdraw-0 scripts, i.e. they run as zero-value withdrawals rather than as the
+Seven validators are withdraw-0 scripts, i.e. they run as zero-value withdrawals rather than as the
 spending or minting script of any UTxO: `global_state_logic` (every GlobalState action — the proxy
 holding the NFT requires it), `transfer_logic_validator` (~6.8 KB, every transfer),
 `third_party_transfer_logic_validator` (~7.1 KB, every seizure), `minting_authority_validator`
 (~9.3 KB, every mint and burn) and the minting proxy `minting_logic_validator` (~1.0 KB, also every
 mint and burn — the proxy's withdraw-0 is what the CIP-113 registry node invokes, and it in turn
-requires the authority's). The four large ones (`global_state_logic` is ~5.9 KB and runs in every
+requires the authority's), the approval proxy `approval_proxy` (~1.0 KB, every settlement of a
+pending transfer) and `approval_logic` (~3.1 KB, every request and settlement). The four large ones (`global_state_logic` is ~5.9 KB and runs in every
 mint and burn too) must be published once as reference-script UTxOs and
 supplied via reference inputs — not inlined (a transaction is capped at 16 KiB); the proxy is small
 enough to inline but is simplest to publish alongside them. The two list `mint` validators
@@ -431,7 +618,7 @@ enough to inline but is simplest to publish alongside them. The two list `mint` 
 mint and `global_state_logic` — ≈ 19.3 KB of scripts against the 16 KiB limit — so publish them
 and `global_state_logic` before genesis (step 0 of [Initialising a token](#initialising-a-token)).
 
-All five withdraw-0 scripts need their **stake credential registered** on chain before the first
+All seven withdraw-0 scripts need their **stake credential registered** on chain before the first
 transaction that names them in `withdrawals` — see steps 0 and 2 of [Initialising a token](#initialising-a-token).
 A withdrawal from an unregistered credential is rejected by the ledger at phase 1, before any script
 runs, so forgetting the proxy's registration makes every mint and burn fail from genesis on.
@@ -596,6 +783,12 @@ binding axis**.
   the integration guide).
 * **Forced transfer** ≈ 0.60 M mem / 0.18 G CPU with one destination, ≈ 0.10 M mem / 32 M CPU per
   further destination sharing a node.
+* **Two-step approval** (per-test figures from `aiken check`; the base layer's own cost comes on
+  top): a request with the switch on ≈ 1.20 M mem / 0.37 G CPU in the transfer logic plus
+  ≈ 0.33 M mem / 0.12 G CPU in `approval_logic`; a settlement adds `approval_proxy`
+  (≈ 0.16 M mem / 51 M CPU), the GlobalState logic's `DelegateApproval` and `approval_logic`
+  (≈ 0.39 M mem / 0.14 G CPU for one decision, ≈ 0.67 M / 0.24 G for two) to the transfer logic's
+  run. An ordinary transfer on this branch measures ≈ 0.75 M mem / 0.23 G CPU.
 * **Redeemer size** ≈ 20 B per party without KYC and ≈ 230 B with an attestation proof made by a
   wallet (its ≈ 45-byte protected header names the signing address); a backend issuer's minimal
   3-byte header brings it to ≈ 190 B. Measured with `serialise_data` on a transfer action.
@@ -698,8 +891,10 @@ dependent transaction after the preceding output is available.
    `global_state_logic`, 1 `deactivated = False`, 2 the admin credential, 3 the power-users list
    policy ID, 4 the initial minting-authority hash — then the v1 tail: 5 `transfers_paused = False`,
    6 the supply cap, 7 the denylist policy ID, 8 `security_info`, 9 the trusted entity keys,
-   10 `member_root_hash`, 11/12 the sender/receiver KYC flags, 13 the network ID and
-   14 `upgrades_locked = False`. Put each root at its own list
+   10 `member_root_hash`, 11/12 the sender/receiver KYC flags, 13 the network ID,
+   14 `upgrades_locked = False`, then the approval fields: 15 `approval_required`, 16
+   `approval_threshold` (`>= 0`) and 17 `approval_logic_hash` (the hash of row 11; never field 0,
+   the admin, the minting authority or the approval proxy). Put each root at its own list
    spend validator. Each list's `Init` rejects a GlobalState datum that does not name it. The
    GlobalState mint also requires the withdraw-0 of the logic field 0 names: add it with a
    `GlobalStateSpendRedeemer` whose `global_state_output_index` points at the GlobalState output
@@ -710,7 +905,9 @@ dependent transaction after the preceding output is available.
 2. **Register the other logic scripts' stake credentials.** Register the minting proxy
    `minting_logic_validator` and current `minting_authority_validator` **before** the CIP-113
    registration, which invokes both as zero-value withdrawals. Register
-   `transfer_logic_validator` and `third_party_transfer_logic_validator` before their first use.
+   `transfer_logic_validator` and `third_party_transfer_logic_validator` before their first use,
+   and `approval_proxy` and `approval_logic` before the first pending transfer (requests need the
+   logic, settlements the proxy).
    An unregistered withdrawal fails at ledger phase 1. Each script's `publish` handler accepts
    `RegisterCredential` and rejects deregistration.
 3. **Assign power users** by inserting one node per operator, with the role flags needed for later
@@ -753,6 +950,10 @@ For wallets and dApps reading protocol state:
    — there is no flag to read, and absence is proven on-chain with a covering-node proof
 5. For operator roles, read the power-users list the same way; each node's datum carries that
    operator's role flags
+6. For transfer approval, read `approval_required`, `approval_threshold` and `approval_logic_hash`
+   from the GlobalState datum. **Pending transfers** are the programmable-base UTxOs whose stake
+   credential is `Script(<approval proxy hash>)` and that hold the token; attribute each to its
+   datum's `sender` in a holder register, and ignore vault UTxOs that hold no token
 
 ---
 

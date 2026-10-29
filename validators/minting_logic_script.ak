@@ -166,6 +166,9 @@ fn make_gs_output(authority: ByteArray, deactivated: Bool) -> Output {
     network_id: 1,
     minting_script_credential_hash: authority,
     upgrades_locked: False,
+    approval_required: False,
+    approval_threshold: 0,
+    approval_logic_hash: #"a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7",
   }
   Output {
     address: Address {

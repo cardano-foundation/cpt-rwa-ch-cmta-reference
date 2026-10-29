@@ -18,6 +18,7 @@ use cip68
 use compliance
 use constants
 use kyc/verify.{membership_leaf_key, membership_leaf_value}
+use types/approval.{PendingTransfer}
 use types/cip68.{Cip68Datum} as types_cip68
 use types/global_state.{
   GlobalStateDatum, GlobalStateLocation, GlobalStateReferenced, GlobalStateSpent,
@@ -30,6 +31,7 @@ use types/transfer_logic_script.{
   TransferLogicScriptAction, TransferLogicScriptDestinationAction,
   TransferLogicScriptWithdrawRedeemer,
 }
+use utils.{must_run_script_withdrawal}
 
 /// Transfer logic for a BAFIN security token (Track 4, TEL+denylist model).
 ///
@@ -43,6 +45,20 @@ use types/transfer_logic_script.{
 ///      or if the pkh of the receiver is in the GS's merkle tree. 
 ///
 /// Plus the pause gate (GS must not be paused).
+///
+/// TWO-STEP TRANSFER APPROVAL (validators/approval_logic.ak). A security-token
+/// UTxO owned by `Script(approval_proxy_hash)` — the VAULT — is a pending
+/// transfer. Every approval rule lives in the approval logic; this handler only:
+///   5. skips the vault as a party: a vault input or output needs no source or
+///      destination action and is not KYC- or denylist-checked (owner decision
+///      D6: the approver's signature — admin or `can_approve` operator — is
+///      the screen for a release, and the recipient is vetted when it is
+///      paid);
+///   6. with `approval_required` off, refuses any security-token output at the
+///      vault — nothing is parked unbound;
+///   7. with `approval_required` on, requires the withdraw-0 of the approval
+///      logic GlobalState names in EVERY transaction — it enforces the
+///      threshold, binds every new vault output and refuses mixing.
 validator transfer_logic_validator(
   security_asset_name: ByteArray,
   global_state_policy_id: ByteArray,
@@ -70,6 +86,9 @@ validator transfer_logic_validator(
   /// The DENYLIST SPEND VALIDATOR's script hash, threaded into
   /// `verify_denylist_absence`. See its doc comment.
   denylist_script_hash: ByteArray,
+  /// The permanent approval proxy's script hash
+  /// (validators/approval_proxy.ak): the owner of every pending transfer.
+  approval_proxy_hash: ByteArray,
 ) {
   withdraw(
     redeemer: TransferLogicScriptWithdrawRedeemer,
@@ -118,6 +137,9 @@ validator transfer_logic_validator(
     // plus an allocation per party. Left fold + final reverse keeps the
     // first-occurrence order of the old `foldr`+`unique`, and the order is
     // part of the redeemer contract (actions are matched positionally).
+    let vault = Script(approval_proxy_hash)
+
+    // The vault is no party (5.): its inputs are skipped.
     let inputs_user_credentials = list.reverse(
       list.foldl(
         self.inputs,
@@ -134,7 +156,7 @@ validator transfer_logic_validator(
             // input carrying this token cannot sit anywhere else, so nothing
             // further to assert here.
             expect Some(Inline(stake_cred)) = input.output.address.stake_credential
-            if list.has(result, stake_cred) {
+            if stake_cred == vault || list.has(result, stake_cred) {
               result
             } else {
               [stake_cred, ..result]
@@ -185,7 +207,12 @@ validator transfer_logic_validator(
             // inputs)` per policy) forbids it on a transfer too — verified
             // 2026-08-19 against the deployed base layer.
             expect Some(Inline(stake_cred)) = output.address.stake_credential
-            if list.has(result, stake_cred) {
+            if stake_cred == vault {
+              // A new pending transfer: only with approval switched on (6.),
+              // where the approval logic runs and binds it (7.). No party (5.).
+              expect gs_datum.approval_required
+              result
+            } else if list.has(result, stake_cred) {
               result
             } else {
               [stake_cred, ..result]
@@ -225,10 +252,19 @@ validator transfer_logic_validator(
       self,
     )
 
+    // 7. With approval on, the approval logic GlobalState names decides the
+    //    rest: threshold, binding, mixing.
+    let approval_ok = if gs_datum.approval_required {
+      must_run_script_withdrawal(self, gs_datum.approval_logic_hash)
+    } else {
+      True
+    }
+
     and {
       //General transfers of this token must NOT be paused
       gs_datum.transfers_paused == False,
       gs_datum.deactivated == False,
+      approval_ok?,
       all_senders_ok,
       all_destinations_ok,
     }
@@ -257,6 +293,10 @@ validator transfer_logic_validator(
 // credential + inline owner stake credential) and the CIP-113 registry node
 // (this validator's credential at field index 3). GS is a REFERENCE input.
 // Reference-input order: 0 = registry node, 1 = GlobalState, 2 = denylist root.
+
+// The permanent approval proxy's hash: owner of every pending transfer.
+const t_approval_proxy_hash: ByteArray =
+  #"b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0"
 
 const t_sec_name: ByteArray = "SEC"
 
@@ -390,6 +430,9 @@ fn t_gs_datum(
     network_id: 1,
     minting_script_credential_hash: #"",
     upgrades_locked: False,
+    approval_required: False,
+    approval_threshold: 0,
+    approval_logic_hash: #"a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7",
   }
 }
 
@@ -564,6 +607,7 @@ fn run_transfer(
     t_gs_policy,
     t_issuance_policy,
     t_denylist_script_hash,
+    t_approval_proxy_hash,
     redeemer,
     Script(t_transfer_hash),
     tx,
@@ -613,6 +657,9 @@ fn t_gs_datum_with_tel(
     network_id: 1,
     minting_script_credential_hash: #"",
     upgrades_locked: False,
+    approval_required: False,
+    approval_threshold: 0,
+    approval_logic_hash: #"a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7",
   }
 }
 
@@ -944,6 +991,9 @@ fn t_gs_datum_with_member_root(
     network_id: 1,
     minting_script_credential_hash: #"",
     upgrades_locked: False,
+    approval_required: False,
+    approval_threshold: 0,
+    approval_logic_hash: #"a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7",
   }
 }
 
@@ -1268,5 +1318,376 @@ test transfer_rejects_a_cip68_output_holding_security_tokens() fail {
         value: merge(out.value, from_asset(t_issuance_policy, t_sec_name, 5)),
       },
     ),
+  )
+}
+
+// ============================================================================
+// Tests — two-step transfer approval (validators/approval_logic.ak)
+// ============================================================================
+// A VAULT UTxO is a PLB UTxO owned by `Script(t_approval_proxy_hash)`. The
+// switch and threshold are GlobalState tail fields, set here on whatever
+// GlobalState reference input a fixture carries; the approval logic the datum
+// names (`t_approval_logic`) is added as a withdrawal where approval is on.
+// The threshold, binding and mixing rules are the approval logic's and are
+// tested there (validators/approval_logic.ak). KYC is off unless stated;
+// covering index 2 is the empty denylist root, which covers every key.
+
+const t_approval_logic: ByteArray =
+  #"a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7"
+
+const t_other_stake: ByteArray =
+  #"0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c"
+
+/// The same transaction with GlobalState's approval switch and threshold set.
+fn with_approval(tx: Transaction, required: Bool, threshold: Int) -> Transaction {
+  Transaction {
+    ..tx,
+    reference_inputs: list.map(
+      tx.reference_inputs,
+      fn(input) {
+        if quantity_of(
+          input.output.value,
+          t_gs_policy,
+          constants.global_state_asset_name,
+        ) == 1 {
+          expect InlineDatum(raw) = input.output.datum
+          expect datum: GlobalStateDatum = raw
+          Input {
+            ..input,
+            output: Output {
+              ..input.output,
+              datum: InlineDatum(
+                GlobalStateDatum {
+                  ..datum,
+                  approval_required: required,
+                  approval_threshold: threshold,
+                },
+              ),
+            },
+          }
+        } else {
+          input
+        }
+      },
+    ),
+  }
+}
+
+/// The approval logic GlobalState names runs in the transaction.
+fn with_approval_logic(tx: Transaction) -> Transaction {
+  Transaction {
+    ..tx,
+    withdrawals: [Pair(Script(t_approval_logic), 0), ..tx.withdrawals],
+  }
+}
+
+fn t_holder_input(ix: Int, stake_hash: ByteArray, amount: Int) -> Input {
+  Input {
+    output_reference: t_out_ref(ix),
+    output: t_token_utxo(stake_hash, amount),
+  }
+}
+
+fn t_pending(
+  sender: ByteArray,
+  recipient: ByteArray,
+  amount: Int,
+) -> PendingTransfer {
+  PendingTransfer {
+    sender: VerificationKey(sender),
+    recipient: VerificationKey(recipient),
+    amount,
+  }
+}
+
+fn t_vault_utxo(amount: Int, datum: Data) -> Output {
+  Output {
+    ..t_token_utxo(t_sender_stake, amount),
+    address: Address {
+      payment_credential: Script(t_plb_hash),
+      stake_credential: Some(Inline(Script(t_approval_proxy_hash))),
+    },
+    datum: InlineDatum(datum),
+  }
+}
+
+fn t_vault_input(ix: Int, pending: PendingTransfer) -> Input {
+  Input {
+    output_reference: t_out_ref(ix),
+    output: t_vault_utxo(pending.amount, pending),
+  }
+}
+
+fn t_tx(inputs: List<Input>, outputs: List<Output>) -> Transaction {
+  Transaction { ..t_transfer_tx(False, False, False, False), inputs, outputs }
+}
+
+/// `n` clean actions per side: one per party is consumed positionally and
+/// surplus actions are ignored, so this fits any party count up to `n`.
+fn t_redeemer_n(n: Int) -> TransferLogicScriptWithdrawRedeemer {
+  TransferLogicScriptWithdrawRedeemer {
+    global_state_location: GlobalStateReferenced {
+      global_state_ref_input_index: 1,
+    },
+    actions_for_each_input: list.repeat(t_source_action(), n),
+    destination_actions: list.repeat(t_dest_action(), n),
+  }
+}
+
+/// Switch on, at `threshold`, approval logic running.
+fn on(threshold: Int, tx: Transaction) -> Bool {
+  run_transfer(
+    t_redeemer_n(4),
+    with_approval_logic(with_approval(tx, True, threshold)),
+  )
+}
+
+/// Switch off (the fixtures' default), approval logic running.
+fn off(tx: Transaction) -> Bool {
+  run_transfer(t_redeemer_n(4), with_approval_logic(tx))
+}
+
+/// Alice parks 1000 for Bob: the canonical request.
+fn t_request_tx() -> Transaction {
+  t_tx(
+    [t_holder_input(10, t_sender_stake, 1_000)],
+    [t_vault_utxo(1_000, t_pending(t_sender_stake, t_dest_stake, 1_000))],
+  )
+}
+
+/// The approver releases it to Bob: the canonical settlement.
+fn t_settlement_tx() -> Transaction {
+  t_tx(
+    [t_vault_input(11, t_pending(t_sender_stake, t_dest_stake, 1_000))],
+    [t_token_utxo(t_dest_stake, 1_000)],
+  )
+}
+
+// ── Requests (Tx 1) ──────────────────────────────────────────────────────────
+
+test approval_request_to_the_vault_is_accepted_above_threshold() {
+  on(0, t_request_tx())
+}
+
+test approval_request_requires_the_approval_logic() {
+  // The approval logic binds the datum; without it no vault output passes.
+  !run_transfer(t_redeemer_n(4), with_approval(t_request_tx(), True, 0))
+}
+
+test approval_request_is_refused_with_the_switch_off() fail {
+  // Nothing can be parked while approval is off — so nothing can be parked
+  // unbound.
+  off(t_request_tx())
+}
+
+// ── Settlements (Tx 2) ───────────────────────────────────────────────────────
+
+test approval_settlement_is_not_subject_to_the_threshold() {
+  and {
+    on(0, t_settlement_tx()),
+    off(t_settlement_tx()),
+    // The transfer logic does not demand the approval logic here: the vault's
+    // owner (the proxy) does, through the base layer.
+    run_transfer(t_redeemer_n(4), t_settlement_tx()),
+  }
+}
+
+test approval_settlement_revets_the_recipient() {
+  // Receiver KYC on; the genuine attestation is for t_dest_stake only.
+  let redeemer = t_redeemer_with(
+    t_source_action(),
+    t_dest_action_with_proof(t_cip30_proof(t_dest_cip30())),
+  )
+  let base = t_transfer_tx_with_tel(False, True, t_tel_with(t_kyc_issuer_vkey))
+  let settle = fn(recipient) {
+    Transaction {
+      ..base,
+      inputs: [t_vault_input(11, t_pending(t_sender_stake, recipient, 1_000))],
+      outputs: [t_token_utxo(recipient, 1_000)],
+    }
+  }
+  and {
+    run_transfer(redeemer, settle(t_dest_stake)),
+    !run_transfer(redeemer, settle(t_other_stake)),
+  }
+}
+
+test approval_settlement_is_blocked_by_pause() {
+  !on(
+    0,
+    Transaction {
+      ..t_transfer_tx(True, False, False, False),
+      inputs: t_settlement_tx().inputs,
+      outputs: t_settlement_tx().outputs,
+    },
+  )
+}
+
+// ── Switch ON: the approval logic runs in every transfer ─────────────────────
+
+test approval_on_requires_the_approval_logic_in_every_transfer() {
+  // Within any threshold, so only the missing approval logic can refuse.
+  let plain = with_approval(
+    t_transfer_tx(False, False, False, False),
+    True,
+    1_000_000,
+  )
+  let settlement = with_approval(t_settlement_tx(), True, 1_000_000)
+  let wrong = fn(tx: Transaction) {
+    Transaction {
+      ..tx,
+      withdrawals: [
+        Pair(
+          Script(#"51515151515151515151515151515151515151515151515151515151"),
+          0,
+        ),
+      ],
+    }
+  }
+  and {
+    // Positive controls.
+    run_transfer(t_redeemer_n(4), with_approval_logic(plain)),
+    run_transfer(t_redeemer_n(4), with_approval_logic(settlement)),
+    !run_transfer(t_redeemer_n(4), plain),
+    !run_transfer(t_redeemer_n(4), settlement),
+    // Another script's withdrawal (e.g. a retired approval logic) is not it.
+    !run_transfer(t_redeemer_n(4), wrong(plain)),
+  }
+}
+
+test approval_on_metadata_update_needs_the_approval_logic() {
+  let update = with_approval(
+    t_metadata_update_tx(t_cip68_output(t_sender_stake, t_cip68_datum())),
+    True,
+    0,
+  )
+  and {
+    run_transfer(t_metadata_redeemer(), with_approval_logic(update)),
+    !run_transfer(t_metadata_redeemer(), update),
+  }
+}
+
+/// A request in a transaction that also spends GlobalState: the spent datum
+/// has the switch `input_on`; the continuing GlobalState output switches it ON.
+fn t_spent_gs_request(input_on: Bool) -> Transaction {
+  let gs = t_gs_ref_input(False, False, False, False)
+  let with_switch = fn(on) {
+    Output {
+      ..gs.output,
+      datum: InlineDatum(
+        GlobalStateDatum {
+          ..t_gs_datum(False, False, False, False),
+          approval_required: on,
+        },
+      ),
+    }
+  }
+  with_approval_logic(
+    Transaction {
+      ..t_spent_gs_tx(),
+      inputs: [
+        t_sender_input(t_sender_stake, 1_000),
+        Input { ..gs, output: with_switch(input_on) },
+      ],
+      outputs: [
+        t_vault_utxo(1_000, t_pending(t_sender_stake, t_dest_stake, 1_000)),
+        with_switch(True),
+      ],
+    },
+  )
+}
+
+test approval_request_with_global_state_spent_and_on_is_accepted() {
+  // Positive control for the test below: the spent datum has the switch on.
+  run_transfer(
+    t_spent_gs_redeemer(GlobalStateSpent { global_state_input_index: 1 }),
+    t_spent_gs_request(True),
+  )
+}
+
+test approval_switch_read_from_the_spent_pre_state() fail {
+  // OFF -> ON in the same transaction: the spent (pre-transaction) datum has
+  // approval off, so the vault output is refused although the continuing
+  // GlobalState output switches it on.
+  run_transfer(
+    t_spent_gs_redeemer(GlobalStateSpent { global_state_input_index: 1 }),
+    t_spent_gs_request(False),
+  )
+}
+
+// ── The vault is no party ────────────────────────────────────────────────────
+
+fn t_kyc_redeemer(
+  sources: List<TransferLogicScriptAction>,
+  destinations: List<TransferLogicScriptDestinationAction>,
+) -> TransferLogicScriptWithdrawRedeemer {
+  TransferLogicScriptWithdrawRedeemer {
+    global_state_location: GlobalStateReferenced {
+      global_state_ref_input_index: 1,
+    },
+    actions_for_each_input: sources,
+    destination_actions: destinations,
+  }
+}
+
+test vault_is_never_vetted_as_a_party() {
+  // Sender AND receiver KYC on. A request carries only the sender's proof: the
+  // vault output needs no destination action.
+  let base = t_transfer_tx_with_tel(True, True, t_tel_with(t_kyc_issuer_vkey))
+  let request = with_approval_logic(
+    with_approval(
+      Transaction {
+        ..base,
+        outputs: [
+          t_vault_utxo(1_000, t_pending(t_sender_stake, t_dest_stake, 1_000)),
+        ],
+      },
+      True,
+      0,
+    ),
+  )
+  run_transfer(
+    t_kyc_redeemer(
+      [t_source_action_with_proof(t_cip30_proof(t_sender_cip30()))],
+      [],
+    ),
+    request,
+  )
+}
+
+test request_does_not_vet_the_recipient() {
+  // Receiver KYC on, recipient without any attestation: accepted at the
+  // request (it is vetted when paid). Also the positive control for "switch
+  // on + vault output + approval logic present".
+  let base = t_transfer_tx_with_tel(False, True, t_tel_with(t_kyc_issuer_vkey))
+  run_transfer(
+    t_kyc_redeemer([t_source_action()], []),
+    with_approval_logic(
+      with_approval(
+        Transaction {
+          ..base,
+          outputs: [
+            t_vault_utxo(1_000, t_pending(t_sender_stake, t_other_stake, 1_000)),
+          ],
+        },
+        True,
+        0,
+      ),
+    ),
+  )
+}
+
+test settlement_does_not_vet_the_original_sender() {
+  // Owner decision D6 (2026-10-27): sender KYC on, the request's sender holds
+  // no attestation — the settlement needs no source action; the admin's
+  // signature (approval logic) is the screen.
+  let base = t_transfer_tx_with_tel(True, False, t_tel_with(t_kyc_issuer_vkey))
+  run_transfer(
+    t_kyc_redeemer([], [t_dest_action()]),
+    Transaction {
+      ..base,
+      inputs: [t_vault_input(11, t_pending(t_other_stake, t_dest_stake, 1_000))],
+      outputs: [t_token_utxo(t_dest_stake, 1_000)],
+    },
   )
 }

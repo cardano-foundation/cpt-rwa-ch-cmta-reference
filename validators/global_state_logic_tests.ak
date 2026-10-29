@@ -20,18 +20,19 @@ use constants
 use global_state_logic as v_logic
 use global_state_proxy as v_proxy
 use tests/global_state_fixtures.{
-  rotated, t_admin, t_data_of_raw_length, t_datum, t_datum_size, t_dl_ll_policy,
-  t_gs_logic, t_gs_policy, t_gs_script_hash, t_many_entities, t_max_datum_bytes,
-  t_metadata_len_at_cap, t_metadata_len_over_cap, t_minting_script,
-  t_new_gs_logic, t_out_ref, t_output, t_pu_ll_policy, t_reference_script,
-  t_root32, t_security_info_len_at_cap, t_security_info_len_over_cap, t_tx,
-  t_vkey_10,
+  rotated, t_admin, t_approval_proxy_hash, t_data_of_raw_length, t_datum,
+  t_datum_size, t_dl_ll_policy, t_gs_logic, t_gs_policy, t_gs_script_hash,
+  t_input, t_many_entities, t_max_datum_bytes, t_metadata_len_at_cap,
+  t_metadata_len_over_cap, t_minting_script, t_new_gs_logic, t_out_ref, t_output,
+  t_pu_ll_policy, t_reference_script, t_root32, t_security_info_len_at_cap,
+  t_security_info_len_over_cap, t_tx, t_vkey_10,
 }
 use types/global_state.{
-  AddTrustedEntity, DeactivateContract, GlobalStateDatum,
+  AddTrustedEntity, DeactivateContract, DelegateApproval, GlobalStateDatum,
   GlobalStateSpendRedeemer, LockUpgrades, MintSecurity, ModifySecurityInfo,
-  PauseTransfers, RemoveTrustedEntity, RotateAdmin, RotateGlobalStateScript,
-  RotateMintingScript, SetMintableAmount, SetRequiresReceiverKyc,
+  PauseTransfers, RemoveTrustedEntity, RotateAdmin, RotateApprovalLogic,
+  RotateGlobalStateScript, RotateMintingScript, SetApprovalRequired,
+  SetApprovalThreshold, SetMintableAmount, SetRequiresReceiverKyc,
   SetRequiresSenderKyc, TrustedEntityMetadata, UpdateMemberRootHash,
   UpdateTrustedEntity, gs_core_field_count, idx_deactivated, idx_mintable_amount,
   set_security_info,
@@ -122,6 +123,7 @@ fn run_logic(
     t_gs_policy,
     t_pu_script_hash,
     t_max_datum_bytes,
+    t_approval_proxy_hash,
     redeemer,
     Script(logic),
     tx,
@@ -759,6 +761,7 @@ fn t_pu_node_at(payment: Credential) -> Input {
     can_burn: False,
     can_pause: True,
     can_force_transfer: False,
+    can_approve: False,
   }
   let element: Element<Data, PowerUser> = Element {
     data: Node { data: pu },
@@ -2274,6 +2277,7 @@ test logic_accepts_register_credential() {
     t_gs_policy,
     t_pu_script_hash,
     t_max_datum_bytes,
+    t_approval_proxy_hash,
     builtin.constr_data(0, []),
     RegisterCredential { credential: Script(t_gs_logic), deposit: Never },
     lock_tx(),
@@ -2287,6 +2291,7 @@ test logic_rejects_unregister_credential() {
     t_gs_policy,
     t_pu_script_hash,
     t_max_datum_bytes,
+    t_approval_proxy_hash,
     builtin.constr_data(0, []),
     UnregisterCredential { credential: Script(t_gs_logic), refund: Never },
     lock_tx(),
@@ -2856,6 +2861,7 @@ fn run_logic_capped(
     t_gs_policy,
     t_pu_script_hash,
     cap,
+    t_approval_proxy_hash,
     redeemer,
     Script(t_gs_logic),
     tx,
@@ -3264,6 +3270,7 @@ test logic_built_for_another_global_state_policy_fails_genesis() fail {
     #"c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
     t_pu_script_hash,
     t_max_datum_bytes,
+    t_approval_proxy_hash,
     deactivate_redeemer(),
     Script(t_gs_logic),
     t_genesis_tx(t_output(t_datum(False, False))),
@@ -3311,4 +3318,319 @@ test logic_without_global_state_or_genesis_fails() fail {
     deactivate_redeemer(),
     Transaction { ..t_genesis_tx(t_output(t_datum(False, False))), mint: zero },
   )
+}
+
+// ============================================================================
+// Two-step transfer approval — the GlobalState side
+// ============================================================================
+// The approval logic L lives in the tail (`approval_logic_hash`); the approval
+// proxy P is a parameter of this logic. Both, and this logic itself, are FREE
+// credentials (anyone can produce their withdrawals), so they stay distinct
+// from each other and from the admin and the minting authority.
+
+const t_approval_logic: ByteArray =
+  #"a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7"
+
+const t_new_approval_logic: ByteArray =
+  #"a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8"
+
+fn approval_redeemer(action) -> GlobalStateSpendRedeemer {
+  GlobalStateSpendRedeemer { global_state_output_index: 0, action }
+}
+
+// ── SetApprovalRequired ──────────────────────────────────────────────────────
+
+test set_approval_required_flips_with_the_admin() {
+  let input = t_datum(False, False)
+  let output = GlobalStateDatum { ..input, approval_required: True }
+  and {
+    run_spend(
+      input,
+      approval_redeemer(SetApprovalRequired { enabled: True }),
+      t_tx(input, output, [t_admin]),
+    ),
+    !run_spend(
+      input,
+      approval_redeemer(SetApprovalRequired { enabled: True }),
+      t_tx(input, output, []),
+    ),
+  }
+}
+
+test set_approval_required_must_flip() {
+  let input = t_datum(False, False)
+  !run_spend(
+    input,
+    approval_redeemer(SetApprovalRequired { enabled: False }),
+    t_tx(input, input, [t_admin]),
+  )
+}
+
+test set_approval_required_stays_open_after_the_lock() {
+  // The way out if the installed approval logic cannot run.
+  let input = GlobalStateDatum {
+    ..t_datum(False, False),
+    upgrades_locked: True,
+  }
+  let output = GlobalStateDatum { ..input, approval_required: True }
+  run_spend(
+    input,
+    approval_redeemer(SetApprovalRequired { enabled: True }),
+    t_tx(input, output, [t_admin]),
+  )
+}
+
+// ── SetApprovalThreshold ─────────────────────────────────────────────────────
+
+test set_approval_threshold_writes_a_non_negative_value() {
+  let input = t_datum(False, False)
+  let to = fn(threshold) {
+    run_spend(
+      input,
+      approval_redeemer(SetApprovalThreshold { threshold }),
+      t_tx(
+        input,
+        GlobalStateDatum { ..input, approval_threshold: threshold },
+        [t_admin],
+      ),
+    )
+  }
+  and {
+    to(1_000),
+    to(0),
+    !to(-1),
+  }
+}
+
+test set_approval_threshold_needs_the_admin() {
+  let input = t_datum(False, False)
+  !run_spend(
+    input,
+    approval_redeemer(SetApprovalThreshold { threshold: 5 }),
+    t_tx(input, GlobalStateDatum { ..input, approval_threshold: 5 }, []),
+  )
+}
+
+// ── RotateApprovalLogic ──────────────────────────────────────────────────────
+
+fn rotate_approval(input: GlobalStateDatum, new: ByteArray, signers) -> Bool {
+  run_spend(
+    input,
+    approval_redeemer(RotateApprovalLogic { new_approval_logic_hash: new }),
+    t_tx(input, GlobalStateDatum { ..input, approval_logic_hash: new }, signers),
+  )
+}
+
+test rotate_approval_logic_succeeds_with_the_admin() {
+  and {
+    rotate_approval(t_datum(False, False), t_new_approval_logic, [t_admin]),
+    !rotate_approval(t_datum(False, False), t_new_approval_logic, []),
+  }
+}
+
+test rotate_approval_logic_is_closed_by_the_lock() {
+  !rotate_approval(
+    GlobalStateDatum { ..t_datum(False, False), upgrades_locked: True },
+    t_new_approval_logic,
+    [t_admin],
+  )
+}
+
+test rotate_approval_logic_refuses_every_free_credential_and_role() {
+  let input = t_datum(False, False)
+  and {
+    !rotate_approval(input, t_approval_proxy_hash, [t_admin]),
+    !rotate_approval(input, t_gs_logic, [t_admin]),
+    !rotate_approval(input, t_admin, [t_admin]),
+    !rotate_approval(input, t_minting_script, [t_admin]),
+    !rotate_approval(input, #"a8a8", [t_admin]),
+  }
+}
+
+// ── Distinctness at the other writers ────────────────────────────────────────
+
+test rotate_admin_refuses_a_free_credential() {
+  let input = t_datum(False, False)
+  let to = fn(new) {
+    run_spend(
+      input,
+      rotate_admin_redeemer(new),
+      t_tx(
+        input,
+        GlobalStateDatum { ..input, admin_credential_hash: new },
+        [t_admin, new],
+      ),
+    )
+  }
+  and {
+    !to(t_approval_logic),
+    !to(t_approval_proxy_hash),
+  }
+}
+
+test rotate_minting_script_refuses_a_free_credential() {
+  let input = t_datum(False, False)
+  let to = fn(new) {
+    run_spend(
+      input,
+      rotate_minting_script_redeemer(new),
+      t_tx(
+        input,
+        GlobalStateDatum { ..input, minting_script_credential_hash: new },
+        [t_admin],
+      ),
+    )
+  }
+  and {
+    // Either would let anyone satisfy the minting proxy: no cap, no rules.
+    !to(t_approval_logic),
+    !to(t_approval_proxy_hash),
+  }
+}
+
+test rotate_gs_logic_refuses_the_approval_logic_and_the_proxy() {
+  let to = fn(new) {
+    outgoing(
+      new,
+      Transaction {
+        ..t_rotate_tx(rotated(t_datum(False, False), new)),
+        withdrawals: [Pair(Script(t_gs_logic), 0), Pair(Script(new), 0)],
+        redeemers: rotation_redeemers(new),
+      },
+    )
+  }
+  and {
+    !to(t_approval_logic),
+    !to(t_approval_proxy_hash),
+  }
+}
+
+test pause_refuses_an_operator_that_is_a_free_credential() {
+  // The positive control is
+  // `pause_succeeds_for_a_can_pause_power_user_in_the_list`; here the datum
+  // names the operator's own hash as the approval logic.
+  let datum = fn(paused) {
+    GlobalStateDatum {
+      ..t_pause_datum(paused),
+      approval_logic_hash: t_pause_pu_cred,
+    }
+  }
+  !run_spend(
+    datum(False),
+    t_pause_redeemer(),
+    Transaction {
+      ..t_tx(datum(False), datum(True), [t_pause_pu_cred]),
+      reference_inputs: [t_pu_node_at(Script(t_pu_script_hash))],
+    },
+  )
+}
+
+// ── Genesis: the pairs the GlobalState mint cannot see ───────────────────────
+
+test logic_genesis_refuses_the_approval_proxy_as_a_role() {
+  let genesis = fn(datum) {
+    run_logic(t_gs_logic, deactivate_redeemer(), t_genesis_tx(t_output(datum)))
+  }
+  let base = t_datum(False, False)
+  and {
+    genesis(base),
+    !genesis(
+      GlobalStateDatum { ..base, approval_logic_hash: t_approval_proxy_hash },
+    ),
+    !genesis(
+      GlobalStateDatum {
+        ..base,
+        minting_script_credential_hash: t_approval_proxy_hash,
+      },
+    ),
+    !genesis(
+      GlobalStateDatum { ..base, admin_credential_hash: t_approval_proxy_hash },
+    ),
+  }
+}
+
+// ── DelegateApproval ─────────────────────────────────────────────────────────
+// The proxy → logic → approval-logic hop. GlobalState is a REFERENCE input.
+
+fn delegate_redeemer() -> GlobalStateSpendRedeemer {
+  approval_redeemer(DelegateApproval { global_state_ref_input_index: 0 })
+}
+
+fn t_delegate_tx(datum: GlobalStateDatum) -> Transaction {
+  Transaction {
+    ..t_tx(datum, datum, []),
+    inputs: [],
+    outputs: [],
+    reference_inputs: [t_input(datum)],
+    withdrawals: [
+      Pair(Script(t_gs_logic), 0),
+      Pair(Script(datum.approval_logic_hash), 0),
+    ],
+  }
+}
+
+fn delegate(datum: GlobalStateDatum, tx: Transaction) -> Bool {
+  run_logic(datum.global_state_script_credential_hash, delegate_redeemer(), tx)
+}
+
+test delegate_requires_the_approval_logic() {
+  let datum = t_datum(False, False)
+  and {
+    delegate(datum, t_delegate_tx(datum)),
+    !delegate(
+      datum,
+      Transaction {
+        ..t_delegate_tx(datum),
+        withdrawals: [Pair(Script(t_gs_logic), 0)],
+      },
+    ),
+  }
+}
+
+test delegate_refuses_a_spent_global_state() {
+  // Never a stand-in for a GlobalState spend: under this redeemer nothing
+  // about the spend would be checked.
+  let datum = t_datum(False, False)
+  !delegate(
+    datum,
+    Transaction { ..t_delegate_tx(datum), inputs: [t_input(datum)] },
+  )
+}
+
+test delegate_refuses_a_minted_global_state() {
+  let datum = t_datum(False, False)
+  !delegate(
+    datum,
+    Transaction {
+      ..t_delegate_tx(datum),
+      mint: from_asset(t_gs_policy, constants.global_state_asset_name, 1),
+    },
+  )
+}
+
+test delegate_runs_only_as_the_installed_logic() {
+  let datum = t_datum(False, False)
+  !run_logic(t_new_gs_logic, delegate_redeemer(), t_delegate_tx(datum))
+}
+
+test delegate_refuses_when_deactivated() {
+  let datum = t_datum(True, True)
+  !delegate(datum, t_delegate_tx(datum))
+}
+
+test delegate_refuses_a_pointer_to_a_free_credential_or_role() {
+  let with = fn(pointer) {
+    let datum = GlobalStateDatum {
+      ..t_datum(False, False),
+      approval_logic_hash: pointer,
+    }
+    delegate(datum, t_delegate_tx(datum))
+  }
+  and {
+    // Proxy and delegate would satisfy each other.
+    !with(t_approval_proxy_hash),
+    !with(t_gs_logic),
+    !with(t_admin),
+    !with(t_minting_script),
+  }
 }
