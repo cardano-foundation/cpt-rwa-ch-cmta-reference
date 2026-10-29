@@ -1025,8 +1025,19 @@ address has that many tokens frozen; which ones does not matter".
 **Invariants** (complexity-specialist review, 2026-10-23):
 
 1. *Freeze floor.* In a `TransferAct` transaction that spends hash `h`'s security tokens, the
-   outputs to stake hash `h` carry at least `f`. The only ways below `f` are a seizure
-   (`can_force_transfer`) or an `is_admin` Remove/Update, which change `f` and move nothing.
+   outputs to stake hash `h` carry at least `f`, or at least what the transaction spends from `h`
+   (amended 2026-10-29, PR #30 review). So `post ≥ min(pre, f)`: a holder at or above `f` keeps
+   `f`, and one below `f` cannot lower its balance. The guarantee is net per transaction — tokens
+   paid to `h` in the same transaction count — where CMTAT checks each gross transfer. The only
+   ways below `min(pre, f)` are a seizure (`can_force_transfer`) or an `is_admin` Remove/Update,
+   which change `f` and move nothing. The second arm reuses `paid_back_to_holder` over the inputs'
+   outputs and runs only when the first fails. Reusing it rather than a dedicated early-exit walk
+   keeps the script at +81 B instead of +190 B, which every transfer pays as reference-script fee.
+   A send that pays back `f` costs a constant +2 201 mem / +428 049 cpu over the old rule, however
+   many inputs it has; every other transfer pays a constant +200 mem / +32 000 cpu (≈ 14 lovelace,
+   against ≈ 1 600 lovelace of reference-script fee saved by the smaller script). The complexity-specialist review (2026-10-29: sound, no counterexample)
+   covered the rule with a dedicated walk; the shipped fold computes the same `spent` (bare hash,
+   security token only), and its `expect` cannot trap where the sender fold has not already.
 2. *Full freeze unchanged.* `None` rejects `h` as a sender and as every kind of destination.
 3. *Exact membership.* A party's element is authenticated (list policy from GlobalState field 7,
    list spend address pinned) and is either the party's own node or covers it — never both, since
@@ -1046,11 +1057,12 @@ because the CIP-113 base layer keeps this token at programmable-base outputs on 
 (`no_escape` on mint, transfer conservation, seizure pairing, unfracking disabled by registry
 field 5) — the same premise the destination fold has always relied on.
 
-**Costs, accepted.** Every send by a partially frozen holder must include at least `f` of its own
-tokens, so a balance in many small UTxOs may need consolidating first (16 KiB limit). Neither
-`AddToDenylist` nor `UpdateDenylistEntry` can see the holder's balance, so `f` is not bounded by
-it: an `f` above the balance blocks every send by that holder until its balance reaches `f`
-(receiving still works) — on the sending side, a full freeze. The pay-back output makes the
+**Costs, accepted.** Every send that lowers a partially frozen holder's balance must pay `f`
+back, so it normally includes at least `f` of the holder's own tokens; a balance in many small
+UTxOs can be consolidated first, which the second arm of the rule always allows (16 KiB limit per
+transaction). Neither `AddToDenylist` nor `UpdateDenylistEntry` can see the holder's balance, so
+`f` is not bounded by it: an `f` above the balance blocks every send that would lower it until the
+balance reaches `f` (receiving and consolidating still work). The pay-back output makes the
 holder a destination of its own transaction, so with `requires_receiver_kyc` set it needs valid
 receiver KYC to send even when `requires_sender_kyc` is off; a partially frozen holder with lapsed
 KYC must renew it first (pinned by
@@ -1067,7 +1079,7 @@ does not matter", but three behaviours of `ERC20EnforcementModuleInternal` are n
 * *Forced transfer does not reduce `f`.* CMTAT's `_forcedTransfer` (and its forced burn, the
   `to == address(0)` case) calls `_unfreezeTokens`, which lowers the frozen amount by however much
   the transfer exceeds the active balance. Here a seizure moves tokens without touching the denylist
-  node, so `f` survives it: a holder seized below `f` cannot send until an `is_admin` power user
+  node, so `f` survives it: a holder seized below `f` cannot lower its balance until an `is_admin` power user
   lowers `f` with `UpdateDenylistEntry` or the holder's balance climbs back to `f`. An operator
   wanting CMTAT behaviour updates `f` in the same operating procedure as the seizure. Burning goes
   through the same forced-transfer path here, so the same applies.
@@ -1080,7 +1092,7 @@ does not matter", but three behaviours of `ERC20EnforcementModuleInternal` are n
   relaxing back must write it again.
 
 **Pinned by** the `partially_frozen_*` / `fully_frozen_*` / `memo_*` / `paid_back_*` / `both_*` /
-`each_*` / `own_node_*` / `undecodable_*` tests in `validators/transfer_logic_script.ak`, the partial-seizure tests in
+`each_*` / `own_node_*` / `undecodable_*` / `below_floor_*` tests in `validators/transfer_logic_script.ak`, the partial-seizure tests in
 `validators/third_party_transfer_logic_script.ak`, `mint_to_a_*_frozen_destination_*` in
 `validators/minting_authority.ak`, and the `denylist_insert_*_freeze` / `denylist_update_*` tests in
 `validators/denylist.ak`. Every new guard was mutation-checked: replacing it with `True` (or the

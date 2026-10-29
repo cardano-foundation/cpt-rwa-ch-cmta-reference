@@ -140,12 +140,14 @@ validator address. One node can cover several holders.
 
 A **partially frozen** holder (denylist entry with `frozen_amount: Some(f)`) has no covering node:
 its action cites **its own node** in the same index field. As a destination that is enough. As a
-sender, the transaction must also pay at least `f` of the security token to outputs whose inline
-stake credential hash equals the node key (either credential form counts), so the holder keeps at
-least `f`; select enough of the holder's own token UTxOs as inputs to make that possible. If the
-holder's balance is below `f` — the validators never check `f` against it, so an admin can set it
-higher — no send can succeed; surface that to the holder instead of building a transaction that
-will fail. The pay-back output makes the holder one of the transaction's destinations, so when
+sender, the transaction must also pay to outputs whose inline stake credential hash equals the node
+key (either credential form counts) either at least `f` of the security token, or at least as much
+of it as the transaction spends from that hash. To send tokens out, select enough of the holder's
+own token UTxOs as inputs to pay `f` back. If the holder's balance is below `f` — the validators
+never check `f` against it, so an admin can set it higher — no send can lower its balance, but the
+holder can still consolidate (pay back everything it spends); surface that to the holder instead of
+building a send that will fail. A balance spread over too many small UTxOs to reach `f` in one
+transaction can be consolidated the same way first. The pay-back output makes the holder one of the transaction's destinations, so when
 `requires_receiver_kyc` is set its destination action needs a valid KYC proof, even if
 `requires_sender_kyc` is off: a partially frozen holder with lapsed KYC must renew it first. A fully frozen holder (`None`) cannot appear on either side.
 

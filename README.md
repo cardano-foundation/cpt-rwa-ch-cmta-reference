@@ -101,10 +101,10 @@ in this repository.
 | [`validators/global_state_proxy.ak`](validators/global_state_proxy.ak) | Permanent, unparameterised home of the GlobalState NFT. Reads only datum field 0 and requires that script's withdraw-0 in the same transaction. |
 | [`validators/global_state_logic.ak`](validators/global_state_logic.ak) | Replaceable GlobalState logic (the withdraw-0 script named by datum field 0) that controls the continuing state UTxO: remaining mintable supply, pause, KYC settings, trusted issuers, admin rotation, upgrades, logic rotation and deactivation. Its tests are in `global_state_logic_tests.ak`. |
 | [`validators/power_users.ak`](validators/power_users.ak) | Maintains the operator linked list. The GlobalState admin grants or changes the five independent role flags. |
-| [`validators/denylist.ak`](validators/denylist.ak) | Maintains the sanctions linked list. An `is_admin` power user can add or remove an entry, or update one in place (`UpdateDenylistEntry`). An entry's `frozen_amount` is `None` (fully frozen) or `Some(f)` (partially frozen: may receive, and may send only while keeping at least `f`). |
+| [`validators/denylist.ak`](validators/denylist.ak) | Maintains the sanctions linked list. An `is_admin` power user can add or remove an entry, or update one in place (`UpdateDenylistEntry`). An entry's `frozen_amount` is `None` (fully frozen) or `Some(f)` (partially frozen: may receive, and may send only what it holds above `f`). |
 | [`validators/minting_logic_script.ak`](validators/minting_logic_script.ak) | Permanent CIP-113 minting proxy. It reads GlobalState and requires the currently named minting authority to run. Its hash, applied to the base layer's issuance template, yields this token's issuance policy ID. |
 | [`validators/minting_authority.ak`](validators/minting_authority.ak) | Replaceable authority for registration, mint, burn and registry-node upgrades. It checks supply-changing transactions against roles, destinations, the denylist and KYC. |
-| [`validators/transfer_logic_script.ak`](validators/transfer_logic_script.ak) | Checks ordinary transfers for pause, deactivation, the sender and receiver denylist gates (absence, or a partial freeze whose floor the sender keeps), and enabled KYC gates. |
+| [`validators/transfer_logic_script.ak`](validators/transfer_logic_script.ak) | Checks ordinary transfers for pause, deactivation, the sender and receiver denylist gates (absence, or a partial freeze the sender's transaction respects), and enabled KYC gates. |
 | [`validators/third_party_transfer_logic_script.ak`](validators/third_party_transfer_logic_script.ak) | Checks forced transfers: `can_force_transfer` authority and vetted destinations, while allowing a sanctioned or expired source and remaining available during a pause. |
 | [`lib/types/`](lib/types/) | On-chain datum and redeemer schemas consumed by transaction builders, including GlobalState, operator roles and KYC proofs. |
 | [`lib/kyc/verify.ak`](lib/kyc/verify.ak), [`lib/denylist/absence.ak`](lib/denylist/absence.ak), [`lib/compliance.ak`](lib/compliance.ak) | Verify attestations or membership proofs, prove denylist absence using a covering node or membership through the party's own (partially frozen) node, and apply those checks to each party. |
@@ -210,18 +210,23 @@ referenced by compact identifiers or hashes.
 * Power users and denylist entries are each stored on-chain as a linked list. A denylist entry
   freezes the holder's credential hash, fully or partially (CMTAT `freezePartialTokens`):
   * `frozen_amount: None` — **fully frozen** (sanctioned): the holder can neither send nor receive.
-  * `frozen_amount: Some(f)` — **partially frozen**: the holder receives freely, and can send only in
-    a transaction that pays at least `f` of the token back to outputs carrying its own stake
-    credential hash. Either credential form of that hash counts, so a holder that pays its floor to
-    the form it cannot authorise strands those tokens (recoverable only by seizure); paid to its
-    own form, the holder still holds at least `f` afterwards. Every such send must therefore
-    include at least `f` of the holder's own tokens as inputs; a balance spread over many small
-    UTxOs may need consolidating first (16 KiB transaction limit). `f` is not checked against the
-    holder's balance: an admin may set it above what the holder holds, and the holder then cannot
-    send at all until its balance reaches `f` (it can still receive). The pay-back output also makes
-    the holder a destination of its own transaction, so when `requires_receiver_kyc` is set the
-    holder needs a valid KYC proof to send — even if `requires_sender_kyc` is off. A partially
-    frozen holder whose KYC has lapsed must renew it before it can send.
+  * `frozen_amount: Some(f)` — **partially frozen**: the holder receives freely. It can send only in
+    a transaction that pays back to outputs carrying its own stake credential hash either at least
+    `f` of the token, or at least as much as the transaction spends from that hash. So the holder
+    always ends with at least `min(balance before, f)`: at or above `f` it keeps `f`; below `f` it
+    can consolidate its UTxOs but not lower its balance. This is CMTAT's "only the amount above
+    `f` is transferable", measured net per transaction (tokens paid to the holder in the same
+    transaction count). Either credential form of that hash counts, so a holder that pays back to
+    the form it cannot authorise strands those tokens (recoverable only by seizure). A send that
+    lowers the holder's balance must still pay `f` back, so it normally includes at least `f` of the
+    holder's own tokens as inputs; a balance spread over many small UTxOs can be consolidated
+    first, in as many transactions as needed (16 KiB transaction limit). `f` is not checked against
+    the holder's balance: an admin may set it above what the holder holds, and the holder then
+    cannot lower its balance until it
+    reaches `f` (it can still receive and consolidate). The pay-back output also makes the holder a
+    destination of its own transaction, so when `requires_receiver_kyc` is set the holder needs a
+    valid KYC proof to send — even if `requires_sender_kyc` is off. A partially frozen holder whose
+    KYC has lapsed must renew it before it can send.
 
   An unlisted party proves absence with a covering-node proof; a partially frozen party cites its
   own node instead. An `is_admin` power user changes `f` in place with `UpdateDenylistEntry`.
@@ -230,7 +235,7 @@ referenced by compact identifiers or hashes.
   holder's balance, and a full freeze replaces `f` rather than sitting beside it — see
   [§17 of the security notes](documents/security/security-fixes.md#17-partial-freeze-a-denylist-entry-can-freeze-an-amount-not-only-the-whole-holding).
 * A transfer must clear the pause gate, then per sender and per receiver: the denylist gate (absence,
-  or a partial freeze — whose floor a sender must keep), plus a
+  or a partial freeze — which a sender's transaction must respect), plus a
   valid KYC proof whenever `requires_sender_kyc` / `requires_receiver_kyc` is set. The two are
   toggled independently.
 * Forced transfers move tokens to a vetted destination. They intentionally remain available while
@@ -775,7 +780,7 @@ For wallets and dApps reading protocol state:
    datum carries no key — the key IS the asset name after the 4-byte `"Node"` prefix). **Presence
    means listed** —
    then read the entry's `frozen_amount`: `None` = fully frozen, `Some(f)` = partially frozen (the
-   holder must keep at least `f`). On chain, an unlisted holder proves absence with a covering-node
+   holder may send only what it holds above `f`). On chain, an unlisted holder proves absence with a covering-node
    proof, and a partially frozen one cites its own node
 5. For operator roles, read the power-users list the same way; each node's datum carries that
    operator's role flags

@@ -8,21 +8,24 @@
 ///   receive the security token. This is what every entry meant before the
 ///   field existed.
 /// * `Some(f)`, `f > 0` — PARTIALLY frozen: the holder may receive freely, and
-///   may send only in a transaction that pays at least `f` of the security
-///   token back to outputs whose inline stake credential hash is the node key.
-///   Either credential form of that hash counts: paid to the holder's own form,
-///   the holder still holds at least `f` afterwards; paid to the other form, the
-///   tokens sit where only seizure can reach them. Enforced by the transfer
-///   logic; the seizure path deliberately ignores it (a forced transfer is an
+///   may send only in a transaction that pays back to outputs whose inline
+///   stake credential hash is the node key at least `f` of the security token,
+///   or at least as much of it as the transaction spends from that hash. So the
+///   holder ends with at least `min(balance before, f)`: a holder at or above
+///   `f` keeps `f`, and one below it can consolidate but not send any out (net,
+///   per transaction). Either credential form of that hash counts: paid to the
+///   holder's own form the tokens stay spendable; paid to the other form, they
+///   sit where only seizure can reach them. Enforced by the transfer logic;
+///   the seizure path deliberately ignores it (a forced transfer is an
 ///   override).
 ///
 /// `Some(f)` with `f <= 0` is never written: `AddToDenylist` and
 /// `UpdateDenylistEntry` both reject it, so it cannot reach a reader.
 ///
 /// `f` is NOT checked against the holder's balance — no write can see it. An
-/// `f` above what the holder holds blocks every send until the holder's
-/// balance reaches `f` (receiving still works), so it acts as a full freeze on
-/// the sending side.
+/// `f` above what the holder holds blocks every send that would lower its
+/// balance until the balance reaches `f` (receiving and consolidating still
+/// work).
 ///
 /// The pay-back output makes the holder a destination of its own transaction,
 /// so with `requires_receiver_kyc` set a partially frozen holder needs valid

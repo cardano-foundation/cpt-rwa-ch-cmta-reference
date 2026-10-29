@@ -38,8 +38,8 @@ use utils
 /// Per-input check (for each unique sender stake credential):
 ///   1. The redeemer's matching KYC proof validates against GS.trusted_entity_vkeys or the pkh of the sender is in the GS's merkle tree.
 ///   2. The sender is NOT in the denylist (covering-node absence proof), or is only
-///      PARTIALLY frozen (own node, `Some(f)`) and this transaction pays at least `f`
-///      back to its stake credential hash.
+///      PARTIALLY frozen (own node, `Some(f)`) and this transaction pays back to its
+///      stake credential hash at least `f`, or at least what it spends from that hash.
 ///
 /// Per-output check (for each unique destination stake credential):
 ///   3. The destination is NOT in the denylist, or is only partially frozen.
@@ -207,12 +207,16 @@ validator transfer_logic_validator(
     //    creditor / registered holder), which is why both sides are vetted.
     //
     //    A PARTIALLY frozen sender (own denylist node, `frozen_amount:
-    //    Some(f)`) may send only if this transaction pays at least `f` of the
-    //    security token back to outputs whose inline stake credential hash is
-    //    the sender's. Those outputs are part of what the sender holds once
-    //    the transaction lands, so the sender still holds at least `f`: the
+    //    Some(f)`) may send only if this transaction pays back to outputs
+    //    whose inline stake credential hash is the sender's either at least
+    //    `f` of the security token, or at least what it spends from that hash
+    //    (the same count over the inputs). Those outputs are part of what the sender holds
+    //    once the transaction lands, so the first arm leaves it at least `f`,
+    //    the second leaves its balance no lower: `post ≥ min(pre, f)`, the
     //    freeze floor. Conservative — UTxOs the sender does not spend are not
-    //    seen and not counted, which is why every send must re-include `f`.
+    //    seen and not counted, which is why a send that lowers the balance must
+    //    include `f` again; the second arm is what lets a holder consolidate
+    //    without `f` (below `f`, or with `f` spread over too many UTxOs).
     //
     //    Reading only the STAKE credential is sound because of the base
     //    layer, not because of anything here: the security token can only sit
@@ -230,12 +234,27 @@ validator transfer_logic_validator(
       fn(action) { action.source_proof },
       fn(action) { action.source_denylist_ref_input_index },
       fn(holder_hash, frozen_amount) {
-        paid_back_to_holder(
+        let paid_back = paid_back_to_holder(
           self.outputs,
           issuance_policy_id,
           security_asset_name,
           holder_hash,
-        ) >= frozen_amount
+        )
+        // `||` is lazy: a send that keeps the floor never looks at the inputs.
+        // Below the floor, what the holder spends is counted by the same
+        // function over the inputs' outputs — by bare hash, both credential
+        // forms adding up. Reusing it rather than a dedicated early-exit walk
+        // keeps the script ~110 bytes smaller, which every transfer pays for
+        // as reference-script fee; only below-floor sends pay the full fold.
+        // Its `expect` cannot trap here: the sender fold above has already
+        // trapped on any input holding the token without an inline stake
+        // credential.
+        paid_back >= frozen_amount || paid_back >= paid_back_to_holder(
+          list.map(self.inputs, fn(input) { input.output }),
+          issuance_policy_id,
+          security_asset_name,
+          holder_hash,
+        )
       },
       gs_datum.requires_sender_kyc,
       gs_datum,
@@ -1348,7 +1367,8 @@ test transfer_rejects_a_cip68_output_holding_security_tokens() fail {
 // ── Partial freeze (denylist `frozen_amount`) ─────────────────────────────────
 //
 // A listed holder cites its OWN node; `None` is a full freeze, `Some(f)` lets
-// it receive freely and send only while paying at least `f` back to itself.
+// it receive freely and send only while paying at least `f` back to itself
+// (or, below the floor, everything it spends — see the section at the end).
 //
 // Keys, in list order: A = 0a… (t_sender_stake), C = 0b… (t_dest_stake),
 // B = 0c…, D = 0d…. Reference inputs: 0 registry, 1 GlobalState, 2 denylist
@@ -1992,8 +2012,8 @@ test own_node_well_formed_partial_freeze_admits_the_receiver() {
 
 // ── Partial freeze × receiver KYC (documented limitation) ────────────────────
 //
-// The floor makes a partially frozen sender pay at least `f` back to itself,
-// which makes it a DESTINATION of its own transaction. With
+// The floor makes a partially frozen sender pay tokens back to itself (`f`,
+// or all it spends), which makes it a DESTINATION of its own transaction. With
 // `requires_receiver_kyc` set, it therefore needs a valid KYC proof as a
 // receiver too: a partially frozen holder whose KYC has lapsed cannot send at
 // all until it renews its KYC. Deliberate, kept simple (owner decision
@@ -2174,4 +2194,243 @@ bench transfer_cost_by_party_count_alternating_nodes(n via n_parties) {
       t_bench_node_redeemer(fn(i) { 3 + i % 2 }, n),
       t_bench_node_tx(n),
     )
+}
+
+// ── Partial freeze below the floor: sends that do not lower the balance ──────
+//
+// A partially frozen sender passes if the transaction pays back at least `f`,
+// OR at least what it spends from the holder's hash: then
+// its balance cannot fall, so `post ≥ min(pre, f)`. List: root → A(f) → end,
+// index 3 is A's node and also covers C (0b) and D (0d).
+
+fn pf_a_script() -> Credential {
+  Script(t_sender_stake)
+}
+
+/// An ADA-only wallet input with NO stake credential (a fee input).
+fn pf_ada_input(ix: Int) -> Input {
+  Input {
+    output_reference: t_out_ref(40 + ix),
+    output: Output {
+      address: Address {
+        payment_credential: VerificationKey(pf_e),
+        stake_credential: None,
+      },
+      value: from_lovelace(5_000_000),
+      datum: NoDatum,
+      reference_script: None,
+    },
+  }
+}
+
+// A (frozen 400) holds 150 + 150 and merges them into one UTxO: nothing leaves.
+test partially_frozen_sender_below_the_floor_may_consolidate() {
+  pf_run(
+    pf_list_a(Some(400)),
+    [pf_input(0, pf_a(), 150), pf_input(1, pf_a(), 150)],
+    [pf_output(pf_a(), 300)],
+    [pf_src(3)],
+    [pf_dst(3)],
+  )
+}
+
+// …but exporting even one token is rejected.
+test partially_frozen_sender_below_the_floor_may_not_export_one_token() {
+  !pf_run(
+    pf_list_a(Some(400)),
+    [pf_input(0, pf_a(), 150), pf_input(1, pf_a(), 150)],
+    [pf_output(pf_a(), 299), pf_output(pf_c(), 1)],
+    [pf_src(3)],
+    [pf_dst(3), pf_dst(3)],
+  )
+}
+
+// An `f` above the holder's whole balance no longer blocks consolidation.
+test partially_frozen_sender_below_the_floor_with_f_above_its_balance_may_consolidate() {
+  pf_run(
+    pf_list_a(Some(10_000)),
+    [pf_input(0, pf_a(), 600), pf_input(1, pf_a(), 400)],
+    [pf_output(pf_a(), 1_000)],
+    [pf_src(3)],
+    [pf_dst(3)],
+  )
+}
+
+// Hot-path cost pin: above the floor with A's balance over eight inputs. Its
+// cost delta against the one-input `..._may_send_above_the_floor` shows the
+// inputs are not counted when `paid_back ≥ f`.
+test partially_frozen_sender_above_the_floor_with_eight_inputs() {
+  pf_run(
+    pf_list_a(Some(400)),
+    list.map(list.range(0, 7), fn(i) { pf_input(i, pf_a(), 125) }),
+    [pf_output(pf_c(), 600), pf_output(pf_a(), 400)],
+    [pf_src(3)],
+    [pf_dst(3), pf_dst(3)],
+  )
+}
+
+// What is spent is counted by bare hash: spending under both credential forms
+// and paying back only one form's worth is an export.
+test below_floor_spent_counts_both_credential_forms() {
+  !pf_run(
+    pf_list_a(Some(400)),
+    [pf_input(0, pf_a(), 150), pf_input(1, pf_a_script(), 150)],
+    [pf_output(pf_a(), 150), pf_output(pf_c(), 150)],
+    [pf_src(3), pf_src(3)],
+    [pf_dst(3), pf_dst(3)],
+  )
+}
+
+// Control: the same inputs, everything paid back across both forms.
+test below_floor_both_credential_forms_paying_back_everything_pass() {
+  pf_run(
+    pf_list_a(Some(400)),
+    [pf_input(0, pf_a(), 150), pf_input(1, pf_a_script(), 150)],
+    [pf_output(pf_a(), 200), pf_output(pf_a_script(), 100)],
+    [pf_src(3), pf_src(3)],
+    [pf_dst(3), pf_dst(3)],
+  )
+}
+
+// Paid back to the other credential form of the hash still counts (and, as
+// on the `≥ f` path, strands those tokens if A cannot authorise that form).
+test below_floor_pay_back_to_the_other_credential_form_counts() {
+  pf_run(
+    pf_list_a(Some(400)),
+    [pf_input(0, pf_a(), 300)],
+    [pf_output(pf_a_script(), 300)],
+    [pf_src(3)],
+    [pf_dst(3)],
+  )
+}
+
+// An unlisted sender's input comes before A's in an accept test: C's tokens
+// are not counted as A's spending, and A, paying back all it spends, passes.
+test below_floor_unlisted_senders_input_first_still_passes() {
+  pf_run(
+    pf_list_a(Some(400)),
+    [pf_input(0, pf_c(), 100), pf_input(1, pf_a(), 300)],
+    [pf_output(pf_c(), 100), pf_output(pf_a(), 300)],
+    [pf_src(3), pf_src(3)],
+    [pf_dst(3), pf_dst(3)],
+  )
+}
+
+// Strict inflow: A spends 150 and ends with 250 (C pays it 100), still < f.
+test below_floor_paid_back_above_spent_is_accepted() {
+  pf_run(
+    pf_list_a(Some(400)),
+    [pf_input(0, pf_c(), 100), pf_input(1, pf_a(), 150)],
+    [pf_output(pf_a(), 250)],
+    [pf_src(3), pf_src(3)],
+    [pf_dst(3)],
+  )
+}
+
+// Another holder's large input is not counted as A's spending.
+test below_floor_spent_ignores_other_holders_inputs() {
+  pf_run(
+    pf_list_a(Some(400)),
+    [pf_input(0, pf_a(), 300), pf_input(1, pf_c(), 1_000)],
+    [pf_output(pf_a(), 300), pf_output(pf_c(), 1_000)],
+    [pf_src(3), pf_src(3)],
+    [pf_dst(3), pf_dst(3)],
+  )
+}
+
+// Another holder's input before A's does not hide A's export of one token.
+test below_floor_another_holders_input_does_not_hide_an_export() {
+  !pf_run(
+    pf_list_a(Some(400)),
+    [
+      pf_input(0, pf_c(), 500),
+      pf_input(1, pf_a(), 150),
+      pf_input(2, pf_a(), 150),
+    ],
+    [pf_output(pf_c(), 500), pf_output(pf_a(), 299), pf_output(pf_c(), 1)],
+    [pf_src(3), pf_src(3)],
+    [pf_dst(3), pf_dst(3)],
+  )
+}
+
+// An input without a stake credential is skipped, not trapped on…
+test below_floor_input_without_a_stake_credential_is_skipped() {
+  pf_run(
+    pf_list_a(Some(400)),
+    [pf_ada_input(0), pf_input(0, pf_a(), 150), pf_input(1, pf_a(), 150)],
+    [pf_output(pf_a(), 300)],
+    [pf_src(3)],
+    [pf_dst(3)],
+  )
+}
+
+// …and does not hide an export of one token after it.
+test below_floor_input_without_a_stake_credential_does_not_hide_an_export() {
+  !pf_run(
+    pf_list_a(Some(400)),
+    [pf_ada_input(0), pf_input(0, pf_a(), 150), pf_input(1, pf_a(), 150)],
+    [pf_output(pf_a(), 299), pf_output(pf_c(), 1)],
+    [pf_src(3)],
+    [pf_dst(3), pf_dst(3)],
+  )
+}
+
+// An input at A's address holding only another asset name spends nothing of
+// the security token, so it counts as nothing spent.
+test below_floor_holder_input_without_the_security_asset_counts_as_nothing_spent() {
+  let other_name_value = merge(
+    from_lovelace(2_000_000),
+    from_asset(t_issuance_policy, "OTHER", 1_000),
+  )
+  let other_name_input = Input {
+    ..pf_input(1, pf_a(), 1),
+    output: Output { ..pf_output(pf_a(), 1), value: other_name_value },
+  }
+  pf_run(
+    pf_list_a(Some(400)),
+    [other_name_input, pf_input(0, pf_a(), 150)],
+    [
+      pf_output(pf_a(), 150),
+      Output { ..pf_output(pf_a(), 1), value: other_name_value },
+    ],
+    [pf_src(3)],
+    [pf_dst(3)],
+  )
+}
+
+// Two partially frozen senders, A and D, each judged on its own hash and
+// spending. List: root → A(400) → D(400) → end; index 3 A (covers C), 4 D.
+fn pf_list_ad() -> List<Input> {
+  [
+    pf_root(Some(t_sender_stake)),
+    pf_node(0, t_sender_stake, Some(pf_d), Some(400)),
+    pf_node(1, pf_d, None, Some(400)),
+  ]
+}
+
+// A consolidates, D exports 1. Judged against A's inputs (100 ≤ 149), D would
+// pass, so only D's own spending rejects.
+test below_floor_two_senders_are_judged_on_their_own_spending() {
+  !pf_run(
+    pf_list_ad(),
+    [pf_input(0, pf_a(), 100), pf_input(1, VerificationKey(pf_d), 150)],
+    [
+      pf_output(pf_a(), 100),
+      pf_output(VerificationKey(pf_d), 149),
+      pf_output(pf_c(), 1),
+    ],
+    [pf_src(3), pf_src(4)],
+    [pf_dst(3), pf_dst(4), pf_dst(3)],
+  )
+}
+
+// Control: both consolidate.
+test below_floor_two_senders_both_consolidating_pass() {
+  pf_run(
+    pf_list_ad(),
+    [pf_input(0, pf_a(), 100), pf_input(1, VerificationKey(pf_d), 150)],
+    [pf_output(pf_a(), 100), pf_output(VerificationKey(pf_d), 150)],
+    [pf_src(3), pf_src(4)],
+    [pf_dst(3), pf_dst(4)],
+  )
 }

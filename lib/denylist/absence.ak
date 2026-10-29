@@ -47,7 +47,8 @@ pub fn covers_key(
 ///   - `None` — fully frozen: rejected, whatever side the party is on.
 ///   - `Some(f)` — partially frozen: `on_partially_frozen(party_hash, f)`
 ///     decides. Receiving sides pass `fn(_, _) { True }`; the transfer path's
-///     senders pass the "paid at least `f` back to themselves" rule.
+///     senders pass the "paid back at least `f`, or at least what they spent"
+///     rule.
 /// * **Any other element**: it must COVER the party — an absence proof,
 ///   exactly as before partial freezes existed.
 ///
