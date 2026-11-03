@@ -20,9 +20,7 @@ use aiken/builtin
 use aiken/collection/list
 use aiken/primitive/bytearray
 use cardano/address.{Address, Credential, Inline, Script, VerificationKey}
-use cardano/assets.{
-  PolicyId, Value, from_asset, from_lovelace, merge, quantity_of,
-}
+use cardano/assets.{Assets, PolicyId, from_asset, from_lovelace, merge}
 use cardano/transaction.{
   InlineDatum, Input, NoDatum, Output, OutputReference, Transaction, find_input,
 }
@@ -35,7 +33,7 @@ use tests/global_state_fixtures.{
   t_security_info_len_at_cap, t_security_info_len_over_cap, t_tx, t_vkey_10,
 }
 use types/global_state.{GlobalStateDatum, TrustedEntityMetadata}
-use utils.{must_run_script_withdrawal, quantity_of_policy_id}
+use utils.{must_run_script_withdrawal, quantity_of, quantity_of_policy_id}
 
 // ============================================================================
 // Sanitisation helpers (used by mint validator at genesis)
@@ -86,7 +84,7 @@ fn all_metadata_within_bound(
   )
 }
 
-fn sanitise_initial_datum(datum: GlobalStateDatum, self_mint: Value) -> Bool {
+fn sanitise_initial_datum(datum: GlobalStateDatum, self_mint: Assets) -> Bool {
   let root_len = bytearray.length(datum.member_root_hash)
   and {
     !datum.transfers_paused,
@@ -270,7 +268,7 @@ fn sanitise_datum(
   }
 }
 
-fn sanitise_mint() -> Value {
+fn sanitise_mint() -> Assets {
   merge(
     from_asset(t_pu_ll_policy, constants.linked_list_root_key, 1),
     from_asset(t_dl_ll_policy, constants.linked_list_root_key, 1),
@@ -465,7 +463,7 @@ fn t_mint_plain_output() -> Output {
 fn t_mint_tx(
   inputs: List<Input>,
   outputs: List<Output>,
-  mint: Value,
+  mint: Assets,
 ) -> Transaction {
   Transaction {
     ..t_tx(sanitise_datum(#"", 1), sanitise_datum(#"", 1), []),

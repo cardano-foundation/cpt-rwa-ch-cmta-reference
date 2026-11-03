@@ -351,8 +351,11 @@ checklist.
 
 ## Building the scripts
 
-Requires Aiken **v1.1.23**, pinned in [`aiken.toml`](aiken.toml) and matched by CI.
-Both linked lists are built on `anastasia-labs/aiken-design-patterns` **v1.8.0**.
+Requires Aiken **v1.1.24** (`bacbeb35fbc9f1db93cd2e1e93fb1d93053acb4a`) with stdlib **v4.0.0**, pinned in [`aiken.toml`](aiken.toml) and matched
+by CI. Both linked lists are built on `anastasia-labs/aiken-design-patterns` **v1.9.0** (v1.8.0's
+logic; only the stdlib `Value` → `Assets` rename). The scripts use Plutus batch-6 builtins
+(`dropList`, `unValueData`, `lookupCoin`), enabled for Plutus V3 at protocol version 11 (van Rossem,
+on mainnet since 2026-07-18): they cannot run on a network below protocol version 11.
 
 ```sh
 aiken fmt --check   # formatting
@@ -602,7 +605,9 @@ Operational rules:
 
 Figures below are measured with `aiken bench` (`aiken bench -m "transfer_logic_script.{..}"
 --max-size 40`; the per-test execution units `aiken check` prints are the other source) against the
-current, cost-optimised implementation. They are for this deployment's scripts alone — the CIP-113
+current, cost-optimised implementation. The bench table was re-measured on 2026-11-02 under Aiken
+v1.1.24 with the builtin-`Value` lookups; the per-party figures in the bullets predate that and are
+slightly high. They are for this deployment's scripts alone — the CIP-113
 base layer shares the same per-transaction budget, 10 000 M CPU / 14 M memory, and **memory is the
 binding axis**.
 
@@ -633,10 +638,10 @@ node; `seizure_cost_by_destination_count`: one seized input, `n` destinations, d
 
 | n | transfer mem | transfer CPU | seizure mem | seizure CPU |
 |---:|---:|---:|---:|---:|
-| 1 | 694,134 | 207,875,081 | 692,317 | 209,306,067 |
-| 4 | 1,347,964 | 414,369,677 | 992,220 | 304,515,714 |
-| 8 | 2,278,308 | 742,662,445 | 1,421,376 | 457,945,230 |
-| 16 | 4,417,204 | 1,595,793,773 | 2,418,792 | 863,077,158 |
+| 1 | 654,920 | 199,468,357 | 634,452 | 196,656,988 |
+| 4 | 1,250,219 | 395,682,454 | 882,558 | 281,887,204 |
+| 8 | 2,116,207 | 712,661,658 | 1,249,494 | 423,207,696 |
+| 16 | 4,126,391 | 1,543,165,858 | 2,122,470 | 804,121,576 |
 
 > **Conservative maxima, at 25% of the budget:** ordinary transfer ≤ 12 unique parties per side
 > denylist-only, ≤ 8 per side with attestation KYC on both sides; seizure ≤ 23 destinations

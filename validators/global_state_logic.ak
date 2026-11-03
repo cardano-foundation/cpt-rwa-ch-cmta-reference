@@ -11,7 +11,7 @@ use aiken/collection/list
 use aiken/collection/pairs
 use aiken/primitive/bytearray
 use cardano/address.{Credential, Script}
-use cardano/assets.{quantity_of, without_lovelace}
+use cardano/assets.{without_lovelace}
 use cardano/certificate.{Certificate, RegisterCredential}
 use cardano/transaction.{
   InlineDatum, Input, Mint, Output, Transaction, Withdraw,
@@ -32,7 +32,9 @@ use types/global_state.{
   set_transfers_paused, set_trusted_entity_vkeys, set_upgrades_locked,
 }
 use types/power_users.{PowerUser}
-use utils.{must_be_signed_by_credential, must_run_script_withdrawal}
+use utils.{
+  must_be_signed_by_credential, must_run_script_withdrawal, quantity_of,
+}
 
 // ============================================================================
 // GlobalState logic (withdraw-0, named by datum field 0)
