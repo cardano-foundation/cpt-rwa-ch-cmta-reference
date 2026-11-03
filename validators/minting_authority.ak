@@ -5,7 +5,7 @@ use aiken/interval.{Interval, IntervalBound, NegativeInfinity, PositiveInfinity}
 use aiken/primitive/bytearray
 use aiken_design_patterns/linked_list.{Element, Node, Root}
 use cardano/address.{Address, Credential, Inline, Script, VerificationKey}
-use cardano/assets.{Value, from_asset, from_lovelace, merge, quantity_of, zero}
+use cardano/assets.{Assets, from_asset, from_lovelace, merge, zero}
 use cardano/certificate.{Certificate, RegisterCredential, UnregisterCredential}
 use cardano/transaction.{
   InlineDatum, Input, NoDatum, Output, OutputReference, Transaction,
@@ -26,7 +26,7 @@ use types/minting_authority.{
   RegisterMint, RegisterStructural, UpgradeRegistryNode,
 }
 use types/power_users.{PowerUser}
-use utils.{must_be_signed_by_credential}
+use utils.{must_be_signed_by_credential, quantity_of}
 
 /// The swappable minting authority — see the redeemer type's doc comment for
 /// the trust model. This validator's OWN logic (KYC, denylist, power-user
@@ -406,14 +406,14 @@ validator minting_authority_validator(
         // (while leaving registration default-deny) would make the decision
         // reversible without weakening the genesis posture. Flagged in the
         // audit report as the single highest-value change to reconsider.
-        expect Some(out_unfracking_data) = list.at(
+        let out_unfracking_data = utils.safe_list_at(
           out_fields,
           constants.unfracking_logic_script_registry_node_index,
         )
         expect out_unfracking: Credential = out_unfracking_data
         expect out_unfracking == VerificationKey(#"")
 
-        expect Some(out_gs_cs_data) = list.at(
+        let out_gs_cs_data = utils.safe_list_at(
           out_fields,
           constants.global_state_cs_registry_node_index,
         )
@@ -674,7 +674,7 @@ fn verify_registration_structure(
   // Unfracking is left FORBIDDEN (`empty_vkey` is CIP-113's
   // least-permission value; no ledger transaction can carry a withdrawal
   // keyed by an empty hash, so an unset hook is default-deny).
-  expect Some(unfracking_data) = list.at(
+  let unfracking_data = utils.safe_list_at(
     node_fields,
     constants.unfracking_logic_script_registry_node_index,
   )
@@ -682,7 +682,7 @@ fn verify_registration_structure(
   expect node_unfracking == VerificationKey(#"")
 
   // The node must declare THIS deployment's GlobalState.
-  expect Some(global_state_cs_data) = list.at(
+  let global_state_cs_data = utils.safe_list_at(
     node_fields,
     constants.global_state_cs_registry_node_index,
   )
@@ -708,12 +708,12 @@ fn names_pinned_transfer_scripts(
   // An authority built with one hash in both slots would pin the very swap
   // this check exists to prevent.
   expect transfer_logic_script_hash != third_party_transfer_logic_script_hash
-  expect Some(transfer_logic_data) = list.at(
+  let transfer_logic_data = utils.safe_list_at(
     node_fields,
     constants.transfer_logic_script_registry_node_index,
   )
   expect transfer_logic: Credential = transfer_logic_data
-  expect Some(third_party_logic_data) = list.at(
+  let third_party_logic_data = utils.safe_list_at(
     node_fields,
     constants.third_party_transfer_logic_script_registry_node_index,
   )
@@ -2008,7 +2008,7 @@ test register_mint_reference_only_fails_with_burn_only_operator() {
 // ── RegisterStructural: registration with no mint ───────────────────────────
 
 fn make_register_structural_tx(
-  extra_issuance_mint: Value,
+  extra_issuance_mint: Assets,
   signatories: List<ByteArray>,
 ) -> Transaction {
   Transaction {

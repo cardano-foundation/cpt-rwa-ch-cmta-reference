@@ -10,7 +10,7 @@ use aiken/collection/pairs
 use aiken/primitive/bytearray
 use aiken_design_patterns/linked_list.{Element, Node}
 use cardano/address.{Address, Credential, Script, VerificationKey}
-use cardano/assets.{Value, from_asset, from_lovelace, merge, zero}
+use cardano/assets.{Assets, from_asset, from_lovelace, merge, zero}
 use cardano/certificate.{RegisterCredential, UnregisterCredential}
 use cardano/transaction.{
   InlineDatum, Input, Mint, NoDatum, Output, ScriptPurpose, Transaction,
@@ -542,7 +542,7 @@ fn mintsecurity_redeemer() -> GlobalStateSpendRedeemer {
 const t_wallet_vkey: ByteArray =
   #"77777777777777777777777777777777777777777777777777777777"
 
-fn t_security_token_value() -> Value {
+fn t_security_token_value() -> Assets {
   merge(from_lovelace(2_000_000), from_asset(t_issuance_policy, t_sec_name, 1))
 }
 
@@ -946,7 +946,7 @@ const t_foreign_policy: ByteArray =
 
 /// Rebuild the continuing GlobalState output (index 0, what every redeemer
 /// names) with a transformed value; everything else is untouched.
-fn with_gs_output_value(tx: Transaction, f: fn(Value) -> Value) -> Transaction {
+fn with_gs_output_value(tx: Transaction, f: fn(Assets) -> Assets) -> Transaction {
   expect [gs_out, ..rest] = tx.outputs
   Transaction {
     ..tx,

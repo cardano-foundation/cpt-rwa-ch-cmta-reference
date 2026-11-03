@@ -9,7 +9,7 @@ use aiken/merkle_patricia_forestry as mpf
 use aiken/primitive/bytearray
 use aiken_design_patterns/linked_list.{Element, Node, Root}
 use cardano/address.{Address, Credential, Inline, Script, VerificationKey}
-use cardano/assets.{from_asset, from_lovelace, merge, quantity_of}
+use cardano/assets.{from_asset, from_lovelace, merge}
 use cardano/certificate.{Certificate, RegisterCredential}
 use cardano/transaction.{
   InlineDatum, Input, NoDatum, Output, OutputReference, Transaction,
@@ -30,7 +30,7 @@ use types/power_users.{PowerUser}
 use types/third_party_transfer_logic_script.{
   ThirdPartyDestinationAction, ThirdPartyTransferLogicScriptWithdrawRedeemer,
 }
-use utils.{must_be_signed_by_credential}
+use utils.{must_be_signed_by_credential, quantity_of}
 
 /// Third-party (force) transfer logic for emergency regulatory flows.
 ///

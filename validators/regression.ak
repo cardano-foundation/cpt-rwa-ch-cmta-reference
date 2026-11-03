@@ -41,7 +41,7 @@ use aiken/interval.{Interval, IntervalBound, NegativeInfinity, PositiveInfinity}
 use aiken/primitive/bytearray
 use aiken_design_patterns/linked_list.{Element, Node, Root}
 use cardano/address.{Address, Credential, Inline, Script, VerificationKey}
-use cardano/assets.{Value, from_asset, from_lovelace, merge, zero}
+use cardano/assets.{Assets, from_asset, from_lovelace, merge, zero}
 use cardano/transaction.{
   InlineDatum, Input, NoDatum, Output, OutputReference, Transaction,
 }
@@ -249,7 +249,7 @@ fn gs_datum(
   }
 }
 
-fn gs_value(lovelace: Int) -> Value {
+fn gs_value(lovelace: Int) -> Assets {
   merge(
     from_lovelace(lovelace),
     from_asset(gs_policy, constants.global_state_asset_name, 1),

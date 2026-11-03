@@ -9,7 +9,7 @@ use aiken/merkle_patricia_forestry as mpf
 use aiken/primitive/bytearray
 use aiken_design_patterns/linked_list.{Element, Node, Root}
 use cardano/address.{Address, Credential, Inline, Script, VerificationKey}
-use cardano/assets.{from_asset, from_lovelace, merge, quantity_of}
+use cardano/assets.{from_asset, from_lovelace, merge}
 use cardano/certificate.{Certificate, RegisterCredential}
 use cardano/transaction.{
   InlineDatum, Input, NoDatum, Output, OutputReference, Transaction,
@@ -31,7 +31,7 @@ use types/transfer_logic_script.{
   TransferLogicScriptAction, TransferLogicScriptDestinationAction,
   TransferLogicScriptWithdrawRedeemer,
 }
-use utils
+use utils.{quantity_of}
 
 /// Transfer logic for a BAFIN security token (Track 4, TEL+denylist model).
 ///
