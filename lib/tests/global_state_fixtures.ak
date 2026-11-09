@@ -8,7 +8,7 @@ use aiken/collection/list
 use aiken/interval.{Interval, IntervalBound, NegativeInfinity, PositiveInfinity}
 use aiken/primitive/bytearray
 use cardano/address.{Address, Script}
-use cardano/assets.{Value, from_asset, from_lovelace, merge, zero}
+use cardano/assets.{Assets, from_asset, from_lovelace, merge, zero}
 use cardano/transaction.{
   InlineDatum, Input, Output, OutputReference, Transaction,
 }
@@ -63,7 +63,7 @@ pub fn t_datum(transfers_paused: Bool, deactivated: Bool) -> GlobalStateDatum {
   }
 }
 
-pub fn t_gs_value() -> Value {
+pub fn t_gs_value() -> Assets {
   merge(
     from_lovelace(2_000_000),
     from_asset(t_gs_policy, constants.global_state_asset_name, 1),

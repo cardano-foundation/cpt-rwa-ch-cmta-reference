@@ -4,7 +4,7 @@ use aiken/collection/list
 use aiken/primitive/bytearray
 use cardano/address.{Address, Script}
 use cardano/assets.{
-  AssetName, PolicyId, Value, from_asset, from_lovelace, merge, to_dict, tokens,
+  AssetName, Assets, PolicyId, from_asset, from_lovelace, merge, to_dict, tokens,
 }
 use cardano/transaction.{InlineDatum, NoDatum, Output}
 use constants
@@ -31,7 +31,7 @@ pub fn is_protected(asset_name: ByteArray) -> Bool {
 /// Scoped to the one policy on purpose: a UTxO may legitimately hold anything
 /// else, and enumerating a whole `Value` would make this cost grow with assets
 /// this deployment has no opinion about.
-pub fn value_has_protected(value: Value, issuance_policy_id: PolicyId) -> Bool {
+pub fn value_has_protected(value: Assets, issuance_policy_id: PolicyId) -> Bool {
   tokens(value, issuance_policy_id)
     |> dict.to_pairs
     |> list.any(fn(entry) { is_protected(entry.1st) })
@@ -160,7 +160,7 @@ fn t_datum() -> Data {
   raw
 }
 
-fn t_output(value: Value, datum: Data) -> Output {
+fn t_output(value: Assets, datum: Data) -> Output {
   Output {
     address: Address {
       payment_credential: Script(t_policy),
@@ -172,7 +172,7 @@ fn t_output(value: Value, datum: Data) -> Output {
   }
 }
 
-fn t_ref_value() -> Value {
+fn t_ref_value() -> Assets {
   merge(from_lovelace(2_000_000), from_asset(t_policy, t_ref_name, 1))
 }
 

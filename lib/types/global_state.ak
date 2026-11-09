@@ -1,12 +1,12 @@
 use aiken/builtin
 use aiken/collection/list
 use cardano/address.{Address, Script}
-use cardano/assets.{Value, from_asset, quantity_of}
+use cardano/assets.{Assets, from_asset}
 use cardano/transaction.{
   Datum, InlineDatum, Input, NoDatum, Output, OutputReference,
 }
 use constants
-use utils
+use utils.{quantity_of}
 
 /// Free-form metadata attached to a trusted entity (e.g. jurisdiction, provider
 /// URL, etc.). Unused by on-chain logic; kept for forward-compat.
@@ -1040,7 +1040,7 @@ test decode_global_state_core_rejects_a_retyped_minting_authority() fail {
 
 // The core resolver is the authentication choke point of the permanent
 // scripts: no NFT, or a datum that is not inline, traps.
-fn test_core_output(value: Value, datum: Datum) -> Output {
+fn test_core_output(value: Assets, datum: Datum) -> Output {
   Output {
     address: Address {
       payment_credential: Script(#"00"),
