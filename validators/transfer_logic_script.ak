@@ -14,6 +14,7 @@ use cardano/certificate.{Certificate, RegisterCredential}
 use cardano/transaction.{
   InlineDatum, Input, NoDatum, Output, OutputReference, Transaction,
 }
+use cardano/value
 use cip68
 use compliance
 use constants
@@ -31,7 +32,7 @@ use types/transfer_logic_script.{
   TransferLogicScriptAction, TransferLogicScriptDestinationAction,
   TransferLogicScriptWithdrawRedeemer,
 }
-use utils.{quantity_of}
+use utils
 
 /// Transfer logic for a BAFIN security token (Track 4, TEL+denylist model).
 ///
@@ -127,8 +128,8 @@ validator transfer_logic_validator(
         self.inputs,
         [],
         fn(input, result) {
-          if quantity_of(
-            input.output.value,
+          if value.quantity_of(
+            assets.to_value(input.output.value),
             issuance_policy_id,
             security_asset_name,
           ) > 0 {
@@ -324,8 +325,8 @@ fn paid_back_to_holder(
     outputs,
     0,
     fn(output, paid_back) {
-      let quantity = quantity_of(
-        output.value,
+      let quantity = value.quantity_of(
+        assets.to_value(output.value),
         issuance_policy_id,
         security_asset_name,
       )

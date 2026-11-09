@@ -10,6 +10,7 @@ use cardano/certificate.{Certificate, RegisterCredential, UnregisterCredential}
 use cardano/transaction.{
   InlineDatum, Input, NoDatum, Output, OutputReference, Transaction,
 }
+use cardano/value
 use cip68
 use constants
 use denylist/absence.{verify_denylist_permits}
@@ -26,7 +27,7 @@ use types/minting_authority.{
   RegisterMint, RegisterStructural, UpgradeRegistryNode,
 }
 use types/power_users.{PowerUser}
-use utils.{must_be_signed_by_credential, quantity_of}
+use utils.{must_be_signed_by_credential}
 
 /// The swappable minting authority — see the redeemer type's doc comment for
 /// the trust model. This validator's OWN logic (KYC, denylist, power-user
@@ -198,8 +199,8 @@ validator minting_authority_validator(
         // callers — this one and `RegisterMint` below — read it once.
         let gs_input = utils.safe_list_at(self.inputs, global_state_input_index)
         expect
-          quantity_of(
-            gs_input.output.value,
+          value.quantity_of(
+            assets.to_value(gs_input.output.value),
             global_state_policy_id,
             constants.global_state_asset_name,
           ) == 1
@@ -265,8 +266,8 @@ validator minting_authority_validator(
         // `verify_mint_or_burn`.
         let gs_input = utils.safe_list_at(self.inputs, global_state_input_index)
         expect
-          quantity_of(
-            gs_input.output.value,
+          value.quantity_of(
+            assets.to_value(gs_input.output.value),
             global_state_policy_id,
             constants.global_state_asset_name,
           ) == 1
@@ -660,7 +661,12 @@ fn verify_registration_structure(
   expect [Pair(node_asset_name, _)] = dict.to_pairs(
     assets.tokens(node_output.value, registry_policy_id),
   )
-  expect quantity_of(self.mint, registry_policy_id, node_asset_name) == 1
+  expect
+    value.quantity_of(
+      assets.to_value(self.mint),
+      registry_policy_id,
+      node_asset_name,
+    ) == 1
 
   // F08: registry fields 3 and 4 must name exactly this deployment's
   // transfer and seizure scripts. See `names_pinned_transfer_scripts`.
@@ -753,8 +759,8 @@ fn verify_mint_or_burn(
   // Ledger truth, derived here rather than accepted from a caller so the
   // "actual vs claimed" comparison below cannot be defeated by passing a
   // matched-but-wrong pair.
-  let minted_amount = quantity_of(
-    self.mint,
+  let minted_amount = value.quantity_of(
+    assets.to_value(self.mint),
     issuance_policy_id,
     security_asset_name,
   )
@@ -861,7 +867,11 @@ fn verify_mint_destinations(
   when outputs is {
     [] -> True
     [output, ..rest_outputs] ->
-      if quantity_of(output.value, issuance_policy_id, security_asset_name) > 0 {
+      if value.quantity_of(
+        assets.to_value(output.value),
+        issuance_policy_id,
+        security_asset_name,
+      ) > 0 {
         // The base layer's `no_escape` already forbids any token of this
         // policy at a non-programmable-base output, so only the inline
         // STAKE credential — the owner identity — needs reading here. An

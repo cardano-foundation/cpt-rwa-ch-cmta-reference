@@ -3,10 +3,11 @@ use aiken/collection/dict
 use aiken/collection/list
 use aiken/interval.{Finite, Interval, IntervalBound}
 use cardano/address.{Address, Credential, Script, VerificationKey}
-use cardano/assets.{from_asset, from_lovelace, merge, quantity_of}
+use cardano/assets.{from_asset, from_lovelace, merge}
 use cardano/transaction.{
   InlineDatum, Input, Output, OutputReference, Transaction,
 }
+use cardano/value
 use constants
 use denylist/absence.{covers_key}
 use types/global_state
@@ -272,8 +273,8 @@ pub fn with_trailing_gs_fields(
   gs_policy: ByteArray,
 ) -> Transaction {
   let extend = fn(input: Input) {
-    if quantity_of(
-      input.output.value,
+    if value.quantity_of(
+      assets.to_value(input.output.value),
       gs_policy,
       constants.global_state_asset_name,
     ) == 1 {
@@ -311,8 +312,8 @@ pub fn with_reshaped_gs_tail(
   gs_policy: ByteArray,
 ) -> Transaction {
   let reshape = fn(input: Input) {
-    if quantity_of(
-      input.output.value,
+    if value.quantity_of(
+      assets.to_value(input.output.value),
       gs_policy,
       constants.global_state_asset_name,
     ) == 1 {
@@ -357,8 +358,8 @@ pub fn with_malformed_gs_deactivated(
   gs_policy: ByteArray,
 ) -> Transaction {
   let malform = fn(input: Input) {
-    if quantity_of(
-      input.output.value,
+    if value.quantity_of(
+      assets.to_value(input.output.value),
       gs_policy,
       constants.global_state_asset_name,
     ) == 1 {

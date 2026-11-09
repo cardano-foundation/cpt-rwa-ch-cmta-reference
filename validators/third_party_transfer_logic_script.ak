@@ -14,6 +14,7 @@ use cardano/certificate.{Certificate, RegisterCredential}
 use cardano/transaction.{
   InlineDatum, Input, NoDatum, Output, OutputReference, Transaction,
 }
+use cardano/value
 use cip68
 use compliance
 use constants
@@ -30,7 +31,7 @@ use types/power_users.{PowerUser}
 use types/third_party_transfer_logic_script.{
   ThirdPartyDestinationAction, ThirdPartyTransferLogicScriptWithdrawRedeemer,
 }
-use utils.{must_be_signed_by_credential, quantity_of}
+use utils.{must_be_signed_by_credential}
 
 /// Third-party (force) transfer logic for emergency regulatory flows.
 ///
@@ -120,8 +121,8 @@ validator third_party_transfer_logic_validator(
         self.outputs,
         [],
         fn(output, result) {
-          if quantity_of(
-            output.value,
+          if value.quantity_of(
+            assets.to_value(output.value),
             expected_issuance_policy_id,
             security_asset_name,
           ) > 0 {
@@ -181,8 +182,8 @@ validator third_party_transfer_logic_validator(
     let at_least_one_seized_input = list.any(
       self.inputs,
       fn(input) {
-        quantity_of(
-          input.output.value,
+        value.quantity_of(
+          assets.to_value(input.output.value),
           expected_issuance_policy_id,
           security_asset_name,
         ) > 0

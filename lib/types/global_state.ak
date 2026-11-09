@@ -5,8 +5,9 @@ use cardano/assets.{Assets, from_asset}
 use cardano/transaction.{
   Datum, InlineDatum, Input, NoDatum, Output, OutputReference,
 }
+use cardano/value
 use constants
-use utils.{quantity_of}
+use utils
 
 /// Free-form metadata attached to a trusted entity (e.g. jurisdiction, provider
 /// URL, etc.). Unused by on-chain logic; kept for forward-compat.
@@ -458,8 +459,8 @@ pub fn gs_datum_from_output(
   global_state_policy_id: ByteArray,
 ) -> GlobalStateDatum {
   expect
-    quantity_of(
-      gs_output.value,
+    value.quantity_of(
+      assets.to_value(gs_output.value),
       global_state_policy_id,
       constants.global_state_asset_name,
     ) == 1
@@ -481,8 +482,8 @@ pub fn genesis_global_state(
   expect Some(gs_output) = list.find(
     outputs,
     fn(output) {
-      quantity_of(
-        output.value,
+      value.quantity_of(
+        assets.to_value(output.value),
         global_state_policy_id,
         constants.global_state_asset_name,
       ) == 1
@@ -553,8 +554,8 @@ pub fn gs_core_from_output(
   global_state_policy_id: ByteArray,
 ) -> GlobalStateCore {
   expect
-    quantity_of(
-      gs_output.value,
+    value.quantity_of(
+      assets.to_value(gs_output.value),
       global_state_policy_id,
       constants.global_state_asset_name,
     ) == 1

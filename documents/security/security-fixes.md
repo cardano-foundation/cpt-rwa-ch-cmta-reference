@@ -86,6 +86,36 @@ the `aiken bench` scaling benches on the transfer and seizure paths (see
 [what is still open](#what-is-still-open) and the README's *Execution budget and transaction
 sizing* section).
 
+### Addendum — Aiken v1.1.24, stdlib v4.0.0, design-patterns v1.9.0 (2026-11)
+
+The toolchain was bumped from Aiken v1.1.23 / stdlib v3.1.0 / design-patterns v1.8.0 to Aiken
+**v1.1.24** / stdlib **v4.0.0** / design-patterns **v1.9.0** (with `aiken-lang/fuzz` v3.0.0 and
+`keyan-m/aiken-scott-utils` v1.5.0). Every validator hash changes; the scripts now require
+protocol version 11.
+
+- **design-patterns v1.9.0 is v1.8.0's logic.** The upstream diff
+  (`v1.8.0...v1.9.0`) only renames stdlib's `Value` to `Assets` and bumps dependency versions; the
+  security properties in the table above carry over unchanged. Aiken v1.1.24 still does not
+  resolve a dependency's own manifest, so `fuzz` and `aiken-scott-utils` stay declared explicitly.
+- **stdlib v4's other breaking change does not apply.** `script_purpose.compare` now follows the
+  ledger's ordering, but neither this repo nor design-patterns calls it.
+- **Asset lookups use the builtin `Value`.** Every lookup is written out as
+  `value.quantity_of(assets.to_value(v), policy, name)`: `to_value` converts with `unValueData`
+  and `value.quantity_of` looks up with `lookupCoin` (Plutus batch 6). The conversion **traps on a
+  non-canonical value**. Every call site passes a value the ledger built (an input or output
+  value, or `tx.mint`), which is always canonical; any new `to_value` call must do the same. The
+  calls are deliberately not hidden behind a helper, so the trapping conversion stays visible at
+  each call site (inlined, they also measured 0.1–0.4% less memory than a wrapper). Padding a
+  UTxO with unrelated tokens does not make this costlier than the old map walk: at 200 junk
+  policies it is still ~0.8M mem / 160M CPU cheaper.
+- **`safe_list_at` uses `dropList`.** Its `index >= 0` guard is load-bearing: `dropList` with a
+  negative count returns the list unchanged and would silently read element 0. Tests cover a
+  negative index and an index past the end.
+- **Measured effect** (against the v1.1.23 build, `aiken bench`): memory −5–12% and CPU −2–8% on
+  the transfer and seizure paths, and every script 84–344 bytes smaller. Six tests cost
+  0.1–0.8M more CPU (the spend-delegation handlers, most likely `dropList` at small indices), with
+  memory still lower — negligible against the budget.
+
 ---
 
 ## 1. The denylist absence proof compared against a corrupted key

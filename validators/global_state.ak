@@ -24,6 +24,7 @@ use cardano/assets.{Assets, PolicyId, from_asset, from_lovelace, merge}
 use cardano/transaction.{
   InlineDatum, Input, NoDatum, Output, OutputReference, Transaction, find_input,
 }
+use cardano/value
 use constants
 use tests/global_state_fixtures.{
   rotated, t_admin, t_data_of_raw_length, t_datum_size, t_dl_ll_policy,
@@ -33,7 +34,7 @@ use tests/global_state_fixtures.{
   t_security_info_len_at_cap, t_security_info_len_over_cap, t_tx, t_vkey_10,
 }
 use types/global_state.{GlobalStateDatum, TrustedEntityMetadata}
-use utils.{must_run_script_withdrawal, quantity_of, quantity_of_policy_id}
+use utils.{must_run_script_withdrawal, quantity_of_policy_id}
 
 // ============================================================================
 // Sanitisation helpers (used by mint validator at genesis)
@@ -194,7 +195,11 @@ validator global_state_mint_validator(
       // No other asset names under this policy are minted alongside the NFT.
       quantity_of_policy_id(self.mint, policy_id) == 1,
       // Exactly one global_state NFT is minted.
-      quantity_of(self.mint, policy_id, constants.global_state_asset_name) == 1,
+      value.quantity_of(
+        assets.to_value(self.mint),
+        policy_id,
+        constants.global_state_asset_name,
+      ) == 1,
       // GlobalState is state, not script storage.
       output_parameters.reference_script == None,
       // Born at the proxy — the SCRIPT, never a key with the same bytes. Every
