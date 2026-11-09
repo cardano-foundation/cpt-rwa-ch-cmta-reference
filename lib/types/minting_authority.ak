@@ -1,18 +1,5 @@
 use types/global_state.{GlobalStateLocation}
-use types/kyc_proof.{KycProof}
-
-/// One entry per unique destination (unique stake-credential among outputs
-/// carrying the security token) when minting. Mirrors the transfer-logic
-/// destination action: a KYC proof (checked only when
-/// `GlobalStateDatum.requires_receiver_kyc`) and a denylist element
-/// reference-input index (always checked): a covering node, or the
-/// destination's own node when only partially frozen. CMTAT v3.2.0
-/// refuses to mint to a frozen address (core) or to a non-allowlisted one
-/// (Allowlist variant); this is the eUTxO equivalent.
-pub type MintingLogicDestinationAction {
-  destination_proof: KycProof,
-  destination_denylist_ref_input_index: Int,
-}
+use types/party_action.{PartyAction}
 
 /// Withdraw redeemer for validators/minting_authority.ak — the swappable
 /// minting authority named by `GlobalStateDatum.minting_script_credential_
@@ -46,8 +33,10 @@ pub type MintingAuthorityWithdrawRedeemer {
     /// One action per unique destination stake credential among outputs
     /// carrying the security token. Only consulted when `minted_amount > 0`
     /// (burns have no destinations); ordered to match the aggregated
-    /// unique-destinations order.
-    destination_actions: List<MintingLogicDestinationAction>,
+    /// unique-destinations order. CMTAT v3.2.0 refuses to mint to a frozen
+    /// address (core) or to a non-allowlisted one (Allowlist variant); this
+    /// is the eUTxO equivalent.
+    destination_actions: List<PartyAction>,
   }
   /// The first mint, carried by the CIP-113 registration that creates this
   /// token's registry node. Identical authorisation to `MintBurn` — the node
@@ -71,7 +60,7 @@ pub type MintingAuthorityWithdrawRedeemer {
     /// Quantity minted by this registration. Never negative — nothing exists
     /// to burn yet.
     minted_amount: Int,
-    destination_actions: List<MintingLogicDestinationAction>,
+    destination_actions: List<PartyAction>,
   }
   /// The CIP-113 UPGRADE path for the OTHER logic scripts.
   ///

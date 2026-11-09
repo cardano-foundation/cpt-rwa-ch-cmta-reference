@@ -5,7 +5,7 @@ use denylist/absence.{
 }
 use kyc/verify.{verify_kyc_proof}
 use types/global_state.{GlobalStateDatum}
-use types/kyc_proof.{KycProof}
+use types/party_action.{PartyAction}
 use utils
 
 /// Vet one party per compliance action, walking both lists in LOCKSTEP.
@@ -30,8 +30,9 @@ use utils
 ///    the action they read (`source_*` vs `destination_*`). That is precisely
 ///    the kind of difference a copy-paste gets wrong silently — and this
 ///    codebase has already had one such regression, where the sender gate read
-///    the receiver's KYC flag. The accessors are now passed in, so the
-///    difference is one argument at the call site instead of a duplicated body.
+///    the receiver's KYC flag. Every side now uses the one `PartyAction` type,
+///    so there is no per-side field to pick at all; what still differs per
+///    call site (`on_partially_frozen`, `requires_kyc`) is an explicit argument.
 ///
 /// 2. **Cost.** The copies paired party `i` with action `i` using
 ///    `safe_list_at(actions, i)` inside a fold. `safe_list_at` walks from the
@@ -49,9 +50,7 @@ use utils
 /// action at its own position.
 pub fn verify_parties(
   parties: List<Credential>,
-  actions: List<action>,
-  proof_of: fn(action) -> KycProof,
-  denylist_index_of: fn(action) -> Int,
+  actions: List<PartyAction>,
   on_partially_frozen: fn(ByteArray, Int) -> Bool,
   requires_kyc: Bool,
   gs_datum: GlobalStateDatum,
@@ -64,15 +63,7 @@ pub fn verify_parties(
     [party, ..rest_parties] -> {
       expect [action, ..rest_actions] = actions
       and {
-        kyc_ok(
-          party,
-          action,
-          proof_of,
-          requires_kyc,
-          gs_datum,
-          issuance_policy_id,
-          self,
-        ),
+        kyc_ok(party, action, requires_kyc, gs_datum, issuance_policy_id, self),
         when rest_parties is {
           // One party on this side — by far the commonest shape — takes the
           // plain proof with no memo machinery at all, so it costs exactly
@@ -80,7 +71,7 @@ pub fn verify_parties(
           [] ->
             verify_denylist_permits(
               utils.credential_hash(party),
-              denylist_index_of(action),
+              action.denylist_ref_input_index,
               self.reference_inputs,
               gs_datum.denylist_linked_list_policy_id,
               denylist_script_hash,
@@ -89,7 +80,7 @@ pub fn verify_parties(
           // Several parties: authenticate this party's element and start the
           // walk with it remembered (`vet_remembering`).
           _ -> {
-            let element_index = denylist_index_of(action)
+            let element_index = action.denylist_ref_input_index
             with_denylist_element(
               element_index,
               self.reference_inputs,
@@ -110,8 +101,6 @@ pub fn verify_parties(
                   vet_remembering(
                     rest_parties,
                     rest_actions,
-                    proof_of,
-                    denylist_index_of,
                     on_partially_frozen,
                     requires_kyc,
                     gs_datum,
@@ -140,8 +129,7 @@ pub fn verify_parties(
 /// have made unnecessary.
 fn kyc_ok(
   party: Credential,
-  action: action,
-  proof_of: fn(action) -> KycProof,
+  action: PartyAction,
   requires_kyc: Bool,
   gs_datum: GlobalStateDatum,
   issuance_policy_id: ByteArray,
@@ -149,7 +137,7 @@ fn kyc_ok(
 ) -> Bool {
   if requires_kyc {
     verify_kyc_proof(
-      proof_of(action),
+      action.proof,
       party,
       gs_datum,
       issuance_policy_id,
@@ -200,9 +188,7 @@ fn kyc_ok(
 /// `memo_never_judges_a_party_against_a_stale_element`).
 fn vet_remembering(
   parties: List<Credential>,
-  actions: List<action>,
-  proof_of: fn(action) -> KycProof,
-  denylist_index_of: fn(action) -> Int,
+  actions: List<PartyAction>,
   on_partially_frozen: fn(ByteArray, Int) -> Bool,
   requires_kyc: Bool,
   gs_datum: GlobalStateDatum,
@@ -219,19 +205,11 @@ fn vet_remembering(
     [party, ..rest_parties] -> {
       expect [action, ..rest_actions] = actions
       and {
-        kyc_ok(
-          party,
-          action,
-          proof_of,
-          requires_kyc,
-          gs_datum,
-          issuance_policy_id,
-          self,
-        ),
+        kyc_ok(party, action, requires_kyc, gs_datum, issuance_policy_id, self),
         // Bound inside this conjunct, so a party failing KYC evaluates no
         // more than it did before.
         {
-          let element_index = denylist_index_of(action)
+          let element_index = action.denylist_ref_input_index
           if element_index == last_index {
             // Only the ELEMENT is remembered, never a verdict: whether it is
             // this party's own node, and what that means, is decided afresh for
@@ -248,8 +226,6 @@ fn vet_remembering(
               vet_remembering(
                 rest_parties,
                 rest_actions,
-                proof_of,
-                denylist_index_of,
                 on_partially_frozen,
                 requires_kyc,
                 gs_datum,
@@ -283,8 +259,6 @@ fn vet_remembering(
                   vet_remembering(
                     rest_parties,
                     rest_actions,
-                    proof_of,
-                    denylist_index_of,
                     on_partially_frozen,
                     requires_kyc,
                     gs_datum,

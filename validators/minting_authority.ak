@@ -19,13 +19,14 @@ use types/cip68.{Cip68Datum} as types_cip68
 use types/denylist.{Denylist}
 use types/global_state.{
   GlobalStateDatum, GlobalStateReferenced, GlobalStateSpent, decode_global_state,
-  gs_datum_from_location,
+  resolve_global_state,
 }
 use types/kyc_proof.{Cip30Attestation, Cip30AttestationProof}
 use types/minting_authority.{
-  MintBurn, MintingAuthorityWithdrawRedeemer, MintingLogicDestinationAction,
-  RegisterMint, RegisterStructural, UpgradeRegistryNode,
+  MintBurn, MintingAuthorityWithdrawRedeemer, RegisterMint, RegisterStructural,
+  UpgradeRegistryNode,
 }
+use types/party_action.{PartyAction}
 use types/power_users.{PowerUser}
 use utils.{must_be_signed_by_credential}
 
@@ -421,7 +422,7 @@ validator minting_authority_validator(
         expect out_gs_cs: ByteArray = out_gs_cs_data
         expect out_gs_cs == global_state_policy_id
 
-        let gs_datum = gs_datum_from_location(
+        let gs_datum = resolve_global_state(
           self.inputs,
           self.reference_inputs,
           global_state_location,
@@ -447,7 +448,7 @@ validator minting_authority_validator(
           third_party_transfer_logic_script_hash,
           self,
         )
-        let gs_datum = gs_datum_from_location(
+        let gs_datum = resolve_global_state(
           self.inputs,
           self.reference_inputs,
           global_state_location,
@@ -749,7 +750,7 @@ fn verify_mint_or_burn(
   expected_minted_amount: Int,
   gs_raw: Data,
   power_user_node_ref_input_index: Int,
-  destination_actions: List<MintingLogicDestinationAction>,
+  destination_actions: List<PartyAction>,
   security_asset_name: ByteArray,
   power_user_linked_list_policy_id: ByteArray,
   denylist_script_hash: ByteArray,
@@ -855,7 +856,7 @@ fn verify_mint_or_burn(
 /// attestation — is documented at the call site in `verify_mint_or_burn`.
 fn verify_mint_destinations(
   outputs: List<Output>,
-  actions: List<MintingLogicDestinationAction>,
+  actions: List<PartyAction>,
   seen: List<Credential>,
   issuance_policy_id: ByteArray,
   security_asset_name: ByteArray,
@@ -915,7 +916,7 @@ fn verify_mint_destinations(
                 dest_pkh == power_user_node_key,
                 // …or a valid KYC proof is presented for the receiver.
                 verify_kyc_proof(
-                  action.destination_proof,
+                  action.proof,
                   dest_credential,
                   gs_datum,
                   issuance_policy_id,
@@ -931,7 +932,7 @@ fn verify_mint_destinations(
             // such a holder. A fully frozen (`None`) holder is still refused.
             verify_denylist_permits(
               dest_pkh,
-              action.destination_denylist_ref_input_index,
+              action.denylist_ref_input_index,
               self.reference_inputs,
               gs_datum.denylist_linked_list_policy_id,
               denylist_script_hash,
@@ -1497,11 +1498,8 @@ fn dummy_proof() {
   }
 }
 
-fn clean_dest_action() -> MintingLogicDestinationAction {
-  MintingLogicDestinationAction {
-    destination_proof: dummy_proof(),
-    destination_denylist_ref_input_index: 2,
-  }
+fn clean_dest_action() -> PartyAction {
+  PartyAction { proof: dummy_proof(), denylist_ref_input_index: 2 }
 }
 
 fn run_withdraw(redeemer: MintingAuthorityWithdrawRedeemer, tx: Transaction) {
@@ -1814,10 +1812,7 @@ test mint_succeeds_without_any_registry_reference_input() {
     power_user_node_ref_input_index: 0,
     minted_amount: amount,
     destination_actions: [
-      MintingLogicDestinationAction {
-        destination_proof: dummy_proof(),
-        destination_denylist_ref_input_index: 1,
-      },
+      PartyAction { proof: dummy_proof(), denylist_ref_input_index: 1 },
     ],
   }
   run_withdraw(
@@ -1888,10 +1883,7 @@ fn register_mint_redeemer(amount: Int) -> MintingAuthorityWithdrawRedeemer {
     power_user_node_ref_input_index: 0,
     minted_amount: amount,
     destination_actions: [
-      MintingLogicDestinationAction {
-        destination_proof: dummy_proof(),
-        destination_denylist_ref_input_index: 1,
-      },
+      PartyAction { proof: dummy_proof(), denylist_ref_input_index: 1 },
     ],
   }
 }

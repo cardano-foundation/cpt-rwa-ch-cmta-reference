@@ -135,8 +135,11 @@ validator global_state_logic(
     // burned again — so outside genesis this logic's withdrawal still proves
     // nothing without a spent GlobalState. The redeemer's action is ignored;
     // its `global_state_output_index` names the GlobalState output.
+    // Converted once: every path reads it twice (the genesis test below, then
+    // the security-token mint check or `MintSecurity`'s minted amount).
+    let mint = assets.to_value(self.mint)
     if value.quantity_of(
-      assets.to_value(self.mint),
+      mint,
       global_state_policy_id,
       constants.global_state_asset_name,
     ) == 1 {
@@ -273,11 +276,7 @@ validator global_state_logic(
       // needs it — does not pay for the input scan.
       let security_token_untouched = fn() {
         and {
-          value.quantity_of(
-            assets.to_value(self.mint),
-            issuance_policy_id,
-            security_asset_name,
-          ) == 0,
+          value.quantity_of(mint, issuance_policy_id, security_asset_name) == 0,
           list.all(
             self.inputs,
             fn(input) {
@@ -400,7 +399,7 @@ validator global_state_logic(
                 )
                 expect issuance_policy_redeemer.1st == Mint(issuance_policy_id)
                 let minted_amount = value.quantity_of(
-                  assets.to_value(self.mint),
+                  mint,
                   issuance_policy_id,
                   security_asset_name,
                 )

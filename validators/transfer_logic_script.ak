@@ -23,15 +23,13 @@ use types/cip68.{Cip68Datum} as types_cip68
 use types/denylist.{Denylist}
 use types/global_state.{
   GlobalStateDatum, GlobalStateLocation, GlobalStateReferenced, GlobalStateSpent,
-  gs_datum_from_location,
+  resolve_global_state,
 }
 use types/kyc_proof.{
   Cip30Attestation, Cip30AttestationProof, KycProof, Membership, MembershipProof,
 }
-use types/transfer_logic_script.{
-  TransferLogicScriptAction, TransferLogicScriptDestinationAction,
-  TransferLogicScriptWithdrawRedeemer,
-}
+use types/party_action.{PartyAction}
+use types/transfer_logic_script.{TransferLogicScriptWithdrawRedeemer}
 use utils
 
 /// Transfer logic for a BAFIN security token (Track 4, TEL+denylist model).
@@ -78,14 +76,9 @@ validator transfer_logic_validator(
 ) {
   withdraw(
     redeemer: TransferLogicScriptWithdrawRedeemer,
-    credential: Credential,
+    _credential: Credential,
     self: Transaction,
   ) {
-    // A withdrawal credential may be a verification key, so this is a real
-    // assertion, not a formality.
-    expect Script(_) = credential
-    let issuance_policy_id = expected_issuance_policy_id
-
     // 1. Resolve and AUTHENTICATE GlobalState, then read every flag from the
     //    one parsed datum.
     //
@@ -98,9 +91,9 @@ validator transfer_logic_validator(
     //    It is also the safer shape. A bare `expect gs: GlobalStateDatum`
     //    authenticates NOTHING — it only checks that the bytes parse — so a
     //    read split from its authentication depends on some earlier line having
-    //    proved the NFT was there. `gs_datum_from_location` does the NFT check
+    //    proved the NFT was there. `resolve_global_state` does the NFT check
     //    (`== 1`) and the parse together, so a later edit cannot separate them.
-    let gs_datum: GlobalStateDatum = gs_datum_from_location(
+    let gs_datum: GlobalStateDatum = resolve_global_state(
       self.inputs,
       self.reference_inputs,
       redeemer.global_state_location,
@@ -127,10 +120,10 @@ validator transfer_logic_validator(
       list.foldl(
         self.inputs,
         [],
-        fn(input, result) {
+        fn(input, acc_stake_credentials) {
           if value.quantity_of(
             assets.to_value(input.output.value),
-            issuance_policy_id,
+            expected_issuance_policy_id,
             security_asset_name,
           ) > 0 {
             // Senders must also sit INSIDE the programmable-logic base.
@@ -139,13 +132,13 @@ validator transfer_logic_validator(
             // input carrying this token cannot sit anywhere else, so nothing
             // further to assert here.
             expect Some(Inline(stake_cred)) = input.output.address.stake_credential
-            if list.has(result, stake_cred) {
-              result
+            if list.has(acc_stake_credentials, stake_cred) {
+              acc_stake_credentials
             } else {
-              [stake_cred, ..result]
+              [stake_cred, ..acc_stake_credentials]
             }
           } else {
-            result
+            acc_stake_credentials
           }
         },
       ),
@@ -161,7 +154,10 @@ validator transfer_logic_validator(
           // ONE lookup of this policy's tokens per output, answering both
           // questions this fold has: is the output a destination, and does it
           // carry a CIP-68 metadata token whose shape must hold?
-          let policy_tokens = assets.tokens(output.value, issuance_policy_id)
+          let policy_tokens = assets.tokens(
+            output.value,
+            expected_issuance_policy_id,
+          )
 
           // The metadata token's shape is an INVARIANT, not a posture at
           // genesis. `minting_authority` pins it when it is minted; this is
@@ -173,7 +169,7 @@ validator transfer_logic_validator(
             cip68.enforce_if_protected(
               policy_tokens,
               output,
-              issuance_policy_id,
+              expected_issuance_policy_id,
             )
 
           let security_quantity = when
@@ -232,12 +228,10 @@ validator transfer_logic_validator(
     let all_senders_ok = compliance.verify_parties(
       inputs_user_credentials,
       redeemer.actions_for_each_input,
-      fn(action) { action.source_proof },
-      fn(action) { action.source_denylist_ref_input_index },
       fn(holder_hash, frozen_amount) {
         let paid_back = paid_back_to_holder(
           self.outputs,
-          issuance_policy_id,
+          expected_issuance_policy_id,
           security_asset_name,
           holder_hash,
         )
@@ -252,14 +246,14 @@ validator transfer_logic_validator(
         // credential.
         paid_back >= frozen_amount || paid_back >= paid_back_to_holder(
           list.map(self.inputs, fn(input) { input.output }),
-          issuance_policy_id,
+          expected_issuance_policy_id,
           security_asset_name,
           holder_hash,
         )
       },
       gs_datum.requires_sender_kyc,
       gs_datum,
-      issuance_policy_id,
+      expected_issuance_policy_id,
       denylist_script_hash,
       self,
     )
@@ -267,12 +261,10 @@ validator transfer_logic_validator(
     let all_destinations_ok = compliance.verify_parties(
       outputs_user_credentials,
       redeemer.destination_actions,
-      fn(action) { action.destination_proof },
-      fn(action) { action.destination_denylist_ref_input_index },
       fn(_, _) { True },
       gs_datum.requires_receiver_kyc,
       gs_datum,
-      issuance_policy_id,
+      expected_issuance_policy_id,
       denylist_script_hash,
       self,
     )
@@ -596,18 +588,12 @@ fn dummy_proof() -> KycProof {
 }
 
 // Covering-node index 2 = the empty denylist root (covers every key).
-fn t_source_action() -> TransferLogicScriptAction {
-  TransferLogicScriptAction {
-    source_proof: dummy_proof(),
-    source_denylist_ref_input_index: 2,
-  }
+fn t_source_action() -> PartyAction {
+  PartyAction { proof: dummy_proof(), denylist_ref_input_index: 2 }
 }
 
-fn t_dest_action() -> TransferLogicScriptDestinationAction {
-  TransferLogicScriptDestinationAction {
-    destination_proof: dummy_proof(),
-    destination_denylist_ref_input_index: 2,
-  }
+fn t_dest_action() -> PartyAction {
+  PartyAction { proof: dummy_proof(), denylist_ref_input_index: 2 }
 }
 
 fn t_transfer_tx(
@@ -739,20 +725,12 @@ fn t_cip30_proof(proof: Cip30AttestationProof) -> KycProof {
   Cip30Attestation { cip30_proof: proof }
 }
 
-fn t_source_action_with_proof(proof: KycProof) -> TransferLogicScriptAction {
-  TransferLogicScriptAction {
-    source_proof: proof,
-    source_denylist_ref_input_index: 2,
-  }
+fn t_source_action_with_proof(proof: KycProof) -> PartyAction {
+  PartyAction { proof, denylist_ref_input_index: 2 }
 }
 
-fn t_dest_action_with_proof(
-  proof: KycProof,
-) -> TransferLogicScriptDestinationAction {
-  TransferLogicScriptDestinationAction {
-    destination_proof: proof,
-    destination_denylist_ref_input_index: 2,
-  }
+fn t_dest_action_with_proof(proof: KycProof) -> PartyAction {
+  PartyAction { proof, denylist_ref_input_index: 2 }
 }
 
 /// Sibling of `t_transfer_tx` that (a) accepts a TEL for the GlobalState
@@ -800,8 +778,8 @@ fn t_transfer_tx_with_tel(
 }
 
 fn t_redeemer_with(
-  source_action: TransferLogicScriptAction,
-  dest_action: TransferLogicScriptDestinationAction,
+  source_action: PartyAction,
+  dest_action: PartyAction,
 ) -> TransferLogicScriptWithdrawRedeemer {
   TransferLogicScriptWithdrawRedeemer {
     global_state_location: GlobalStateReferenced {
@@ -837,16 +815,10 @@ test transfer_succeeds_without_any_registry_reference_input() {
         global_state_ref_input_index: 0,
       },
       actions_for_each_input: [
-        TransferLogicScriptAction {
-          source_proof: dummy_proof(),
-          source_denylist_ref_input_index: 1,
-        },
+        PartyAction { proof: dummy_proof(), denylist_ref_input_index: 1 },
       ],
       destination_actions: [
-        TransferLogicScriptDestinationAction {
-          destination_proof: dummy_proof(),
-          destination_denylist_ref_input_index: 1,
-        },
+        PartyAction { proof: dummy_proof(), denylist_ref_input_index: 1 },
       ],
     },
     tx,
@@ -882,16 +854,10 @@ fn t_spent_gs_redeemer(
   TransferLogicScriptWithdrawRedeemer {
     global_state_location: location,
     actions_for_each_input: [
-      TransferLogicScriptAction {
-        source_proof: dummy_proof(),
-        source_denylist_ref_input_index: 1,
-      },
+      PartyAction { proof: dummy_proof(), denylist_ref_input_index: 1 },
     ],
     destination_actions: [
-      TransferLogicScriptDestinationAction {
-        destination_proof: dummy_proof(),
-        destination_denylist_ref_input_index: 1,
-      },
+      PartyAction { proof: dummy_proof(), denylist_ref_input_index: 1 },
     ],
   }
 }
@@ -1462,26 +1428,20 @@ fn pf_output(stake: Credential, amount: Int) -> Output {
   }
 }
 
-fn pf_src(index: Int) -> TransferLogicScriptAction {
-  TransferLogicScriptAction {
-    source_proof: dummy_proof(),
-    source_denylist_ref_input_index: index,
-  }
+fn pf_src(index: Int) -> PartyAction {
+  PartyAction { proof: dummy_proof(), denylist_ref_input_index: index }
 }
 
-fn pf_dst(index: Int) -> TransferLogicScriptDestinationAction {
-  TransferLogicScriptDestinationAction {
-    destination_proof: dummy_proof(),
-    destination_denylist_ref_input_index: index,
-  }
+fn pf_dst(index: Int) -> PartyAction {
+  PartyAction { proof: dummy_proof(), denylist_ref_input_index: index }
 }
 
 fn pf_run(
   nodes: List<Input>,
   inputs: List<Input>,
   outputs: List<Output>,
-  sources: List<TransferLogicScriptAction>,
-  destinations: List<TransferLogicScriptDestinationAction>,
+  sources: List<PartyAction>,
+  destinations: List<PartyAction>,
 ) -> Bool {
   let tx = Transaction {
     ..t_transfer_tx(False, False, False, False),

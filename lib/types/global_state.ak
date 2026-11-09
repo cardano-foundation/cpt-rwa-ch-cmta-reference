@@ -429,7 +429,7 @@ pub fn set_minting_script_credential_hash(
 ///
 /// Fails (UPLC error) if: index out of range, NFT missing, datum non-inline,
 /// or datum shape invalid.
-pub fn gs_datum_from_location(
+pub fn resolve_global_state(
   inputs: List<Input>,
   reference_inputs: List<Input>,
   location: GlobalStateLocation,

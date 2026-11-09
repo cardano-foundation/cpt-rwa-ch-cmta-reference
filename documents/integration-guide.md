@@ -156,13 +156,13 @@ For one sender and one destination, the repository's withdrawal redeemer has thi
 ```aiken
 TransferLogicScriptWithdrawRedeemer {
   global_state_location: GlobalStateReferenced { global_state_ref_input_index },
-  actions_for_each_input: [TransferLogicScriptAction {
-    source_proof,
-    source_denylist_ref_input_index,
+  actions_for_each_input: [PartyAction {
+    proof: sender_proof,
+    denylist_ref_input_index: sender_denylist_ref_input_index,
   }],
-  destination_actions: [TransferLogicScriptDestinationAction {
-    destination_proof,
-    destination_denylist_ref_input_index,
+  destination_actions: [PartyAction {
+    proof: destination_proof,
+    denylist_ref_input_index: destination_denylist_ref_input_index,
   }],
 }
 ```
@@ -301,9 +301,9 @@ MintBurn {
   global_state_input_index,
   power_user_node_ref_input_index,
   minted_amount,
-  destination_actions: [MintingLogicDestinationAction {
-    destination_proof,
-    destination_denylist_ref_input_index,
+  destination_actions: [PartyAction {
+    proof: destination_proof,
+    denylist_ref_input_index: destination_denylist_ref_input_index,
   }],
 }
 ```
