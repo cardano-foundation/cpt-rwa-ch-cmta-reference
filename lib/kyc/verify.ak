@@ -254,8 +254,10 @@ pub fn verify_membership_proof(
 /// - `Cip30Attestation`: delegates to `verify_cip30_attestation_proof` — a
 ///   trusted issuer signs, through CIP-30 `signData`, a claim that embeds the
 ///   user's credential, tier, TTL, security policy and network.
-/// - `Membership`: delegates to `verify_membership_proof` — the user PKH and
-///   TTL must exist as a leaf in the on-chain MPF membership tree.
+/// - `Membership`: delegates to `verify_membership_proof` — the holder's leaf
+///   must exist in the MPF tree committed to by `member_root_hash`. The leaf
+///   key is the holder's credential type and hash; the leaf value binds the
+///   TTL, the security policy and the network, as the attestation claim does.
 ///
 /// Both variants take the holder's full `Credential`, not a bare hash —
 /// the constructor is part of the identity being attested.

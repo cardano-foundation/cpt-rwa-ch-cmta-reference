@@ -72,6 +72,10 @@ pub type GlobalStateDatum {
   // Can only be set if transfers are paused. Once set to true, it cannot be reverted back to false.
   deactivated: Bool,
   //Key-hash of the protocol administrator. Rotatable via RotateAdmin action.
+  // Never the minting authority (field 4): genesis and `RotateAdmin` refuse
+  // it, and `RotateMintingScript` refuses an authority equal to it. Use a key
+  // or a native multisig, never a script of this deployment: such a script
+  // runs in transactions its holder does not sign.
   admin_credential_hash: ByteArray,
   //PowerUsers linked list minting policy
   power_user_linked_list_policy_id: ByteArray,
@@ -88,32 +92,43 @@ pub type GlobalStateDatum {
   // (different KYC integration, different compliance rules, a bugfix)
   // without ever touching the registry or redeploying the proxy.
   //
-  // DEPLOYMENT REQUIREMENT, not enforced on-chain: this must name a script
-  // whose withdraw-0 genuinely decides whether a mint is allowed. Pointing
-  // it at any OTHER withdraw-capable script in this deployment silently
-  // disables every mint control — `transfer_logic_script` is the worst case,
-  // since its withdraw-0 needs no signature at all, so anyone could then
-  // mint up to the supply cap with no KYC, denylist or power-user checks.
+  // This must name a script whose withdraw-0 genuinely decides whether a
+  // mint is allowed. Pointing it at any OTHER withdraw-capable script
+  // silently disables every mint control — `transfer_logic_script` is the
+  // worst case, since its withdraw-0 needs no signature at all, so anyone
+  // could then mint up to the supply cap with no KYC, denylist or power-user
+  // checks.
   //
-  // This is deliberately left to off-chain tooling rather than guarded here.
-  // An on-chain reserved-hash list would not stop a malicious admin (who
-  // would simply deploy their own permissive authority), and it would go
-  // STALE the moment `transfer_logic_script` is upgraded through
-  // `UpgradeRegistryNode` — the list is fixed at compile time, while the
-  // scripts it names are not, and refreshing it would mean migrating
-  // the GlobalState logic itself (`RotateGlobalStateScript`) for every such change.
+  // `RotateMintingScript` enforces the structural half on chain: the
+  // incoming script must run in the rotation
+  // transaction and accept it with `AcceptMintingRotation` (`constr 4 []`),
+  // which only a script built to be this token's authority decodes. That
+  // keeps out a typo, an unregistered credential and every other script of
+  // this deployment, the transfer logic included, with no reserved-hash list
+  // (which would not stop a malicious admin, and would go STALE whenever
+  // `UpgradeRegistryNode` re-points the transfer scripts). The rotation also
+  // refuses the admin, the current authority and the GlobalState logic.
+  // Genesis cannot run the handshake: the initial value is checked for length
+  // and for differing from the admin and the GlobalState logic only.
   //
-  // Verify instead at deployment and after every rotation, with a smoke test
-  // that a mint lacking a power-user signature is REJECTED. The failure mode
-  // is silent and fails OPEN, so it will not surface on its own.
+  // What stays off chain is that the script is a CORRECT authority. Re-derive
+  // its hash from source and every parameter before signing, and verify at
+  // deployment and after every rotation with a smoke test that a mint lacking
+  // a power-user signature is REJECTED. That failure mode is silent and fails
+  // OPEN, so it will not surface on its own.
   //
   // EXTEND THAT SMOKE TEST TO ALL FIVE POWER-USER ROLES. The warning
   // above is written about this field, but the mechanism is
   // `utils.must_be_signed_by_credential`, which gates `is_admin`, `can_mint`,
   // `can_burn`, `can_pause` and `can_force_transfer` identically. Any of those
   // credentials set to a permissive script hash is satisfiable by a stranger.
-  // After granting or rotating any role, assert that an operation exercising
-  // it without that operator's signature is REJECTED.
+  // The always-present ones are refused where the role is checked:
+  // the minting authority refuses its own hash, the minting proxy and the
+  // transfer and seizure scripts it pins, as operator and as admin; the
+  // seizure logic refuses its own hash and this field's authority as
+  // operator. Every other script stays an operator rule (see the security
+  // notes' residuals table). After granting or rotating any role, assert that
+  // an operation exercising it without that operator's signature is REJECTED.
   minting_script_credential_hash: ByteArray,
   // ── LOGIC-OWNED TAIL (5+) — v1 layout; a later logic may reshape it ──────────
   //If true, no transfer can be executed
@@ -626,6 +641,14 @@ pub type GlobalStateSpendAction {
   /// an authority being replaced (e.g. because it is buggy or compromised)
   /// is exactly the scenario this action needs to handle even when that
   /// script itself can no longer be trusted to co-sign.
+  ///
+  /// The INCOMING authority must run in the same transaction (its withdraw-0,
+  /// so register its stake credential first) with the redeemer
+  /// `AcceptMintingRotation` (`constr 4 []`), which it accepts only while the
+  /// spent GlobalState names another authority and the continuing one names
+  /// it. That is a withdrawal, not a co-signature. The new value must also
+  /// differ from the admin, from the current authority and from the
+  /// GlobalState logic.
   RotateMintingScript { new_minting_script_credential_hash: ByteArray }
   /// ONE-WAY upgrade lock — see `upgrades_locked`; closes `RotateMintingScript`,
   /// registry-node upgrades, `SetMintableAmount` and `RotateGlobalStateScript`. Admin-signed, and

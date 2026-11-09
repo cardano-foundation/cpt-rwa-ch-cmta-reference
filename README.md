@@ -186,10 +186,17 @@ referenced by compact identifiers or hashes.
   list itself (add, remove, modify), the security metadata, the remaining supply cap
   (`SetMintableAmount`, until `LockUpgrades`), the GlobalState logic itself
   (`RotateGlobalStateScript`, until `LockUpgrades`), and the irreversible deactivation switch. Rotatable, so the master key can be replaced without redeploying.
+  Never the minting authority: genesis and `RotateAdmin` refuse it, and `RotateMintingScript` refuses
+  an authority equal to the admin. Use a key or a native multisig, never a script of this deployment.
 * **Power user** — a node in the power-users linked list, carrying independently grantable flags
   (a credential equal to GlobalState datum field 0, the GlobalState logic hash, is refused
   wherever the role is used — that logic's withdrawal is in every GlobalState transaction and
-  would otherwise sign for it):
+  would otherwise sign for it; likewise, the minting authority refuses
+  its own hash, the minting proxy and the transfer and seizure scripts it pins for every operator
+  and admin it checks, and the seizure logic refuses its own hash and the current minting authority.
+  Any other script — this deployment's transfer and seizure logic above all, and any superseded
+  script — stays an operator rule: never grant a role to a script whose withdraw-0 someone else can
+  run):
   * `is_admin` — add, remove and update denylist entries (including the frozen amount). Deliberately split from the master admin key, so a
     compliance function can be delegated without handing over control of the protocol.
   * `can_mint` — mint new tokens, up to the remaining supply cap
@@ -287,8 +294,21 @@ The GlobalState admin has three distinct upgrade paths, plus control over the su
 * `RotateMintingScript` changes `minting_script_credential_hash` in GlobalState. The permanent
   minting proxy then requires the replacement authority's withdraw-0. The proxy checks delegation,
   not the new authority's mint, burn or registration rules; review and test the replacement before
-  rotating. Register its stake credential before the first withdrawal. The outgoing authority does
-  not have to consent.
+  rotating. The **incoming authority must run in the rotation
+  transaction itself**, under the redeemer `AcceptMintingRotation` (`constr 4 []`), so register its
+  stake credential **before** rotating. It accepts only while being installed: the spent
+  GlobalState names another authority and the continuing one names it. That keeps out a typo, an
+  unregistered credential and every other script of this deployment (the transfer logic cannot
+  decode the redeemer); it does not prove the script is a correct authority, so rebuild it from
+  source with every parameter and compare its hash before signing. The new value must also differ
+  from the admin, from the current authority and from the GlobalState logic. The outgoing authority
+  does not have to consent: the incoming one's run is a withdrawal, not a signature. A replacement
+  authority must keep this build's two newest invariants: **a `MintBurn` that changes no supply
+  authorises nothing**, and **`AcceptMintingRotation` is accepted only while being installed and
+  authorises nothing else**. Without the first, any `can_mint` operator could make the authority
+  and the proxy run beside an unrelated action; without the second, anyone could. Once a GlobalState
+  logic with this handshake is installed, no authority without `AcceptMintingRotation` (any earlier
+  build) can be installed again; the GlobalState logic itself can still be rotated back.
 * `UpgradeRegistryNode` changes this token's CIP-113 transfer and/or third-party transfer logic
   credentials in its registry node. The admin signs and the minting authority verifies the
   continuing node, which must name exactly the transfer and seizure scripts that authority was built
@@ -341,6 +361,22 @@ logic can no longer be replaced. It does not deactivate transfers, minting or bu
 with the lock in one transaction, the upgrade reads the pre-lock GlobalState input and can still
 succeed; audit the whole transaction when deciding which rules were locked. The same pre-state rule
 applies to a registry upgrade bundled with admin rotation or deactivation.
+
+#### Upgrading a running deployment in place
+
+A redeployment (burn and re-mint) needs none of this. To upgrade a running deployment in place:
+
+1. Register the stake credentials of the new GlobalState logic, minting authority and seizure
+   logic.
+2. `RotateGlobalStateScript` to the new GlobalState logic **first**. Until then `RotateMintingScript`
+   runs under the old logic, without the handshake.
+3. `RotateMintingScript` to the new authority, which runs `AcceptMintingRotation` in that
+   transaction.
+4. In a **separate** transaction, with GlobalState referenced, `UpgradeRegistryNode` re-points the
+   registry node's third-party (seizure) logic to the new seizure script. The proxy now delegates to
+   the new authority, whose F08 pins name that script. Steps 3 and 4 cannot share a transaction:
+   the proxy reads the spent GlobalState, so during step 3 it still delegates to the old authority,
+   whose pins name the old seizure script. The old seizure logic keeps working until step 4.
 
 The active authority and role credentials are part of the deployment's trust boundary. At genesis,
 after each authority rotation, and after granting or rotating an operator role, test that an action
@@ -521,8 +557,9 @@ rely on the base layer's own guarantees. And because of the no-supply-change poi
 no longer re-checks that a spend-and-update transaction mints or burns nothing; it relies on
 `registry_spend` alone.
 
-These guarantees were verified against CIP-113 base-layer commit `018415d`, and **re-verified on
-2026-08-28 against that repository's `main` at `9db7e06`** — all of them still hold. Upgrading the
+These guarantees were verified against CIP-113 base-layer commit `018415d`, re-verified on 2026-08-28
+at `9db7e06`, and **re-verified on 2026-10-15 at `95e99ac`**, whose validator code is identical to
+that repository's `main` at `369e8c2` — all of them still hold. Upgrading the
 deployed base layer invalidates that verification and requires re-checking it before relying on this
 section again; record the commit you checked against alongside the deployment parameters.
 
@@ -534,11 +571,14 @@ changes the guarantees above:
   (`SpendViaTransfer` / `SpendViaThirdParty` / `SpendViaUnfracking`). Transaction shape and base-layer
   redeemers change; this repo's validators do not.
 * **Programmable-base outputs must stay seizable**, and their inline datums are size-bounded by a
-  protocol parameter (`max_inline_datum_bytes`). The only datum this deployment puts on a token UTxO
+  protocol parameter (`max_inline_datum_bytes`). At `95e99ac` this holds on the ordinary transfer
+  path too, not only on issuance and seizure: every programmable-base output of a transfer needs an
+  inline stake credential and the seizable shape (`collect_output_assets`). The only datum this deployment puts on a token UTxO
   is the CIP-68 reference NFT's metadata — check the deployed bound before publishing it.
 * **The coordination UTxO's upgrade authority is part of this token's trust boundary.** Whoever holds
-  it can re-point the base layer's transfer and third-party validators in place, which would bypass
-  every gate here at once. Record who holds it, and monitor the coordination datum.
+  it can re-point the base layer's transfer and third-party validators in place (at `95e99ac` also
+  its issuance logic and programmable-logic-global validator), which would bypass every gate here at
+  once. Record who holds it, and monitor the coordination datum.
 
 ### Two shapes that cannot be built
 

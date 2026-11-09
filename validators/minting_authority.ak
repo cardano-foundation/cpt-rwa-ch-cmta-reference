@@ -18,12 +18,13 @@ use types/cip68.{Cip68Datum} as types_cip68
 use types/denylist.{Denylist}
 use types/global_state.{
   GlobalStateDatum, GlobalStateReferenced, GlobalStateSpent, decode_global_state,
-  gs_datum_from_location,
+  decode_global_state_core, gs_datum_from_location,
 }
 use types/kyc_proof.{Cip30Attestation, Cip30AttestationProof}
 use types/minting_authority.{
-  MintBurn, MintingAuthorityWithdrawRedeemer, MintingLogicDestinationAction,
-  RegisterMint, RegisterStructural, UpgradeRegistryNode,
+  AcceptMintingRotation, MintBurn, MintingAuthorityWithdrawRedeemer,
+  MintingLogicDestinationAction, RegisterMint, RegisterStructural,
+  UpgradeRegistryNode,
 }
 use types/power_users.{PowerUser}
 use utils.{must_be_signed_by_credential, quantity_of}
@@ -62,9 +63,11 @@ use utils.{must_be_signed_by_credential, quantity_of}
 ///      logic; every logic must keep this branch. Merely
 ///      referencing it leaves the supply cap — a core CMTAT/BaFin invariant
 ///      — entirely unenforced. IRREVERSIBLE (tokens already exist).
-///   3. ONLY `security_asset_name` may be minted under the issuance policy.
+///   3. ONLY `security_asset_name` may be minted under the issuance policy,
+///      plus, in `RegisterMint` alone, ONE CIP-68 reference NFT: a single
+///      `(100)`-prefixed name, quantity 1 (`only_permitted_assets_minted`).
 ///      `issuance_mint` constrains no asset names, and the destination
-///      checks only ever inspect the security asset, so a second name would
+///      checks only ever inspect the security asset, so any other name would
 ///      be minted with no KYC or denylist scrutiny at all.
 ///   4. THE PROTOCOL MUST NOT BE `deactivated`. Deactivation is the terminal
 ///      decommissioning switch and is meant to be absolute.
@@ -97,6 +100,27 @@ use utils.{must_be_signed_by_credential, quantity_of}
 ///      sole anchor for which list grants `can_mint` / `can_burn`. It is set
 ///      once at genesis and no GlobalState logic may ever change its value
 ///      (see the replacement-logic invariants in global_state_logic.ak).
+///   7. A MintBurn THAT CHANGES NO SUPPLY AUTHORISES NOTHING.
+///      A zero-delta MintBurn would let any `can_mint`
+///      operator run this authority, and with it the minting proxy, beside
+///      any GlobalState action, where their withdrawals count as signatures.
+///      With supply forced to change, the GlobalState action can only be
+///      MintSecurity, which carries no admin decision.
+///   8. ROLE SIGNATURES REFUSE THE SCRIPTS THAT RUN HERE.
+///      `must_be_signed_by_credential` accepts a withdraw-0 as a
+///      signature, so an operator or admin keyed at this authority, the
+///      minting proxy, or the transfer or seizure script it pins would be
+///      "signed" by a script anyone (or any operator) can make run. Every
+///      operator and admin signature check goes through `role_signed`.
+///   9. ACCEPT A ROTATION ONLY WHILE BEING INSTALLED.
+///      `RotateMintingScript` requires the incoming authority's withdraw-0 with
+///      `AcceptMintingRotation` (redeemer `constr 4 []`). A replacement
+///      authority must accept it exactly when the spent GlobalState names
+///      another authority and the continuing one names it, and authorise
+///      nothing else with it. An authority without this variant can never be
+///      installed; one that accepts it whenever it is named would let anyone
+///      make the CURRENT authority's withdrawal appear in any GlobalState
+///      transaction.
 /// ============================================================================
 validator minting_authority_validator(
   security_asset_name: ByteArray,
@@ -163,9 +187,31 @@ validator minting_authority_validator(
 ) {
   withdraw(
     redeemer: MintingAuthorityWithdrawRedeemer,
-    _credential: Credential,
+    credential: Credential,
     self: Transaction,
   ) {
+    // A withdrawal credential may be a verification key, so this is a real
+    // assertion, not a formality.
+    expect Script(own_hash) = credential
+
+    // INVARIANT 8 — see the header. A role signature (operator or admin)
+    // counts only from a credential whose withdraw-0 nobody else can put into
+    // this transaction. This authority and the minting proxy run in every mint
+    // and burn; the transfer and seizure scripts it pins can be run by others
+    // (the transfer logic by anyone, whenever no token moves). Through
+    // `must_be_signed_by_credential` each would otherwise sign for a role keyed
+    // at its own hash. The GlobalState logic (field 0) is refused for the
+    // operator separately, as before.
+    let role_signed = fn(credential_hash: ByteArray) -> Bool {
+      and {
+        (credential_hash != own_hash)?,
+        (credential_hash != minting_logic_script_credential_hash)?,
+        (credential_hash != transfer_logic_script_hash)?,
+        (credential_hash != third_party_transfer_logic_script_hash)?,
+        must_be_signed_by_credential(self, credential_hash)?,
+      }
+    }
+
     // The variants differ in where this token's registry node is found — a
     // reference input in steady state, an output of this very transaction
     // during a CIP-113 insert — and in whether supply changes. In every case
@@ -210,6 +256,15 @@ validator minting_authority_validator(
           fields,
         )
         and {
+          // INVARIANT 7 — see the header. A MintBurn must change supply. One
+          // that mints nothing would run this authority, and with it the
+          // minting proxy, beside ANY GlobalState action (only MintSecurity
+          // may carry a mint or burn), where their withdrawals count as
+          // signatures. No legitimate flow needs it: this branch refuses
+          // CIP-68 names, so a zero delta means nothing is minted at all.
+          // `minted_amount` is bound to the ledger's delta inside
+          // `verify_mint_or_burn`.
+          (minted_amount != 0)?,
           // Steady state mints supply and nothing else. A CIP-68 metadata
           // token is a registration-time artefact; allowing one here would let
           // it be re-minted after the token is live.
@@ -229,6 +284,7 @@ validator minting_authority_validator(
             power_user_linked_list_policy_id,
             denylist_script_hash,
             power_user_list_script_hash,
+            role_signed,
             self,
           ),
         }
@@ -308,7 +364,7 @@ validator minting_authority_validator(
           // free, so this signature is what stops a stranger registering the
           // token, and the F08 pin holds even the admin to this deployment's
           // transfer and seizure scripts.
-          must_be_signed_by_credential(self, admin_credential_hash)?,
+          role_signed(admin_credential_hash)?,
           // ...and the mint half passes exactly the checks every later mint
           // gets, so a genesis mint is auditable on the same terms.
           verify_mint_or_burn(
@@ -321,6 +377,7 @@ validator minting_authority_validator(
             power_user_linked_list_policy_id,
             denylist_script_hash,
             power_user_list_script_hash,
+            role_signed,
             self,
           ),
         }
@@ -431,7 +488,9 @@ validator minting_authority_validator(
           !gs_datum.deactivated,
           // The one-way lock closes this path permanently.
           (!gs_datum.upgrades_locked)?,
-          must_be_signed_by_credential(self, gs_datum.admin_credential_hash)?,
+          // INVARIANT 8: the registry update itself runs the minting proxy,
+          // so an admin keyed at it must not count as signed.
+          role_signed(gs_datum.admin_credential_hash)?,
         }
       }
       RegisterStructural { registry_node_output_index, global_state_location } -> {
@@ -465,7 +524,40 @@ validator minting_authority_validator(
           dict.is_empty(assets.tokens(self.mint, issuance_policy_id))?,
           // INVARIANT 4.
           !gs_datum.deactivated,
-          must_be_signed_by_credential(self, gs_datum.admin_credential_hash)?,
+          role_signed(gs_datum.admin_credential_hash)?,
+        }
+      }
+      AcceptMintingRotation -> {
+        // INVARIANT 9 — see the header. Accept only while being installed:
+        // the spent GlobalState (found by its NFT among the INPUTS) names
+        // another authority, and the continuing one (by its NFT among the
+        // outputs) names this one. Only `RotateMintingScript` changes field 4,
+        // and it needs the admin's signature.
+        //
+        // Without the first half, anyone could run the CURRENT authority under
+        // this redeemer in any GlobalState transaction, where its withdrawal
+        // (and so the minting proxy's) would count as a signature.
+        //
+        // Nothing else is authorised: the minting proxy reads the SPENT
+        // GlobalState's field 4, the outgoing authority, so this run cannot
+        // stand in for it on a mint or a registry update.
+        let carries_global_state = fn(output: Output) {
+          quantity_of(
+            output.value,
+            global_state_policy_id,
+            constants.global_state_asset_name,
+          ) == 1
+        }
+        expect Some(spent) = list.find(
+          self.inputs,
+          fn(input) { carries_global_state(input.output) },
+        )
+        expect Some(continuing) = list.find(self.outputs, carries_global_state)
+        expect InlineDatum(spent_raw) = spent.output.datum
+        expect InlineDatum(continuing_raw) = continuing.datum
+        and {
+          (decode_global_state_core(spent_raw).minting_script_credential_hash != own_hash)?,
+          (decode_global_state_core(continuing_raw).minting_script_credential_hash == own_hash)?,
         }
       }
     }
@@ -542,8 +634,9 @@ fn only_permitted_assets_minted(
   // At most ONE metadata token per transaction. With an exact-name parameter
   // this was unconstructible by accident — only one name could ever match. With
   // prefixes, `(100)Foo` and `(100)Bar` both reach the arm above, so the rule
-  // has to be stated.
-  let protected_count = list.foldl(
+  // has to be stated. Counts every name other than the security asset; the
+  // check above has already required each of those to be protected.
+  let non_supply_count = list.foldl(
     minted,
     0,
     fn(entry, count) {
@@ -557,7 +650,7 @@ fn only_permitted_assets_minted(
 
   and {
     every_name_permitted,
-    (protected_count <= 1)?,
+    (non_supply_count <= 1)?,
   }
 }
 
@@ -748,6 +841,9 @@ fn verify_mint_or_burn(
   power_user_linked_list_policy_id: ByteArray,
   denylist_script_hash: ByteArray,
   power_user_list_script_hash: ByteArray,
+  // The withdraw handler's signature check: refuses the scripts that run in
+  // this transaction (INVARIANT 8) before it accepts a signature.
+  role_signed: fn(ByteArray) -> Bool,
   self: Transaction,
 ) -> Bool {
   // Ledger truth, derived here rather than accepted from a caller so the
@@ -825,8 +921,9 @@ fn verify_mint_or_burn(
     (power_user_node_key != global_state.get_global_state_script_credential_hash(
       builtin.unconstr_fields(gs_raw),
     ))?,
-    //A power user must have signed the transaction
-    must_be_signed_by_credential(self, power_user_node_key)?,
+    //A power user must have signed the transaction — and not through a
+    //script that runs here anyway (INVARIANT 8)
+    role_signed(power_user_node_key)?,
     // A zero-amount mint — e.g. a `RegisterMint` that mints only the CIP-68
     // reference NFT, with no initial supply — removes nothing from
     // circulation, so it is a MINT, not a burn: gating it on `can_burn`
@@ -3213,4 +3310,446 @@ test mint_to_a_partially_frozen_destination_succeeds() {
 
 test mint_to_a_fully_frozen_destination_fails() {
   !mint_to_frozen_dest(None)
+}
+
+// ── Mint path: GlobalState NFT, registry node, admin and burn role ───────────
+
+fn without_gs_nft(input: Input) -> Input {
+  Input {
+    ..input,
+    output: Output { ..input.output, value: from_lovelace(2_000_000) },
+  }
+}
+
+fn mint_burn_redeemer(amount: Int) -> MintingAuthorityWithdrawRedeemer {
+  MintBurn {
+    global_state_input_index: 0,
+    power_user_node_ref_input_index: 0,
+    minted_amount: amount,
+    destination_actions: [clean_dest_action()],
+  }
+}
+
+fn signed_mint_tx(amount: Int) -> Transaction {
+  make_withdraw_tx(
+    amount,
+    True,
+    False,
+    False,
+    make_denylist_root_ref_input(),
+    [make_dest_output(amount)],
+    [test_pu_credential_hash],
+  )
+}
+
+/// A UTxO carrying a GlobalState-shaped datum but NOT the NFT must not stand in
+/// for GlobalState: its datum would choose the operator and denylist lists, and
+/// the real GlobalState (and with it the supply cap) would never be spent.
+test mint_rejects_a_global_state_input_without_its_nft() fail {
+  run_withdraw(
+    mint_burn_redeemer(1_000),
+    Transaction {
+      ..signed_mint_tx(1_000),
+      inputs: [without_gs_nft(make_gs_input(False))],
+    },
+  )
+}
+
+test register_mint_rejects_a_global_state_input_without_its_nft() fail {
+  let tx = make_register_mint_tx(
+    1_000,
+    True,
+    make_registry_ref_input().output,
+    [test_pu_credential_hash],
+  )
+  run_withdraw(
+    register_mint_redeemer(1_000),
+    Transaction { ..tx, inputs: [without_gs_nft(make_gs_input_with_admin())] },
+  )
+}
+
+/// INVARIANT 1: a mint may not spend a registry node.
+test mint_rejects_spending_a_registry_node() fail {
+  run_withdraw(
+    mint_burn_redeemer(1_000),
+    Transaction {
+      ..signed_mint_tx(1_000),
+      inputs: [make_gs_input(False), make_registry_ref_input()],
+    },
+  )
+}
+
+/// RegisterMint needs the GlobalState admin as well as the minting operator.
+test register_mint_requires_the_admin_signature() {
+  let tx = make_register_mint_tx(
+    1_000,
+    True,
+    make_registry_ref_input().output,
+    [test_pu_credential_hash],
+  )
+  !run_withdraw(
+    register_mint_redeemer(1_000),
+    Transaction { ..tx, extra_signatories: [test_pu_credential_hash] },
+  )
+}
+
+/// A burn needs can_burn: an operator holding only can_mint may not burn.
+test burn_rejects_an_operator_without_can_burn() {
+  !run_withdraw(
+    MintBurn {
+      global_state_input_index: 0,
+      power_user_node_ref_input_index: 0,
+      minted_amount: -1_000,
+      destination_actions: [],
+    },
+    make_withdraw_tx(
+      -1_000,
+      True,
+      False,
+      False,
+      make_denylist_root_ref_input(),
+      [],
+      [test_pu_credential_hash],
+    ),
+  )
+}
+
+/// Registration must declare this deployment as GlobalState in field 6:
+/// off-chain readers locate GlobalState through it.
+test register_mint_rejects_a_foreign_global_state_cs() fail {
+  let node = TestRegistryNode {
+    key: test_issuance_policy_id,
+    next: #"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    minting_logic_script: Script(test_proxy_hash),
+    transfer_logic_script: Script(test_transfer_logic_hash),
+    third_party_transfer_logic_script: Script(test_third_party_logic_hash),
+    unfracking_logic_script: VerificationKey(#""),
+    global_state_cs: #"abababababababababababababababababababababababababababab",
+  }
+  run_withdraw(
+    register_mint_redeemer(1_000),
+    make_register_mint_tx(
+      1_000,
+      True,
+      Output { ..make_registry_ref_input().output, datum: InlineDatum(node) },
+      [test_pu_credential_hash],
+    ),
+  )
+}
+
+// ── A script that runs in the transaction never signs for a role ─────────────
+//
+// `must_be_signed_by_credential` accepts a withdraw-0 as a signature. This
+// authority and the minting proxy run in every mint and burn, and the
+// transfer and seizure scripts it pins can be run by others, so an operator
+// or admin keyed at one of them would be "signed" with nobody signing. Each
+// test below leaves out every signature and puts the keyed script's
+// withdrawal in the transaction; only INVARIANT 8 rejects it.
+
+/// A `can_mint` power-user node keyed at `key`, at the list's own address.
+fn pu_node_keyed_at(key: ByteArray) -> Input {
+  let pu = PowerUser {
+    credential_hash: key,
+    is_admin: False,
+    can_mint: True,
+    can_burn: False,
+    can_pause: False,
+    can_force_transfer: False,
+  }
+  let element: Element<Data, PowerUser> = Element {
+    data: Node { data: pu },
+    link: None,
+  }
+  let base = make_pu_node_ref_input(True, False)
+  Input {
+    ..base,
+    output: Output {
+      ..base.output,
+      value: merge(
+        from_lovelace(2_000_000),
+        from_asset(
+          test_pu_policy_id,
+          bytearray.concat(constants.linked_list_node_key_prefix, key),
+          1,
+        ),
+      ),
+      datum: InlineDatum(element),
+    },
+  }
+}
+
+/// The withdrawals a real mint carries (the proxy and this authority), plus
+/// `extra` when it is another script.
+fn withdrawals_with(extra: ByteArray) -> Pairs<Credential, Int> {
+  let base = [
+    Pair(Script(test_proxy_hash), 0),
+    Pair(Script(test_authority_hash), 0),
+  ]
+  if extra == test_proxy_hash || extra == test_authority_hash {
+    base
+  } else {
+    [Pair(Script(extra), 0), ..base]
+  }
+}
+
+/// A clean 1 000-token mint whose operator node is keyed at `key`, with no
+/// signatories and `key`'s withdrawal present.
+fn unsigned_mint_by(key: ByteArray) -> Bool {
+  let amount = 1_000
+  let base = make_withdraw_tx(
+    amount,
+    True,
+    False,
+    False,
+    make_denylist_root_ref_input(),
+    [make_dest_output(amount)],
+    [],
+  )
+  run_withdraw(
+    MintBurn {
+      global_state_input_index: 0,
+      power_user_node_ref_input_index: 0,
+      minted_amount: amount,
+      destination_actions: [clean_dest_action()],
+    },
+    Transaction {
+      ..base,
+      reference_inputs: [
+        pu_node_keyed_at(key),
+        make_registry_ref_input(),
+        make_denylist_root_ref_input(),
+      ],
+      withdrawals: withdrawals_with(key),
+    },
+  )
+}
+
+test mint_rejects_an_operator_keyed_at_the_minting_proxy() {
+  !unsigned_mint_by(test_proxy_hash)
+}
+
+test mint_rejects_an_operator_keyed_at_the_authority_itself() {
+  !unsigned_mint_by(test_authority_hash)
+}
+
+test mint_rejects_an_operator_keyed_at_the_transfer_logic() {
+  !unsigned_mint_by(test_transfer_logic_hash)
+}
+
+test mint_rejects_an_operator_keyed_at_the_seizure_logic() {
+  !unsigned_mint_by(test_third_party_logic_hash)
+}
+
+/// INVARIANT 7. A signed `can_mint` operator and nothing minted: the shape that
+/// let a minter run this authority, and so the proxy, beside any GlobalState
+/// action. Only the non-zero rule rejects it.
+test mint_burn_rejects_a_zero_amount() {
+  !run_withdraw(
+    MintBurn {
+      global_state_input_index: 0,
+      power_user_node_ref_input_index: 0,
+      minted_amount: 0,
+      destination_actions: [],
+    },
+    make_withdraw_tx(
+      0,
+      True,
+      False,
+      False,
+      make_denylist_root_ref_input(),
+      [],
+      [test_pu_credential_hash],
+    ),
+  )
+}
+
+/// `make_gs_ref_input`'s GlobalState with the admin set to `admin`.
+fn gs_input_with_admin(admin: ByteArray, ix: Int) -> Input {
+  let base = make_gs_ref_input()
+  expect InlineDatum(raw) = base.output.datum
+  expect gs_datum: GlobalStateDatum = raw
+  Input {
+    output_reference: test_out_ref(ix),
+    output: Output {
+      ..base.output,
+      datum: InlineDatum(
+        GlobalStateDatum { ..gs_datum, admin_credential_hash: admin },
+      ),
+    },
+  }
+}
+
+test upgrade_registry_node_rejects_an_admin_equal_to_the_minting_proxy() {
+  !run_withdraw(
+    upgrade_redeemer(),
+    Transaction {
+      ..make_upgrade_tx(
+        upgraded_node(),
+        gs_input_with_admin(test_proxy_hash, 5),
+        [],
+      ),
+      withdrawals: withdrawals_with(test_proxy_hash),
+    },
+  )
+}
+
+test upgrade_registry_node_rejects_an_admin_equal_to_the_authority_itself() {
+  !run_withdraw(
+    upgrade_redeemer(),
+    Transaction {
+      ..make_upgrade_tx(
+        upgraded_node(),
+        gs_input_with_admin(test_authority_hash, 5),
+        [],
+      ),
+      withdrawals: withdrawals_with(test_authority_hash),
+    },
+  )
+}
+
+test register_structural_rejects_an_admin_equal_to_the_minting_proxy() {
+  !run_withdraw(
+    register_structural_redeemer(),
+    Transaction {
+      ..make_register_structural_tx(zero, []),
+      reference_inputs: [gs_input_with_admin(test_proxy_hash, 5)],
+      withdrawals: withdrawals_with(test_proxy_hash),
+    },
+  )
+}
+
+test register_mint_rejects_an_admin_equal_to_the_minting_proxy() {
+  let tx = make_register_mint_tx(
+    1_000,
+    True,
+    make_registry_ref_input().output,
+    [test_pu_credential_hash],
+  )
+  !run_withdraw(
+    register_mint_redeemer(1_000),
+    Transaction {
+      ..tx,
+      inputs: [gs_input_with_admin(test_proxy_hash, 0)],
+      extra_signatories: [test_pu_credential_hash],
+      withdrawals: withdrawals_with(test_proxy_hash),
+    },
+  )
+}
+
+// ── AcceptMintingRotation, only while being installed ────────────────────────
+//
+// The branch must pass when the spent GlobalState names another authority
+// and the continuing one names this one, and in no other shape: otherwise
+// anyone could make the CURRENT authority's withdrawal appear in any
+// GlobalState transaction.
+
+const previous_authority_hash: ByteArray =
+  #"6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a"
+
+const other_authority_hash: ByteArray =
+  #"6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b"
+
+/// `make_gs_input`'s GlobalState, naming `authority` as the minting authority.
+fn gs_input_naming(authority: ByteArray) -> Input {
+  let base = make_gs_input(False)
+  expect InlineDatum(raw) = base.output.datum
+  expect gs_datum: GlobalStateDatum = raw
+  Input {
+    ..base,
+    output: Output {
+      ..base.output,
+      datum: InlineDatum(
+        GlobalStateDatum {
+          ..gs_datum,
+          minting_script_credential_hash: authority,
+        },
+      ),
+    },
+  }
+}
+
+/// A rotation from `from` to `to`, as this authority sees it.
+fn rotation_tx(from: ByteArray, to: ByteArray) -> Transaction {
+  Transaction {
+    ..make_withdraw_tx(
+      0,
+      True,
+      False,
+      False,
+      make_denylist_root_ref_input(),
+      [],
+      [test_admin_hash],
+    ),
+    inputs: [gs_input_naming(from)],
+    reference_inputs: [],
+    outputs: [gs_input_naming(to).output],
+    withdrawals: [Pair(Script(test_authority_hash), 0)],
+  }
+}
+
+test accept_minting_rotation_succeeds_when_being_installed() {
+  run_withdraw(
+    AcceptMintingRotation,
+    rotation_tx(previous_authority_hash, test_authority_hash),
+  )
+}
+
+test accept_minting_rotation_fails_when_already_installed() {
+  !run_withdraw(
+    AcceptMintingRotation,
+    rotation_tx(test_authority_hash, test_authority_hash),
+  )
+}
+
+test accept_minting_rotation_fails_when_the_output_names_another_authority() {
+  !run_withdraw(
+    AcceptMintingRotation,
+    rotation_tx(previous_authority_hash, other_authority_hash),
+  )
+}
+
+test accept_minting_rotation_fails_without_a_spent_global_state() fail {
+  run_withdraw(
+    AcceptMintingRotation,
+    Transaction {
+      ..rotation_tx(previous_authority_hash, test_authority_hash),
+      inputs: [],
+      reference_inputs: [gs_input_naming(previous_authority_hash)],
+    },
+  )
+}
+
+/// An output naming this authority WITHOUT the NFT, placed before the real
+/// GlobalState output, which names another authority.
+test accept_minting_rotation_ignores_a_decoy_output() {
+  let decoy = Output {
+    ..gs_input_naming(test_authority_hash).output,
+    value: from_lovelace(2_000_000),
+  }
+  !run_withdraw(
+    AcceptMintingRotation,
+    Transaction {
+      ..rotation_tx(previous_authority_hash, other_authority_hash),
+      outputs: [decoy, gs_input_naming(other_authority_hash).output],
+    },
+  )
+}
+
+/// An input naming another authority WITHOUT the NFT, placed before the real
+/// GlobalState input, which already names this one.
+test accept_minting_rotation_ignores_a_decoy_input() {
+  let decoy = Input {
+    output_reference: test_out_ref(9),
+    output: Output {
+      ..gs_input_naming(previous_authority_hash).output,
+      value: from_lovelace(2_000_000),
+    },
+  }
+  !run_withdraw(
+    AcceptMintingRotation,
+    Transaction {
+      ..rotation_tx(test_authority_hash, test_authority_hash),
+      inputs: [decoy, gs_input_naming(test_authority_hash)],
+    },
+  )
 }

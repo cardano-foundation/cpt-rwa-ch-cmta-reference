@@ -31,6 +31,7 @@ use types/global_state.{
   set_requires_receiver_kyc, set_requires_sender_kyc, set_security_info,
   set_transfers_paused, set_trusted_entity_vkeys, set_upgrades_locked,
 }
+use types/minting_authority.{AcceptMintingRotation}
 use types/power_users.{PowerUser}
 use utils.{
   must_be_signed_by_credential, must_run_script_withdrawal, quantity_of,
@@ -78,6 +79,13 @@ use utils.{
 //      when written; an operator credential is refused where the role is USED
 //      (PauseTransfers here, mint/burn in the minting authority, seizure in
 //      the third-party transfer logic, sanctions in the denylist), so a later rotation cannot reopen it.
+//      The admin and the minting authority are kept apart too (genesis,
+//      RotateAdmin, RotateMintingScript); the minting authority refuses
+//      itself, the minting proxy and the transfer and seizure scripts it
+//      pins as operator or admin, and accepts no MintBurn that changes no
+//      supply; the seizure logic refuses itself and the current minting
+//      authority as operator. A successor logic must keep the two roles
+//      apart.
 //   6. `publish` accepts registration only, so nobody can deregister the
 //      stake credential the proxy's withdraw-0 depends on.
 //   7. It acts only when it is the input's field 0, except as the incoming
@@ -97,6 +105,12 @@ use utils.{
 //      authority, the denylist, the third-party transfer logic and
 //      PauseTransfers here all authenticate operators under it with no
 //      compile-time copy to check against.
+//  12. RotateMintingScript requires the incoming authority's withdraw-0 with
+//      the redeemer `AcceptMintingRotation` (`constr 4 []`), so only a
+//      script built to accept the role can be installed. Keep
+//      the handshake: without it a typo, an unregistered credential or any
+//      script whose withdraw-0 passes for anyone (this deployment's transfer
+//      logic) could become the minting authority.
 validator global_state_logic(
   security_asset_name: ByteArray,
   issuance_policy_id: ByteArray,
@@ -636,6 +650,10 @@ validator global_state_logic(
                   // Never this logic's own hash: its withdrawal is in every
                   // GlobalState transaction and would sign for the admin.
                   new_admin_credential_hash != own_hash,
+                  // Nor the minting authority: the admin and the authority stay
+                  // two credentials (genesis and RotateMintingScript keep them
+                  // apart too), so one script never decides both.
+                  new_admin_credential_hash != input_datum.minting_script_credential_hash,
                   //Dual-sig: both old (from input datum) and new admins must sign.
                   //Prevents silent takeover; prevents lost-key soft-brick by
                   //forcing continuity.
@@ -655,11 +673,18 @@ validator global_state_logic(
                   input_fields,
                   new_minting_script_credential_hash,
                 )
+                // The only redeemer the incoming authority may run with here.
+                let accept_minting_rotation: Data = AcceptMintingRotation
                 and {
                   bytearray.length(new_minting_script_credential_hash) == 28,
                   // Never this logic's own hash: MintSecurity alone would then
                   // satisfy the minting proxy, skipping every authority rule.
                   new_minting_script_credential_hash != own_hash,
+                  // Nor the admin (the two roles stay apart, as genesis and
+                  // RotateAdmin also require), nor the current authority: a
+                  // rotation to itself only churns the UTxO.
+                  new_minting_script_credential_hash != input_datum.admin_credential_hash,
+                  new_minting_script_credential_hash != input_datum.minting_script_credential_hash,
                   // The one-way upgrade lock closes this path permanently. See
                   // `upgrades_locked` on GlobalStateDatum.
                   !input_datum.upgrades_locked,
@@ -667,9 +692,11 @@ validator global_state_logic(
                   // RotateMintingScript: unlike RotateAdmin, the OUTGOING authority's
                   // consent is deliberately not required, since replacing a buggy or
                   // compromised authority is exactly the case this must still work
-                  // for. minting_logic_script.ak independently refuses to ever
-                  // delegate to itself (own-hash self-authorisation guard), so this
-                  // action does not need to defend against that specific value here.
+                  // for. The INCOMING authority's acceptance (the last two conjuncts)
+                  // is a withdrawal it runs, not a co-signature. The minting proxy is
+                  // never a valid target: minting_logic_script.ak refuses to delegate
+                  // to itself (own-hash guard), and its redeemer, a GlobalState
+                  // location, cannot decode `AcceptMintingRotation`.
                   must_be_signed_by_credential(
                     self,
                     input_datum.admin_credential_hash,
@@ -678,6 +705,26 @@ validator global_state_logic(
                     expected_output_datum,
                     global_state_output_datum,
                   ),
+                  // As RotateGlobalStateScript binds its incoming logic, the
+                  // INCOMING authority runs in this transaction (so its script
+                  // is producible and its stake credential registered) and
+                  // accepts the rotation with `AcceptMintingRotation`, which
+                  // only a script built to be this token's authority decodes
+                  // and accepts. That keeps out a typo, an unregistered
+                  // credential and every other script of this deployment (the
+                  // transfer logic among them, whose withdraw-0 passes for
+                  // anyone). It does not prove the script is a correct
+                  // authority: re-derive its hash from source and every
+                  // parameter before signing. This is a withdrawal, not a
+                  // signature, so the outgoing authority still need not consent.
+                  must_run_script_withdrawal(
+                    self,
+                    new_minting_script_credential_hash,
+                  ),
+                  pairs.get_first(
+                    self.redeemers,
+                    Withdraw(Script(new_minting_script_credential_hash)),
+                  ) == Some(accept_minting_rotation),
                 }
               }
               LockUpgrades -> {

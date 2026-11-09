@@ -4,8 +4,9 @@ use types/kyc_proof.{KycProof}
 /// One action per unique sender (unique stake-credential among inputs carrying
 /// the security token). Binds a KYC proof to that sender and the reference-input
 /// index of the sender's denylist element: a covering node (not listed) or the
-/// sender's own node (partially frozen; this transaction must then pay at
-/// least the frozen amount back to the sender).
+/// sender's own node (partially frozen; this transaction must then pay back to
+/// outputs carrying the sender's stake credential hash at least the frozen
+/// amount, or at least what it spends from that hash).
 pub type TransferLogicScriptAction {
   source_proof: KycProof,
   source_denylist_ref_input_index: Int,

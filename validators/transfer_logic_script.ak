@@ -2434,3 +2434,96 @@ test below_floor_two_senders_both_consolidating_pass() {
     [pf_dst(3), pf_dst(4)],
   )
 }
+
+// ── Deactivation, second senders and publish ─────────────────────────────────
+
+/// The deactivation gate on its own: deactivated but NOT paused.
+test transfer_rejected_when_deactivated_but_not_paused() {
+  !run_transfer(t_redeemer(), t_transfer_tx(False, True, False, False))
+}
+
+/// A partially frozen holder FIRST of two senders breaches its floor by one.
+test partially_frozen_first_of_two_senders_may_not_breach_the_floor() {
+  !pf_run(
+    pf_list_a(Some(400)),
+    [pf_input(0, pf_a(), 1_000), pf_input(1, VerificationKey(pf_b), 100)],
+    [pf_output(pf_c(), 701), pf_output(pf_a(), 399)],
+    [pf_src(3), pf_src(3)],
+    [pf_dst(3), pf_dst(3)],
+  )
+}
+
+/// Positive control for the test above: same shape, floor kept.
+test partially_frozen_first_of_two_senders_keeping_the_floor_passes() {
+  pf_run(
+    pf_list_a(Some(400)),
+    [pf_input(0, pf_a(), 1_000), pf_input(1, VerificationKey(pf_b), 100)],
+    [pf_output(pf_c(), 700), pf_output(pf_a(), 400)],
+    [pf_src(3), pf_src(3)],
+    [pf_dst(3), pf_dst(3)],
+  )
+}
+
+/// KYC for the SECOND of two senders (the memo walk): first proof genuine,
+/// second invalid — must be rejected.
+test second_sender_kyc_is_checked() {
+  let tx = Transaction {
+    ..t_transfer_tx_with_tel(True, False, t_tel_with(t_kyc_issuer_vkey)),
+    inputs: [
+      t_sender_input(t_sender_stake, 1_000),
+      pf_input(1, VerificationKey(pf_b), 100),
+    ],
+    outputs: [t_token_utxo(t_dest_stake, 1_100)],
+  }
+  !run_transfer(
+    TransferLogicScriptWithdrawRedeemer {
+      ..t_redeemer(),
+      actions_for_each_input: [
+        t_source_action_with_proof(t_cip30_proof(t_sender_cip30())),
+        t_source_action(),
+      ],
+      destination_actions: [t_dest_action()],
+    },
+    tx,
+  )
+}
+
+/// Positive control: the same transaction with only the first sender.
+test second_sender_kyc_control_one_sender_passes() {
+  run_transfer(
+    TransferLogicScriptWithdrawRedeemer {
+      ..t_redeemer(),
+      actions_for_each_input: [
+        t_source_action_with_proof(t_cip30_proof(t_sender_cip30())),
+      ],
+      destination_actions: [t_dest_action()],
+    },
+    t_transfer_tx_with_tel(True, False, t_tel_with(t_kyc_issuer_vkey)),
+  )
+}
+
+/// Nobody may deregister this script's stake credential: every transfer
+/// needs its withdraw-0.
+test transfer_publish_rejects_credential_deregistration() {
+  !transfer_logic_validator.publish(
+    t_sec_name,
+    t_gs_policy,
+    t_issuance_policy,
+    t_denylist_script_hash,
+    builtin.constr_data(0, []),
+    certificate.UnregisterCredential {
+      credential: Script(t_transfer_hash),
+      refund: Never,
+    },
+    t_transfer_tx(False, False, False, False),
+  )
+}
+
+/// This script cannot be installed as the minting authority, because it
+/// cannot decode the acceptance redeemer `constr 4 []` that
+/// `RotateMintingScript` makes the incoming authority run with.
+test transfer_logic_cannot_accept_a_minting_rotation() fail {
+  let accept: Data = builtin.constr_data(4, [])
+  expect redeemer: TransferLogicScriptWithdrawRedeemer = accept
+  redeemer.actions_for_each_input == []
+}

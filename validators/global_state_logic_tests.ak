@@ -19,6 +19,8 @@ use cardano/transaction.{
 use constants
 use global_state_logic as v_logic
 use global_state_proxy as v_proxy
+use minting_authority as v_authority
+use minting_logic_script as v_minting_proxy
 use tests/global_state_fixtures.{
   rotated, t_admin, t_data_of_raw_length, t_datum, t_datum_size, t_dl_ll_policy,
   t_gs_logic, t_gs_policy, t_gs_script_hash, t_many_entities, t_max_datum_bytes,
@@ -29,13 +31,14 @@ use tests/global_state_fixtures.{
 }
 use types/global_state.{
   AddTrustedEntity, DeactivateContract, GlobalStateDatum,
-  GlobalStateSpendRedeemer, LockUpgrades, MintSecurity, ModifySecurityInfo,
-  PauseTransfers, RemoveTrustedEntity, RotateAdmin, RotateGlobalStateScript,
-  RotateMintingScript, SetMintableAmount, SetRequiresReceiverKyc,
-  SetRequiresSenderKyc, TrustedEntityMetadata, UpdateMemberRootHash,
-  UpdateTrustedEntity, gs_core_field_count, idx_deactivated, idx_mintable_amount,
-  set_security_info,
+  GlobalStateSpendRedeemer, GlobalStateSpent, LockUpgrades, MintSecurity,
+  ModifySecurityInfo, PauseTransfers, RemoveTrustedEntity, RotateAdmin,
+  RotateGlobalStateScript, RotateMintingScript, SetMintableAmount,
+  SetRequiresReceiverKyc, SetRequiresSenderKyc, TrustedEntityMetadata,
+  UpdateMemberRootHash, UpdateTrustedEntity, gs_core_field_count,
+  idx_deactivated, idx_mintable_amount, set_security_info,
 }
+use types/minting_authority.{AcceptMintingRotation, MintBurn}
 use types/power_users.{PowerUser}
 use utils
 
@@ -144,6 +147,9 @@ test rotate_minting_script_succeeds_when_admin_signs() {
   // outgoing nor the incoming authority. Deliberately NOT dual-sig:
   // replacing a buggy or compromised authority has to work precisely when
   // that authority can no longer be trusted to co-sign its own removal.
+  // The INCOMING authority must run and accept the rotation (its withdraw-0
+  // with `AcceptMintingRotation`); that is a withdrawal, not a signature, so
+  // the above still holds.
   let input_datum = t_datum(False, False)
   let output_datum = GlobalStateDatum {
     ..input_datum,
@@ -153,7 +159,12 @@ test rotate_minting_script_succeeds_when_admin_signs() {
   run_spend(
     input_datum,
     rotate_minting_script_redeemer(t_new_minting_script),
-    t_tx(input_datum, output_datum, [t_admin]),
+    accepted_rotation_tx(
+      input_datum,
+      output_datum,
+      [t_admin],
+      t_new_minting_script,
+    ),
   )
 }
 
@@ -3310,5 +3321,453 @@ test logic_without_global_state_or_genesis_fails() fail {
     t_gs_logic,
     deactivate_redeemer(),
     Transaction { ..t_genesis_tx(t_output(t_datum(False, False))), mint: zero },
+  )
+}
+
+// ── PauseTransfers and MintSecurity gates ────────────────────────────────────
+
+fn t_pu_node_without_can_pause() -> Input {
+  let base = t_pu_node_at(Script(t_pu_script_hash))
+  let pu = PowerUser {
+    credential_hash: t_pause_pu_cred,
+    is_admin: True,
+    can_mint: True,
+    can_burn: True,
+    can_pause: False,
+    can_force_transfer: True,
+  }
+  let element: Element<Data, PowerUser> = Element {
+    data: Node { data: pu },
+    link: None,
+  }
+  Input {
+    ..base,
+    output: Output { ..base.output, datum: InlineDatum(element) },
+  }
+}
+
+test pause_rejects_an_operator_without_can_pause() {
+  !run_spend(
+    t_pause_datum(False),
+    t_pause_redeemer(),
+    t_pause_tx(t_pu_node_without_can_pause()),
+  )
+}
+
+test pause_rejects_a_missing_operator_signature() {
+  !run_spend(
+    t_pause_datum(False),
+    t_pause_redeemer(),
+    Transaction {
+      ..t_pause_tx(t_pu_node_at(Script(t_pu_script_hash))),
+      extra_signatories: [],
+    },
+  )
+}
+
+test pause_cannot_smuggle_another_field_change() {
+  !run_spend(
+    t_pause_datum(False),
+    t_pause_redeemer(),
+    Transaction {
+      ..t_tx(
+        t_pause_datum(False),
+        GlobalStateDatum {
+          ..t_pause_datum(True),
+          admin_credential_hash: #"0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e",
+        },
+        [t_pause_pu_cred],
+      ),
+      reference_inputs: [t_pu_node_at(Script(t_pu_script_hash))],
+    },
+  )
+}
+
+/// A stranger spends GlobalState under MintSecurity with nothing minted and no
+/// signature (e.g. to churn the UTxO or take its surplus ADA). Only the
+/// issuance-mint redeemer check refuses it.
+test mint_security_rejects_a_spend_without_an_issuance_mint() fail {
+  let d = t_datum(False, False)
+  run_spend(
+    d,
+    mintsecurity_redeemer(),
+    Transaction {
+      ..t_tx(d, d, []),
+      redeemers: [
+        Pair(Withdraw(Script(t_gs_logic)), builtin.constr_data(0, [])),
+      ],
+    },
+  )
+}
+
+// ── The admin and the minting authority stay two credentials ─────────────────
+//
+// Rotation fixtures here already carry the incoming authority's withdraw-0
+// and its `AcceptMintingRotation` redeemer (`constr 4 []`), so the rotation
+// handshake never masks what these tests check.
+
+/// A rotation transaction in which the incoming authority `new` runs and
+/// accepts the rotation.
+fn accepted_rotation_tx(
+  input_datum: GlobalStateDatum,
+  output_datum: GlobalStateDatum,
+  signatories: List<ByteArray>,
+  new: ByteArray,
+) -> Transaction {
+  Transaction {
+    ..t_tx(input_datum, output_datum, signatories),
+    withdrawals: [Pair(Script(new), 0)],
+    redeemers: [Pair(Withdraw(Script(new)), builtin.constr_data(4, []))],
+  }
+}
+
+test rotate_admin_to_the_minting_authority_fails() {
+  let input_datum = t_datum(False, False)
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    admin_credential_hash: t_minting_script,
+  }
+  !run_spend(
+    input_datum,
+    rotate_admin_redeemer(t_minting_script),
+    t_tx(input_datum, output_datum, [t_admin, t_minting_script]),
+  )
+}
+
+test rotate_minting_script_to_the_admin_fails() {
+  let input_datum = t_datum(False, False)
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    minting_script_credential_hash: t_admin,
+  }
+  !run_spend(
+    input_datum,
+    rotate_minting_script_redeemer(t_admin),
+    accepted_rotation_tx(input_datum, output_datum, [t_admin], t_admin),
+  )
+}
+
+test rotate_minting_script_to_the_current_authority_fails() {
+  let input_datum = t_datum(False, False)
+  !run_spend(
+    input_datum,
+    rotate_minting_script_redeemer(t_minting_script),
+    accepted_rotation_tx(input_datum, input_datum, [t_admin], t_minting_script),
+  )
+}
+
+// ── Composite: a minter cannot carry an admin action ─────────────────────────
+//
+// The admin is misconfigured to the minting proxy's hash. A `can_mint` operator
+// tries to make the proxy "sign" a RotateAdmin to itself by running the minting
+// authority with a MintBurn that mints nothing, which makes the proxy run too.
+// The GlobalState logic, the minting proxy and the authority all see the same
+// transaction; at least one must refuse. Before INVARIANT 7 all three passed.
+
+const t_minting_proxy_hash: ByteArray =
+  #"3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b"
+
+const t_authority_hash: ByteArray =
+  #"4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c"
+
+const t_minter_hash: ByteArray =
+  #"5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d"
+
+/// A `can_mint` node keyed at `t_minter_hash`, in the list the pause datum names.
+fn t_minter_node() -> Input {
+  let base = t_pu_node_at(Script(t_pu_script_hash))
+  let pu = PowerUser {
+    credential_hash: t_minter_hash,
+    is_admin: False,
+    can_mint: True,
+    can_burn: False,
+    can_pause: False,
+    can_force_transfer: False,
+  }
+  let element: Element<Data, PowerUser> = Element {
+    data: Node { data: pu },
+    link: None,
+  }
+  Input {
+    ..base,
+    output: Output {
+      ..base.output,
+      value: merge(
+        from_lovelace(2_000_000),
+        from_asset(
+          t_pu_ll_policy,
+          bytearray.concat(constants.linked_list_node_key_prefix, t_minter_hash),
+          1,
+        ),
+      ),
+      datum: InlineDatum(element),
+    },
+  }
+}
+
+test zero_amount_mint_burn_cannot_carry_an_admin_rotation() {
+  let input_datum = GlobalStateDatum {
+    ..t_pause_datum(False),
+    admin_credential_hash: t_minting_proxy_hash,
+    minting_script_credential_hash: t_authority_hash,
+  }
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    admin_credential_hash: t_minter_hash,
+  }
+  let redeemer = rotate_admin_redeemer(t_minter_hash)
+  let input_data: Data = input_datum
+  let redeemer_data: Data = redeemer
+  let tx = Transaction {
+    ..t_tx(input_datum, output_datum, [t_minter_hash]),
+    reference_inputs: [t_minter_node()],
+    withdrawals: [
+      Pair(Script(t_gs_logic), 0),
+      Pair(Script(t_minting_proxy_hash), 0),
+      Pair(Script(t_authority_hash), 0),
+    ],
+  }
+  let global_state_ok = v_proxy.global_state_proxy.spend(
+    Some(input_data),
+    redeemer_data,
+    t_out_ref(0),
+    tx,
+  ) && run_logic(t_gs_logic, redeemer, tx)
+  let proxy_ok = v_minting_proxy.minting_logic_validator.withdraw(
+    t_gs_policy,
+    GlobalStateSpent { global_state_input_index: 0 },
+    Script(t_minting_proxy_hash),
+    tx,
+  )
+  let authority_ok = v_authority.minting_authority_validator.withdraw(
+    t_sec_name,
+    t_gs_policy,
+    #"c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+    t_minting_proxy_hash,
+    t_issuance_policy,
+    #"d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0",
+    t_pu_script_hash,
+    #"e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1",
+    #"e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2",
+    MintBurn {
+      global_state_input_index: 0,
+      power_user_node_ref_input_index: 0,
+      minted_amount: 0,
+      destination_actions: [],
+    },
+    Script(t_authority_hash),
+    tx,
+  )
+  !(global_state_ok && proxy_ok && authority_ok)
+}
+
+/// Control for the composite: the same transaction, the GlobalState and proxy
+/// halves only. They still pass, so the authority's refusal is what stops it.
+test zero_amount_mint_burn_composite_control_global_state_and_proxy_pass() {
+  let input_datum = GlobalStateDatum {
+    ..t_pause_datum(False),
+    admin_credential_hash: t_minting_proxy_hash,
+    minting_script_credential_hash: t_authority_hash,
+  }
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    admin_credential_hash: t_minter_hash,
+  }
+  let redeemer = rotate_admin_redeemer(t_minter_hash)
+  let tx = Transaction {
+    ..t_tx(input_datum, output_datum, [t_minter_hash]),
+    reference_inputs: [t_minter_node()],
+    withdrawals: [
+      Pair(Script(t_gs_logic), 0),
+      Pair(Script(t_minting_proxy_hash), 0),
+      Pair(Script(t_authority_hash), 0),
+    ],
+  }
+  and {
+    run_logic(t_gs_logic, redeemer, tx),
+    v_minting_proxy.minting_logic_validator.withdraw(
+      t_gs_policy,
+      GlobalStateSpent { global_state_input_index: 0 },
+      Script(t_minting_proxy_hash),
+      tx,
+    ),
+  }
+}
+
+// ── The incoming authority runs and accepts the rotation ─────────────────────
+//
+// `RotateMintingScript` requires the incoming authority's withdraw-0 with
+// `AcceptMintingRotation`. The first two tests remove one half of that each;
+// the tripwire pins the on-chain encoding of the redeemer.
+
+fn t_rotated_authority_datum(input_datum: GlobalStateDatum) -> GlobalStateDatum {
+  GlobalStateDatum {
+    ..input_datum,
+    minting_script_credential_hash: t_new_minting_script,
+  }
+}
+
+test rotate_minting_script_fails_without_the_new_authority_running() {
+  // The acceptance redeemer is there, the withdrawal is not. The ledger itself
+  // refuses that shape; here it isolates `must_run_script_withdrawal`.
+  let input_datum = t_datum(False, False)
+  !run_spend(
+    input_datum,
+    rotate_minting_script_redeemer(t_new_minting_script),
+    Transaction {
+      ..accepted_rotation_tx(
+        input_datum,
+        t_rotated_authority_datum(input_datum),
+        [t_admin],
+        t_new_minting_script,
+      ),
+      withdrawals: [],
+    },
+  )
+}
+
+test rotate_minting_script_fails_when_the_new_authority_runs_with_another_redeemer() {
+  // The incoming script runs, but under a MintBurn-shaped redeemer.
+  let input_datum = t_datum(False, False)
+  let other: Data = MintBurn {
+    global_state_input_index: 0,
+    power_user_node_ref_input_index: 0,
+    minted_amount: 0,
+    destination_actions: [],
+  }
+  !run_spend(
+    input_datum,
+    rotate_minting_script_redeemer(t_new_minting_script),
+    Transaction {
+      ..accepted_rotation_tx(
+        input_datum,
+        t_rotated_authority_datum(input_datum),
+        [t_admin],
+        t_new_minting_script,
+      ),
+      redeemers: [Pair(Withdraw(Script(t_new_minting_script)), other)],
+    },
+  )
+}
+
+test accept_minting_rotation_is_constructor_4() {
+  let accept: Data = AcceptMintingRotation
+  builtin.equals_data(accept, builtin.constr_data(4, []))
+}
+
+// Isolating twins of the seven rotation negatives above: the same transactions
+// with the incoming authority's acceptance present, so each still fails for
+// its own reason and never merely for the missing handshake.
+
+test rotate_minting_script_with_acceptance_fails_without_admin_signature() {
+  let input_datum = t_datum(False, False)
+  !run_spend(
+    input_datum,
+    rotate_minting_script_redeemer(t_new_minting_script),
+    accepted_rotation_tx(
+      input_datum,
+      t_rotated_authority_datum(input_datum),
+      [],
+      t_new_minting_script,
+    ),
+  )
+}
+
+test rotate_minting_script_with_acceptance_cannot_smuggle_another_field_change() {
+  let input_datum = t_datum(False, False)
+  let output_datum = GlobalStateDatum {
+    ..t_rotated_authority_datum(input_datum),
+    mintable_amount: input_datum.mintable_amount + 1_000_000,
+  }
+  !run_spend(
+    input_datum,
+    rotate_minting_script_redeemer(t_new_minting_script),
+    accepted_rotation_tx(
+      input_datum,
+      output_datum,
+      [t_admin],
+      t_new_minting_script,
+    ),
+  )
+}
+
+test global_state_spend_with_acceptance_rejects_reference_script_on_output() {
+  let input_datum = t_datum(False, False)
+  let output_datum = t_rotated_authority_datum(input_datum)
+  !run_spend(
+    input_datum,
+    rotate_minting_script_redeemer(t_new_minting_script),
+    Transaction {
+      ..accepted_rotation_tx(
+        input_datum,
+        output_datum,
+        [t_admin],
+        t_new_minting_script,
+      ),
+      outputs: [t_output_with_reference_script(output_datum)],
+    },
+  )
+}
+
+test rotate_minting_script_with_acceptance_fails_when_length_invalid() {
+  let input_datum = t_datum(False, False)
+  let bad_hash = #"ab"
+  !run_spend(
+    input_datum,
+    rotate_minting_script_redeemer(bad_hash),
+    accepted_rotation_tx(
+      input_datum,
+      GlobalStateDatum {
+        ..input_datum,
+        minting_script_credential_hash: bad_hash,
+      },
+      [t_admin],
+      bad_hash,
+    ),
+  )
+}
+
+test deactivated_input_with_acceptance_rejects_rotate_minting_script() fail {
+  let input_datum = t_datum(True, True)
+  run_spend(
+    input_datum,
+    rotate_minting_script_redeemer(t_new_minting_script),
+    accepted_rotation_tx(
+      input_datum,
+      t_rotated_authority_datum(input_datum),
+      [t_admin],
+      t_new_minting_script,
+    ),
+  )
+}
+
+test rotate_minting_script_with_acceptance_fails_once_upgrades_are_locked() {
+  let input_datum = t_datum_locked()
+  !run_spend(
+    input_datum,
+    rotate_minting_script_redeemer(t_new_minting_script),
+    accepted_rotation_tx(
+      input_datum,
+      t_rotated_authority_datum(input_datum),
+      [t_admin],
+      t_new_minting_script,
+    ),
+  )
+}
+
+test rotate_minting_script_with_acceptance_to_the_gs_logic_fails() {
+  let input_datum = t_datum(False, False)
+  !run_spend(
+    input_datum,
+    rotate_minting_script_redeemer(t_gs_logic),
+    accepted_rotation_tx(
+      input_datum,
+      GlobalStateDatum {
+        ..input_datum,
+        minting_script_credential_hash: t_gs_logic,
+      },
+      [t_admin],
+      t_gs_logic,
+    ),
   )
 }

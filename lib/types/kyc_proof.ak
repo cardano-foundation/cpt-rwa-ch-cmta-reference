@@ -1,9 +1,19 @@
 use aiken/merkle_patricia_forestry.{Proof} as mpf
 
+/// A KYC membership proof: the holder's leaf in the MPF tree committed to by
+/// `GlobalStateDatum.member_root_hash`. The leaf key is the holder's credential
+/// type byte and hash, the leaf value its TTL, security policy id and network
+/// id (`kyc/verify.membership_leaf_key` / `membership_leaf_value`), so it binds
+/// what the attestation claim (see `Cip30AttestationProof`) binds.
+pub type MembershipProof {
+  pkh: ByteArray,
+  valid_until_ms: Int,
+  mpf_proof: Proof,
+}
+
 /// A KYC attestation is a short-lived claim, signed by a trusted issuer through
-/// CIP-30 `signData` (see `Cip30AttestationProof`), that a specific user is
-/// KYC'd for a specific security token on a specific network, valid until a
-/// specific moment.
+/// CIP-30 `signData`, that a specific user is KYC'd for a specific security
+/// token on a specific network, valid until a specific moment.
 ///
 /// Claim (payload) layout (exactly 67 bytes, big-endian ordering where applicable):
 ///
@@ -32,14 +42,9 @@ use aiken/merkle_patricia_forestry.{Proof} as mpf
 ///   `GlobalStateDatum.trusted_entity_vkeys`. The signature is a 64-byte
 ///   Ed25519 signature over the COSE `Sig_structure` wrapping the claim; a
 ///   raw signature over the bare claim is NOT accepted (removed 2026-10-15).
-pub type MembershipProof {
-  pkh: ByteArray,
-  valid_until_ms: Int,
-  mpf_proof: Proof,
-}
-
-/// A trusted issuer's CIP-30 `signData` result, with its parts extracted OFF
-/// chain (see the integration guide). Nothing here is trusted: the verifier
+///
+/// This type is the issuer's CIP-30 `signData` result, with its parts extracted
+/// OFF chain (see the integration guide). Nothing here is trusted: the verifier
 /// rebuilds the COSE `Sig_structure` from these parts and checks the issuer's
 /// Ed25519 signature over it, so a wrong extraction can only fail closed.
 pub type Cip30AttestationProof {
