@@ -2518,12 +2518,3 @@ test transfer_publish_rejects_credential_deregistration() {
     t_transfer_tx(False, False, False, False),
   )
 }
-
-/// This script cannot be installed as the minting authority, because it
-/// cannot decode the acceptance redeemer `constr 4 []` that
-/// `RotateMintingScript` makes the incoming authority run with.
-test transfer_logic_cannot_accept_a_minting_rotation() fail {
-  let accept: Data = builtin.constr_data(4, [])
-  expect redeemer: TransferLogicScriptWithdrawRedeemer = accept
-  redeemer.actions_for_each_input == []
-}

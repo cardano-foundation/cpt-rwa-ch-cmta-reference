@@ -124,18 +124,4 @@ pub type MintingAuthorityWithdrawRedeemer {
     /// not be barred from a transaction that also spends GlobalState.
     global_state_location: GlobalStateLocation,
   }
-  /// This authority is being installed by `RotateMintingScript`. The
-  /// GlobalState logic requires the incoming
-  /// authority's withdraw-0 with exactly this redeemer, so only a script that
-  /// decodes and accepts it can become the minting authority — not a typo,
-  /// not an unregistered credential, not another script of this deployment.
-  ///
-  /// The authority accepts it only while it is actually being installed: the
-  /// spent GlobalState names ANOTHER authority and the continuing one names
-  /// it. It authorises nothing else.
-  ///
-  /// APPENDED LAST on purpose: constructor indices are the on-chain redeemer
-  /// encoding (this one is `constr 4 []`), so inserting it earlier would
-  /// renumber every variant above.
-  AcceptMintingRotation
 }

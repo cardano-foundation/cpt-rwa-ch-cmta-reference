@@ -340,30 +340,15 @@ then fails this deployment's destination checks. See
 
 The admin can change `minting_script_credential_hash` with GlobalState's `RotateMintingScript`.
 The permanent proxy will delegate **all** mint, burn and registration decisions to the new
-authority. Register its stake credential in an **earlier** transaction: the new authority must run
-in the rotation itself. The rotation transaction:
-
-* spend GlobalState at `global_state_proxy`, signed by the admin, with a withdrawal of the current
-  GlobalState logic (field 0) carrying `GlobalStateSpendRedeemer { global_state_output_index,
-  action: RotateMintingScript { new_minting_script_credential_hash } }`;
-* add a zero-value withdrawal of the **incoming** authority with the redeemer
-  `AcceptMintingRotation`, encoded `constr 4 []` (the fifth constructor of
-  `MintingAuthorityWithdrawRedeemer`). It passes only when the spent GlobalState names another
-  authority and the continuing one names it;
-* the continuing GlobalState output equals the input with field 4 replaced. The new hash must differ
-  from the admin, from the current authority and from the GlobalState logic. The outgoing
-  authority neither signs nor runs.
-
-The handshake proves the script is producible, registered and built to accept the role; it does not
-prove it is a correct authority. Rebuild it from source at a pinned commit with every parameter
-and compare its hash before signing. Verify that the replacement preserves supply-cap enforcement,
+authority. Register its stake credential first. The new hash must differ from the admin, from the
+current authority and from the GlobalState logic; nothing on chain checks that it names a working
+authority. Rebuild it from source at a pinned commit with every parameter and compare its hash
+before signing. Verify that the replacement preserves supply-cap enforcement,
 GlobalState spending for supply changes, allowed asset names, registration structure and
 deactivation rules described at the top of
 [`minting_authority.ak`](../validators/minting_authority.ak), and its
-invariants 7–9: **a `MintBurn` that changes no supply authorises nothing**, role signatures
-refuse the scripts that run in the authority's own transactions, and **`AcceptMintingRotation` is
-accepted only while being installed and authorises nothing else**. Once a GlobalState logic with
-the handshake is installed, an authority without `AcceptMintingRotation` cannot be installed again.
+invariants 7 and 8: **a `MintBurn` that changes no supply authorises nothing**, and role
+signatures refuse the scripts that run in the authority's own transactions.
 Test an unsigned mint and each
 power-user role without its authorised signature; each should reject. **No power-user credential,
 admin or minting authority may ever equal GlobalState datum field 0** (the GlobalState logic hash):
@@ -379,6 +364,10 @@ minting proxy and the transfer and seizure scripts it pins; the seizure logic re
 
 **Operator checklist — what is not refused on chain.** Keep these out of every role by procedure:
 
+* any script but the rebuilt authority as the **minting authority** (`RotateMintingScript`): beyond
+  the admin, the current authority and the GlobalState logic, the new value is not checked. A typo
+  or an unregistered hash blocks minting, the transfer logic lets anyone mint, and an earlier
+  authority build brings back what it lacked;
 * this deployment's **transfer logic**, for any role outside the minting authority (GlobalState
   admin, pause, sanctions, seizure): its withdraw-0 passes for anyone when no token moves;
 * this deployment's **seizure logic**, as the admin of the power-users list or as a denylist

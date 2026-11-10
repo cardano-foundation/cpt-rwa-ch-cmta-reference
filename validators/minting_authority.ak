@@ -18,13 +18,12 @@ use types/cip68.{Cip68Datum} as types_cip68
 use types/denylist.{Denylist}
 use types/global_state.{
   GlobalStateDatum, GlobalStateReferenced, GlobalStateSpent, decode_global_state,
-  decode_global_state_core, gs_datum_from_location,
+  gs_datum_from_location,
 }
 use types/kyc_proof.{Cip30Attestation, Cip30AttestationProof}
 use types/minting_authority.{
-  AcceptMintingRotation, MintBurn, MintingAuthorityWithdrawRedeemer,
-  MintingLogicDestinationAction, RegisterMint, RegisterStructural,
-  UpgradeRegistryNode,
+  MintBurn, MintingAuthorityWithdrawRedeemer, MintingLogicDestinationAction,
+  RegisterMint, RegisterStructural, UpgradeRegistryNode,
 }
 use types/power_users.{PowerUser}
 use utils.{must_be_signed_by_credential, quantity_of}
@@ -112,15 +111,6 @@ use utils.{must_be_signed_by_credential, quantity_of}
 ///      minting proxy, or the transfer or seizure script it pins would be
 ///      "signed" by a script anyone (or any operator) can make run. Every
 ///      operator and admin signature check goes through `role_signed`.
-///   9. ACCEPT A ROTATION ONLY WHILE BEING INSTALLED.
-///      `RotateMintingScript` requires the incoming authority's withdraw-0 with
-///      `AcceptMintingRotation` (redeemer `constr 4 []`). A replacement
-///      authority must accept it exactly when the spent GlobalState names
-///      another authority and the continuing one names it, and authorise
-///      nothing else with it. An authority without this variant can never be
-///      installed; one that accepts it whenever it is named would let anyone
-///      make the CURRENT authority's withdrawal appear in any GlobalState
-///      transaction.
 /// ============================================================================
 validator minting_authority_validator(
   security_asset_name: ByteArray,
@@ -525,39 +515,6 @@ validator minting_authority_validator(
           // INVARIANT 4.
           !gs_datum.deactivated,
           role_signed(gs_datum.admin_credential_hash)?,
-        }
-      }
-      AcceptMintingRotation -> {
-        // INVARIANT 9 — see the header. Accept only while being installed:
-        // the spent GlobalState (found by its NFT among the INPUTS) names
-        // another authority, and the continuing one (by its NFT among the
-        // outputs) names this one. Only `RotateMintingScript` changes field 4,
-        // and it needs the admin's signature.
-        //
-        // Without the first half, anyone could run the CURRENT authority under
-        // this redeemer in any GlobalState transaction, where its withdrawal
-        // (and so the minting proxy's) would count as a signature.
-        //
-        // Nothing else is authorised: the minting proxy reads the SPENT
-        // GlobalState's field 4, the outgoing authority, so this run cannot
-        // stand in for it on a mint or a registry update.
-        let carries_global_state = fn(output: Output) {
-          quantity_of(
-            output.value,
-            global_state_policy_id,
-            constants.global_state_asset_name,
-          ) == 1
-        }
-        expect Some(spent) = list.find(
-          self.inputs,
-          fn(input) { carries_global_state(input.output) },
-        )
-        expect Some(continuing) = list.find(self.outputs, carries_global_state)
-        expect InlineDatum(spent_raw) = spent.output.datum
-        expect InlineDatum(continuing_raw) = continuing.datum
-        and {
-          (decode_global_state_core(spent_raw).minting_script_credential_hash != own_hash)?,
-          (decode_global_state_core(continuing_raw).minting_script_credential_hash == own_hash)?,
         }
       }
     }
@@ -3632,124 +3589,6 @@ test register_mint_rejects_an_admin_equal_to_the_minting_proxy() {
       inputs: [gs_input_with_admin(test_proxy_hash, 0)],
       extra_signatories: [test_pu_credential_hash],
       withdrawals: withdrawals_with(test_proxy_hash),
-    },
-  )
-}
-
-// ── AcceptMintingRotation, only while being installed ────────────────────────
-//
-// The branch must pass when the spent GlobalState names another authority
-// and the continuing one names this one, and in no other shape: otherwise
-// anyone could make the CURRENT authority's withdrawal appear in any
-// GlobalState transaction.
-
-const previous_authority_hash: ByteArray =
-  #"6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a"
-
-const other_authority_hash: ByteArray =
-  #"6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b"
-
-/// `make_gs_input`'s GlobalState, naming `authority` as the minting authority.
-fn gs_input_naming(authority: ByteArray) -> Input {
-  let base = make_gs_input(False)
-  expect InlineDatum(raw) = base.output.datum
-  expect gs_datum: GlobalStateDatum = raw
-  Input {
-    ..base,
-    output: Output {
-      ..base.output,
-      datum: InlineDatum(
-        GlobalStateDatum {
-          ..gs_datum,
-          minting_script_credential_hash: authority,
-        },
-      ),
-    },
-  }
-}
-
-/// A rotation from `from` to `to`, as this authority sees it.
-fn rotation_tx(from: ByteArray, to: ByteArray) -> Transaction {
-  Transaction {
-    ..make_withdraw_tx(
-      0,
-      True,
-      False,
-      False,
-      make_denylist_root_ref_input(),
-      [],
-      [test_admin_hash],
-    ),
-    inputs: [gs_input_naming(from)],
-    reference_inputs: [],
-    outputs: [gs_input_naming(to).output],
-    withdrawals: [Pair(Script(test_authority_hash), 0)],
-  }
-}
-
-test accept_minting_rotation_succeeds_when_being_installed() {
-  run_withdraw(
-    AcceptMintingRotation,
-    rotation_tx(previous_authority_hash, test_authority_hash),
-  )
-}
-
-test accept_minting_rotation_fails_when_already_installed() {
-  !run_withdraw(
-    AcceptMintingRotation,
-    rotation_tx(test_authority_hash, test_authority_hash),
-  )
-}
-
-test accept_minting_rotation_fails_when_the_output_names_another_authority() {
-  !run_withdraw(
-    AcceptMintingRotation,
-    rotation_tx(previous_authority_hash, other_authority_hash),
-  )
-}
-
-test accept_minting_rotation_fails_without_a_spent_global_state() fail {
-  run_withdraw(
-    AcceptMintingRotation,
-    Transaction {
-      ..rotation_tx(previous_authority_hash, test_authority_hash),
-      inputs: [],
-      reference_inputs: [gs_input_naming(previous_authority_hash)],
-    },
-  )
-}
-
-/// An output naming this authority WITHOUT the NFT, placed before the real
-/// GlobalState output, which names another authority.
-test accept_minting_rotation_ignores_a_decoy_output() {
-  let decoy = Output {
-    ..gs_input_naming(test_authority_hash).output,
-    value: from_lovelace(2_000_000),
-  }
-  !run_withdraw(
-    AcceptMintingRotation,
-    Transaction {
-      ..rotation_tx(previous_authority_hash, other_authority_hash),
-      outputs: [decoy, gs_input_naming(other_authority_hash).output],
-    },
-  )
-}
-
-/// An input naming another authority WITHOUT the NFT, placed before the real
-/// GlobalState input, which already names this one.
-test accept_minting_rotation_ignores_a_decoy_input() {
-  let decoy = Input {
-    output_reference: test_out_ref(9),
-    output: Output {
-      ..gs_input_naming(previous_authority_hash).output,
-      value: from_lovelace(2_000_000),
-    },
-  }
-  !run_withdraw(
-    AcceptMintingRotation,
-    Transaction {
-      ..rotation_tx(test_authority_hash, test_authority_hash),
-      inputs: [decoy, gs_input_naming(test_authority_hash)],
     },
   )
 }

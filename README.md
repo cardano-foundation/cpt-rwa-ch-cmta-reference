@@ -294,21 +294,13 @@ The GlobalState admin has three distinct upgrade paths, plus control over the su
 * `RotateMintingScript` changes `minting_script_credential_hash` in GlobalState. The permanent
   minting proxy then requires the replacement authority's withdraw-0. The proxy checks delegation,
   not the new authority's mint, burn or registration rules; review and test the replacement before
-  rotating. The **incoming authority must run in the rotation
-  transaction itself**, under the redeemer `AcceptMintingRotation` (`constr 4 []`), so register its
-  stake credential **before** rotating. It accepts only while being installed: the spent
-  GlobalState names another authority and the continuing one names it. That keeps out a typo, an
-  unregistered credential and every other script of this deployment (the transfer logic cannot
-  decode the redeemer); it does not prove the script is a correct authority, so rebuild it from
-  source with every parameter and compare its hash before signing. The new value must also differ
-  from the admin, from the current authority and from the GlobalState logic. The outgoing authority
-  does not have to consent: the incoming one's run is a withdrawal, not a signature. A replacement
-  authority must keep this build's two newest invariants: **a `MintBurn` that changes no supply
-  authorises nothing**, and **`AcceptMintingRotation` is accepted only while being installed and
-  authorises nothing else**. Without the first, any `can_mint` operator could make the authority
-  and the proxy run beside an unrelated action; without the second, anyone could. Once a GlobalState
-  logic with this handshake is installed, no authority without `AcceptMintingRotation` (any earlier
-  build) can be installed again; the GlobalState logic itself can still be rotated back.
+  rotating. Nothing on chain checks that the new value names a working authority, so rebuild it
+  from source with every parameter and compare its hash before signing. Register its stake
+  credential before the first withdrawal. The new value must differ from the admin, from the
+  current authority and from the GlobalState logic. The outgoing authority does not have to
+  consent. A replacement authority must keep this build's newest invariant: **a `MintBurn` that
+  changes no supply authorises nothing**. Without it, any `can_mint` operator could make the
+  authority and the proxy run beside an unrelated action.
 * `UpgradeRegistryNode` changes this token's CIP-113 transfer and/or third-party transfer logic
   credentials in its registry node. The admin signs and the minting authority verifies the
   continuing node, which must name exactly the transfer and seizure scripts that authority was built
@@ -369,9 +361,8 @@ A redeployment (burn and re-mint) needs none of this. To upgrade a running deplo
 1. Register the stake credentials of the new GlobalState logic, minting authority and seizure
    logic.
 2. `RotateGlobalStateScript` to the new GlobalState logic **first**. Until then `RotateMintingScript`
-   runs under the old logic, without the handshake.
-3. `RotateMintingScript` to the new authority, which runs `AcceptMintingRotation` in that
-   transaction.
+   runs under the old logic, which does not keep the admin and the authority apart.
+3. `RotateMintingScript` to the new authority.
 4. In a **separate** transaction, with GlobalState referenced, `UpgradeRegistryNode` re-points the
    registry node's third-party (seizure) logic to the new seizure script. The proxy now delegates to
    the new authority, whose F08 pins name that script. Steps 3 and 4 cannot share a transaction:

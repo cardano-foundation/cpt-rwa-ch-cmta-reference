@@ -44,7 +44,7 @@ the wrong asset name, a list root that did not link to the node being removed, a
 | [16](#16-the-power-users-list-policy-id-was-held-twice-on-the-mint-path) | The power-users list policy id was held twice on the mint path | — | Fixed |
 | [17](#17-partial-freeze-a-denylist-entry-can-freeze-an-amount-not-only-the-whole-holding) | Partial freeze: a denylist entry can freeze an amount | Feature | Added 2026-10-23 |
 | [18](#18-scripts-that-always-run-could-sign-for-a-role) | Scripts that always run could sign for a role | Low | Fixed |
-| [19](#19-rotatemintingscript-installed-an-authority-it-never-saw-run) | `RotateMintingScript` installed an authority it never saw run | Low | Fixed |
+| [19](#19-rotatemintingscript-installs-an-authority-it-never-sees-run) | `RotateMintingScript` installs an authority it never sees run | Low | **Accepted, by decision** |
 
 Findings 12 and 13 come from the 2026-08-28 re-audit; 1–11 from the original review; 14 from the
 2026-10-15 audit (F08) and 15–16 from the review of PR #29, which assigned them no severity; 17 is a
@@ -1205,73 +1205,29 @@ weakened to a plain signature check, is caught by its own test (16 mutants, 16 k
 
 ---
 
-## 19. `RotateMintingScript` installed an authority it never saw run
+## 19. `RotateMintingScript` installs an authority it never sees run
 
 **Severity: low.**
 
-### What was wrong
-
 `RotateGlobalStateScript` makes the incoming GlobalState logic run in the rotation
 ([§15](#15-genesis-never-ran-the-field-0-logic-and-rotation-accepted-any-script-that-runs)).
-`RotateMintingScript` did not: any 28-byte value the admin signed became the minting authority. A
-typo or an unregistered credential blocked every mint, burn and registry update until the admin
-rotated again. Worse, any other script of this deployment could be installed. The worst is the
-transfer logic: its withdraw-0 passes for anyone when no token moves, so anyone could then mint up
-to the cap with no KYC, denylist or operator check. Only an operator rule (the field-4 doc in
-`lib/types/global_state.ak`) stood in the way.
+`RotateMintingScript` does not: any 28-byte value the admin signs becomes the minting authority,
+unless it equals the admin, the current authority or the GlobalState logic. A typo blocks every
+mint, burn and registry update until the admin rotates again; an unregistered credential blocks
+them until it is registered. Worse, any other script of this deployment can be installed. The worst is the transfer logic: its
+withdraw-0 passes for anyone when no token moves, so anyone could then mint up to the cap with no
+KYC, denylist or operator check. An earlier authority build can be installed again too, and brings
+back whatever it lacked, such as the fixes in [§18](#18-scripts-that-always-run-could-sign-for-a-role).
 
-### The fix
+**Accepted by decision, and not checked on chain.** The rotation is admin-signed, and the admin
+checks the target (integration guide,
+[*Upgrades and operator checks*](../integration-guide.md#upgrades-and-operator-checks)):
 
-* `MintingAuthorityWithdrawRedeemer` gains `AcceptMintingRotation`, appended last so that every
-  existing encoding is unchanged: it is `constr 4 []`.
-* `RotateMintingScript` requires the incoming authority's withdraw-0 (`must_run_script_withdrawal`)
-  with exactly that redeemer, the way `RotateGlobalStateScript` binds its incoming logic (invariant 12
-  of `global_state_logic.ak`). A typo or an unregistered credential now fails, and so does every
-  other script of this deployment: the GlobalState logic is refused outright; the minting proxy, the
-  transfer logic and the seizure logic cannot decode `constr 4 []`; the GlobalState proxy, the
-  genesis policy and both lists have no withdraw handler; an authority built before this fix has no
-  such constructor.
-* The authority accepts `AcceptMintingRotation` only while being installed: the spent GlobalState,
-  found by its NFT among the **inputs** only, names another authority, and the continuing one, found
-  by its NFT among the outputs, names it (invariant 9 of `minting_authority.ak`). Without the first
-  half anyone could run the current authority under this redeemer in any GlobalState transaction,
-  and its withdrawal, and so the proxy's, would count as a signature. It authorises nothing else:
-  the proxy reads the spent GlobalState's field 4, the outgoing authority, so this run cannot stand
-  in for it.
-* The outgoing authority still need not consent; the incoming one's run is a withdrawal, not a
-  signature.
-
-The handshake does not prove the script is a correct authority. Rebuild it from source with every
-parameter and compare its hash before signing; the smoke tests stay.
-
-**Rollback.** Once a GlobalState logic with the handshake is installed, no authority without
-`AcceptMintingRotation` — any earlier build — can be installed again. The GlobalState logic
-itself can still be rotated back. A running deployment is upgraded in the order the README gives
-(*Upgrading a running deployment in place*): GlobalState logic first, then the
-authority, then the registry node's seizure logic in a separate transaction.
-
-**One test changed, on purpose.** `rotate_minting_script_succeeds_when_admin_signs` asserted the old
-rule, a rotation in which the new authority never runs. Its fixture now carries the incoming
-authority's withdrawal and acceptance; its name, assertion and signatories are unchanged. The change
-was approved before it was made.
-
-**Masking, checked.** The seven existing rotation negatives (missing admin signature, a smuggled
-field, a reference script on the output, a malformed hash, upgrades locked, rotation to the
-GlobalState logic, a deactivated input) now also fail for the missing handshake, so on their own
-they no longer prove their own checks. Each has a twin, `*_with_acceptance_*`, with the handshake
-present. Made `True`, each existing conjunct of the rotation is now caught by its twin and by no
-other test.
-
-**Pinned by** `rotate_minting_script_fails_without_the_new_authority_running`,
-`rotate_minting_script_fails_when_the_new_authority_runs_with_another_redeemer`,
-`accept_minting_rotation_is_constructor_4` and the seven twins
-(`validators/global_state_logic_tests.ak`); `accept_minting_rotation_succeeds_when_being_installed`,
-`…_fails_when_already_installed`, `…_fails_when_the_output_names_another_authority`,
-`…_fails_without_a_spent_global_state`, `…_ignores_a_decoy_output` and `…_ignores_a_decoy_input`
-(`validators/minting_authority.ak`); `transfer_logic_cannot_accept_a_minting_rotation`
-(`validators/transfer_logic_script.ak`). Each new rejection failed against a stub authority that
-accepts unconditionally (the twins, which pin existing checks, pass there by design), and 16 of 16
-mutants of the new and existing rotation conjuncts and of the NFT lookups were killed.
+* rebuild the new authority from source at a pinned commit with every parameter, and compare its
+  hash before signing;
+* register its stake credential before the rotation;
+* after every rotation, test that a mint without a power-user signature is rejected. The failure is
+  silent and fails open, so it will not surface on its own.
 
 ---
 
@@ -1508,13 +1464,8 @@ weakens the gate. But nothing works until off-chain moves:
    `valid_until_ms ‖ security_policy_id ‖ network_id`. Use the exported encoders. Rebuild the root
    **before** calling `UpdateMemberRootHash`.
 
-### The rotation handshake and role refusals: one redeemer variant, a new rotation shape, four moved hashes
+### The role refusals: no schema change, four moved hashes
 
-* **Redeemer, additive.** `MintingAuthorityWithdrawRedeemer` gains `AcceptMintingRotation` as its
-  last constructor, `constr 4 []`; every existing encoding is unchanged.
-* **Rotation transaction, breaking for builders.** `RotateMintingScript` now needs the incoming
-  authority's zero-value withdrawal with `AcceptMintingRotation`, its stake credential registered in
-  an earlier transaction (integration guide, *Upgrades and operator checks*).
 * **Refused values.** A `MintBurn` with `minted_amount = 0`; an admin equal to the minting authority
   (genesis, `RotateAdmin`); a new authority equal to the admin or to the current one; operators and
   admins keyed at the scripts listed in [§18](#18-scripts-that-always-run-could-sign-for-a-role).
@@ -1523,10 +1474,8 @@ weakens the gate. But nothing works until off-chain moves:
   deployments only). Both proxies, the transfer logic and both lists are unchanged. The registry
   node must then name the new seizure logic: a separate `UpgradeRegistryNode` after the authority
   rotation.
-* **Blueprint.** `MintingAuthorityWithdrawRedeemer`'s schema gains the `AcceptMintingRotation`
-  variant; the descriptions of `TransferLogicScriptAction`, `GlobalStateSpendAction`,
-  `MembershipProof` and `Cip30AttestationProof` changed. No other schema, field name or encoding
-  did.
+* **Blueprint.** The descriptions of `TransferLogicScriptAction`, `GlobalStateSpendAction`,
+  `MembershipProof` and `Cip30AttestationProof` changed. No schema, field name or encoding did.
 
 ### The 2026-10-23 partial freeze: one datum change, one redeemer variant, two new parameters
 
