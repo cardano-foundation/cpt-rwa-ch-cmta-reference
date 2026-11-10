@@ -7,6 +7,7 @@
 use aiken/builtin
 use aiken/collection/list
 use aiken/collection/pairs
+use aiken/fuzz
 use aiken/primitive/bytearray
 use aiken_design_patterns/linked_list.{Element, Node}
 use cardano/address.{Address, Credential, Script, VerificationKey}
@@ -3835,4 +3836,104 @@ test registry_upgrade_and_an_admin_action_share_one_transaction() {
       tx,
     ),
   }
+}
+
+// ── Benchmarks — the GlobalState and minting-proxy cost of a mint or burn ────
+//
+// `aiken bench -m "global_state_logic_tests.{..}"`. The transaction a security
+// mint (or burn) of `delta` runs: GlobalState spent at input 0 and continued
+// at output 0 with `mintable_amount - delta`, this token's registry node at
+// reference input 0, and the withdrawals of the GlobalState logic and of the
+// minting authority. Built in the SAMPLER, so the figures are the scripts'
+// runs alone. Neither cost grows with the size.
+
+type SecuritySupplyCase {
+  logic: ByteArray,
+  input_data: Data,
+  redeemer: GlobalStateSpendRedeemer,
+  redeemer_data: Data,
+  tx: Transaction,
+}
+
+fn t_bench_supply_case(delta: Int) -> SecuritySupplyCase {
+  let input_datum = t_datum(False, False)
+  let input_data: Data = input_datum
+  let redeemer = mintsecurity_redeemer()
+  let redeemer_data: Data = redeemer
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    mintable_amount: input_datum.mintable_amount - delta,
+  }
+  let tx = t_mintsecurity_tx(input_datum, output_datum, delta, [t_admin])
+  SecuritySupplyCase {
+    logic: input_datum.global_state_script_credential_hash,
+    input_data,
+    redeemer,
+    redeemer_data,
+    tx: Transaction {
+      ..tx,
+      inputs: list.map(
+        tx.inputs,
+        fn(input) {
+          if input.output_reference == t_out_ref(0) {
+            Input {
+              ..input,
+              output: Output { ..input.output, datum: InlineDatum(input_data) },
+            }
+          } else {
+            input
+          }
+        },
+      ),
+      reference_inputs: [t_registry_node_ref_input()],
+      withdrawals: [
+        Pair(Script(input_datum.global_state_script_credential_hash), 0),
+        Pair(Script(t_minting_script), 0),
+      ],
+    },
+  }
+}
+
+fn a_security_mint(_size: Int) -> Fuzzer<SecuritySupplyCase> {
+  fuzz.constant(t_bench_supply_case(100))
+}
+
+fn a_security_burn(_size: Int) -> Fuzzer<SecuritySupplyCase> {
+  fuzz.constant(t_bench_supply_case(-100))
+}
+
+fn run_global_state_on(case: SecuritySupplyCase) -> Bool {
+  and {
+    v_proxy.global_state_proxy.spend(
+      Some(case.input_data),
+      case.redeemer_data,
+      t_out_ref(0),
+      case.tx,
+    ),
+    run_logic(case.logic, case.redeemer, case.tx),
+  }
+}
+
+fn run_minting_proxy_on(case: SecuritySupplyCase) -> Bool {
+  run_minting_proxy(
+    GlobalStateSpent { global_state_input_index: 0 },
+    NodeReferenced { registry_node_ref_input_index: 0 },
+    case.tx,
+  )
+}
+
+bench global_state_cost_of_a_security_mint(case via a_security_mint) {
+  expect run_global_state_on(case)
+}
+
+bench global_state_cost_of_a_security_burn(case via a_security_burn) {
+  expect run_global_state_on(case)
+}
+
+bench minting_proxy_cost_of_a_security_mint(case via a_security_mint) {
+  expect run_minting_proxy_on(case)
+}
+
+bench minting_proxy_cost_of_a_security_burn(case via a_security_burn) {
+  expect run_minting_proxy_on(case)
 }

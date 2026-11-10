@@ -477,16 +477,16 @@ exact order the blueprint (`plutus.json`) declares them; apply top to bottom.
 
 Five validators are withdraw-0 scripts, i.e. they run as zero-value withdrawals rather than as the
 spending or minting script of any UTxO: `global_state_logic` (every GlobalState action — the proxy
-holding the NFT requires it), `transfer_logic_validator` (~6.8 KB, every transfer),
-`third_party_transfer_logic_validator` (~7.1 KB, every seizure), `minting_authority_validator`
-(~9.3 KB, every mint and burn) and the minting proxy `minting_logic_validator` (~1.0 KB, also every
+holding the NFT requires it), `transfer_logic_validator` (~7.2 KB, every transfer),
+`third_party_transfer_logic_validator` (~7.4 KB, every seizure), `minting_authority_validator`
+(~9.0 KB, every mint and burn) and the minting proxy `minting_logic_validator` (~1.8 KB, also every
 mint and burn — the proxy's withdraw-0 is what the CIP-113 registry node invokes, and it in turn
-requires the authority's). The four large ones (`global_state_logic` is ~5.9 KB and runs in every
+requires the authority's). The four large ones (`global_state_logic` is ~5.7 KB and runs in every
 mint and burn too) must be published once as reference-script UTxOs and
 supplied via reference inputs — not inlined (a transaction is capped at 16 KiB); the proxy is small
 enough to inline but is simplest to publish alongside them. The two list `mint` validators
-(~5.2–5.8 KB) must be treated the same way: the genesis transaction runs both, the GlobalState
-mint and `global_state_logic` — ≈ 19.3 KB of scripts against the 16 KiB limit — so publish them
+(~5.1–5.8 KB) must be treated the same way: the genesis transaction runs both, the GlobalState
+mint and `global_state_logic` — ≈ 19.0 KB of scripts against the 16 KiB limit — so publish them
 and `global_state_logic` before genesis (step 0 of [Initialising a token](#initialising-a-token)).
 
 All five withdraw-0 scripts need their **stake credential registered** on chain before the first
@@ -637,7 +637,7 @@ Operational rules:
 
 Figures below are measured with `aiken bench` (`aiken bench -m "transfer_logic_script.{..}"
 --max-size 40`; the per-test execution units `aiken check` prints are the other source) against the
-current, cost-optimised implementation. The bench table was re-measured on 2026-11-02 under Aiken
+current, cost-optimised implementation. The bench table was re-measured on 2026-11-10 under Aiken
 v1.1.24 with the builtin-`Value` lookups; the per-party figures in the bullets predate that and are
 slightly high. They are for this deployment's scripts alone — the CIP-113
 base layer shares the same per-transaction budget, 10 000 M CPU / 14 M memory, and **memory is the
@@ -670,16 +670,41 @@ node; `seizure_cost_by_destination_count`: one seized input, `n` destinations, d
 
 | n | transfer mem | transfer CPU | seizure mem | seizure CPU |
 |---:|---:|---:|---:|---:|
-| 1 | 654,920 | 199,468,357 | 634,452 | 196,656,988 |
-| 4 | 1,250,219 | 395,682,454 | 882,558 | 281,887,204 |
-| 8 | 2,116,207 | 712,661,658 | 1,249,494 | 423,207,696 |
-| 16 | 4,126,391 | 1,543,165,858 | 2,122,470 | 804,121,576 |
+| 1 | 647,956 | 197,895,933 | 617,609 | 192,233,904 |
+| 4 | 1,223,356 | 389,491,923 | 862,715 | 276,984,120 |
+| 8 | 2,062,812 | 700,313,651 | 1,225,651 | 417,664,612 |
+| 16 | 4,019,932 | 1,518,502,899 | 2,090,627 | 797,298,492 |
 
 > **Conservative maxima, at 25% of the budget:** ordinary transfer ≤ 12 unique parties per side
 > denylist-only, ≤ 8 per side with attestation KYC on both sides; seizure ≤ 23 destinations
 > denylist-only, ≤ 15 with receiver KYC. The KYC figures add ≈ 76 K memory per attestation proof to
 > the benches above. Split larger distributions; keep parties that share a
 > covering node adjacent in the action lists — they follow input/output order.
+
+#### Mint and burn
+
+A mint or burn runs four of this deployment's scripts: the GlobalState proxy and logic
+(`MintSecurity`), the minting proxy and the minting authority. Only the authority's cost grows with
+the number of destinations. Measured with `aiken bench -m "minting_authority.{..}"` and
+`aiken bench -m "global_state_logic_tests.{..}"` (`--seed 42`). These benches build their
+transaction in the sampler, so they measure the scripts' runs alone; the transfer and seizure
+benches above build theirs in the bench body, which adds the fixture's cost to their figures.
+
+Per mint or burn, whatever the destination count: the minting proxy 196,193 mem / 74,336,399 CPU,
+the GlobalState proxy and logic 271,623 mem / 117,393,487 CPU.
+
+| n | authority mem | authority CPU | whole mint mem | whole mint CPU |
+|---:|---:|---:|---:|---:|
+| 1 | 392,002 | 128,766,014 | 859,818 | 320,495,900 |
+| 4 | 672,973 | 234,462,251 | 1,140,789 | 426,192,137 |
+| 8 | 1,088,173 | 404,053,495 | 1,555,989 | 595,783,381 |
+| 16 | 2,057,677 | 841,508,879 | 2,525,493 | 1,033,238,765 |
+
+`mint_cost_by_destination_count` is one `MintBurn` to `n` distinct destinations, denylist-only,
+every destination citing the empty denylist root; "whole mint" adds the two constant figures above.
+A burn (`burn_cost`, no destinations): authority 196,260 mem / 63,463,967 CPU, whole burn 664,076
+mem / 255,193,853 CPU. Sixteen destinations use about 18% of the memory budget; the CIP-113 base
+layer's own scripts in the same transaction are not included.
 
 ## KYC proof formats
 
@@ -750,7 +775,7 @@ dependent transaction after the preceding output is available.
 0. **Prepare.** Register the stake credential of `global_state_logic`, applied with this
    deployment's parameters (its `publish` handler accepts `RegisterCredential`), and publish it
    and both list `mint` validators as reference-script UTxOs: the genesis transaction runs those
-   three and the GlobalState mint, ≈ 19.3 KB of scripts, which cannot all be inlined under the
+   three and the GlobalState mint, ≈ 19.0 KB of scripts, which cannot all be inlined under the
    16 KiB transaction limit. No transaction before genesis may spend one of the three reserved
    one-shot inputs, so exclude them from coin selection: they are baked into the mint parameters,
    and spending one means choosing a new input and re-applying every parameter that depends on it.

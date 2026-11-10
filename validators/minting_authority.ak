@@ -1,6 +1,7 @@
 use aiken/builtin
 use aiken/collection/dict
 use aiken/collection/list
+use aiken/fuzz
 use aiken/interval.{Interval, IntervalBound, NegativeInfinity, PositiveInfinity}
 use aiken/primitive/bytearray
 use aiken_design_patterns/linked_list.{Element, Node, Root}
@@ -3471,4 +3472,94 @@ test register_rejects_an_admin_equal_to_the_minting_proxy() {
       withdrawals: withdrawals_with(test_proxy_hash),
     },
   )
+}
+
+// ── Benchmark — the authority's cost by mint destination count ───────────────
+//
+// `aiken bench -m "minting_authority.{..}"`. A `MintBurn` minting 1_000 to
+// each of `n` distinct destinations, denylist-only
+// (`requires_receiver_kyc = False`), every action citing the empty denylist
+// root (reference input 2), which covers every key. The redeemer and the
+// transaction are built in the SAMPLER, so the figures are this validator's
+// run alone, not the fixture's construction. Size 0 is measured as one
+// destination: a mint that changes no supply is refused.
+
+fn t_bench_mint_dest_hash(i: Int) -> ByteArray {
+  bytearray.concat(
+    bytearray.from_int_big_endian(i, 4),
+    #"3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+  )
+}
+
+fn t_bench_mint(n: Int) -> (MintingAuthorityWithdrawRedeemer, Transaction) {
+  let amount = 1_000
+  (
+    MintBurn {
+      global_state_input_index: 0,
+      power_user_node_ref_input_index: 0,
+      minted_amount: amount * n,
+      destination_actions: list.repeat(clean_dest_action(), n),
+    },
+    make_withdraw_tx(
+      amount * n,
+      True,
+      False,
+      False,
+      make_denylist_root_ref_input(),
+      list.map(
+        list.range(0, n - 1),
+        fn(i) { make_dest_output_for(amount, t_bench_mint_dest_hash(i)) },
+      ),
+      [test_pu_credential_hash],
+    ),
+  )
+}
+
+fn n_mint_destinations(
+  size: Int,
+) -> Fuzzer<(MintingAuthorityWithdrawRedeemer, Transaction)> {
+  fuzz.constant(
+    t_bench_mint(
+      if size < 1 {
+        1
+      } else {
+        size
+      },
+    ),
+  )
+}
+
+bench mint_cost_by_destination_count(case via n_mint_destinations) {
+  let (redeemer, tx) = case
+  expect run_withdraw(redeemer, tx)
+}
+
+/// The burn counterpart, `burn_succeeds_without_destination_checks`'s shape
+/// built in the sampler. A burn has no destinations, so its cost does not
+/// grow with the size.
+fn a_burn(_size: Int) -> Fuzzer<(MintingAuthorityWithdrawRedeemer, Transaction)> {
+  fuzz.constant(
+    (
+      MintBurn {
+        global_state_input_index: 0,
+        power_user_node_ref_input_index: 0,
+        minted_amount: -1_000,
+        destination_actions: [],
+      },
+      make_withdraw_tx(
+        -1_000,
+        False,
+        True,
+        False,
+        make_denylist_root_ref_input(),
+        [],
+        [test_pu_credential_hash],
+      ),
+    ),
+  )
+}
+
+bench burn_cost(case via a_burn) {
+  let (redeemer, tx) = case
+  expect run_withdraw(redeemer, tx)
 }
