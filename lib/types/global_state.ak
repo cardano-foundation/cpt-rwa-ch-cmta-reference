@@ -1020,14 +1020,14 @@ test decode_global_state_core_ignores_a_reshaped_tail() {
   ) == test_layout_core()
 }
 
+// The body is True whenever the decoder returns, so only a trap passes.
 test decode_global_state_core_rejects_a_short_core() fail {
   let raw: Data = test_layout_datum()
-  decode_global_state_core(
-    builtin.constr_data(
-      0,
-      list.take(builtin.unconstr_fields(raw), gs_core_field_count - 1),
-    ),
-  ) == test_layout_core()
+  let x = builtin.constr_data(
+    0,
+    list.take(builtin.unconstr_fields(raw), gs_core_field_count - 1),
+  )
+  decode_global_state_core(x) == decode_global_state_core(x)
 }
 
 test decode_global_state_core_rejects_another_constructor() fail {
@@ -1059,10 +1059,10 @@ test decode_global_state_core_rejects_a_retyped_minting_authority() fail {
   ) == test_layout_core()
 }
 
+// The body is True whenever the decoder returns, so only a trap passes.
 test decode_global_state_core_rejects_a_retyped_mintable_amount() fail {
-  decode_global_state_core(
-    core_with_field(idx_mintable_amount, builtin.b_data(#"00")),
-  ) == test_layout_core()
+  let x = core_with_field(idx_mintable_amount, builtin.b_data(#"00"))
+  decode_global_state_core(x) == decode_global_state_core(x)
 }
 
 // The core resolver is the authentication choke point of the permanent
