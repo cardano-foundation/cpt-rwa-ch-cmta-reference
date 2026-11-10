@@ -10,8 +10,9 @@ why it was wrong, how it was fixed, and why that fix rather than another.
 **This is not a third-party audit.** It is a self-review. The formal audit noted in the README is
 still outstanding, and this document does not substitute for it.
 
-Every fix is pinned by a test in [`validators/regression.ak`](../../validators/regression.ak). That
-file exists so a future edit cannot quietly undo any of this: revert a fix and its test fails.
+Every fix is pinned by a test: the original eleven in
+[`validators/regression.ak`](../../validators/regression.ak), later ones mostly in the test module of
+the validator they change (each section names its tests). Revert a fix and its test fails.
 
 Every negative test that guards a new check is paired with a **positive control** built from the
 same fixtures. That is not ceremony: writing the controls caught four fixture bugs that had left
@@ -42,6 +43,8 @@ the wrong asset name, a list root that did not link to the node being removed, a
 | [15](#15-genesis-never-ran-the-field-0-logic-and-rotation-accepted-any-script-that-runs) | Genesis never ran the field-0 logic, and rotation accepted any script that runs | — | Fixed |
 | [16](#16-the-power-users-list-policy-id-was-held-twice-on-the-mint-path) | The power-users list policy id was held twice on the mint path | — | Fixed |
 | [17](#17-partial-freeze-a-denylist-entry-can-freeze-an-amount-not-only-the-whole-holding) | Partial freeze: a denylist entry can freeze an amount | Feature | Added 2026-10-23 |
+| [18](#18-scripts-that-always-run-could-sign-for-a-role) | Scripts that always run could sign for a role | Low | Fixed |
+| [19](#19-rotatemintingscript-installs-an-authority-it-never-sees-run) | `RotateMintingScript` installs an authority it never sees run | Low | **Accepted, by decision** |
 
 Findings 12 and 13 come from the 2026-08-28 re-audit; 1–11 from the original review; 14 from the
 2026-10-15 audit (F08) and 15–16 from the review of PR #29, which assigned them no severity; 17 is a
@@ -620,7 +623,7 @@ covering the two *separate* dedup implementations:
 
 **Severity: info.**
 
-The two KYC proof variants are meant to be interchangeable. `verify_attestation_proof` bound the
+The two KYC proof variants are meant to be interchangeable. `verify_cip30_attestation_proof` bound the
 security policy id and the network id explicitly. `verify_membership_proof` bound **neither** — it
 checked the holder's key, the TTL, and tree membership, and nothing else.
 
@@ -1011,7 +1014,8 @@ address has that many tokens frozen; which ones does not matter".
   (`absence.party_permitted`). Own node with `None`: rejected on every side. Own node with
   `Some(f)`: every destination gate accepts (transfer, mint, seizure); the transfer path's sender
   gate accepts only if the outputs whose inline stake credential hash is the node key carry at
-  least `f` of the security token. The on-chain redeemer encoding does not change, and an unlisted
+  least `f` of the security token, or at least what the transaction spends from that hash (the
+  second arm added 2026-10-29, invariant 1 below). The on-chain redeemer encoding does not change, and an unlisted
   party's proof is byte-identical to before; the index fields are renamed in the blueprint, though
   (see [what this changes for off-chain](#the-2026-10-23-partial-freeze-one-datum-change-one-redeemer-variant-two-new-parameters)).
 * `denylist_validator` (spend) gains `UpdateDenylistEntry`, which rewrites one node's data in place
@@ -1098,6 +1102,135 @@ does not matter", but three behaviours of `ERC20EnforcementModuleInternal` are n
 `validators/denylist.ak`. Every new guard was mutation-checked: replacing it with `True` (or the
 memo's per-party check with a cached verdict) makes at least one of these tests fail.
 
+## 18. Scripts that always run could sign for a role
+
+**Severity: low.**
+
+### What was wrong
+
+`must_be_signed_by_credential` accepts a script's zero-value withdrawal as a signature, on purpose:
+an admin or an operator may be a native multisig. So a role keyed at a script is held by whoever
+can make that script's withdraw-0 appear. [§11](#11-the-power-user-authority-footgun-was-undocumented)
+made that an operator rule, and GlobalState field 0 was refused wherever a role is used. Further
+scripts of this deployment have a withdrawal that appears in transactions the role holder never
+signs, and a role keyed at one of them signed for itself:
+
+* **The minting proxy and the minting authority run in every mint and burn.** A `can_mint` operator
+  keyed at the proxy or at the authority itself minted with no signature; keyed at the transfer or
+  seizure script the authority pins, it minted whenever that script also ran. An admin equal to the proxy or the authority passed the authority's
+  own admin checks (`RegisterMint`, `UpgradeRegistryNode`, `RegisterStructural`); the base layer's
+  registry update needs only the proxy's withdrawal, so that admin's registry-upgrade power was open
+  to anyone who could make the proxy run.
+* **The seizure logic runs in every seizure.** A `can_force_transfer` operator keyed at it seized
+  with no signature, and one keyed at the current minting authority seized without its own signature
+  in any seizure that also mints or burns.
+* **A `MintBurn` that mints nothing produced both withdrawals on demand.** It passed for any signing
+  `can_mint` operator, ran the authority and so the proxy, and changed no supply, so it could share a
+  transaction with any GlobalState action. With the admin set to the proxy, a `can_mint` operator
+  could rotate the admin to itself: all three scripts accepted the transaction in
+  `zero_amount_mint_burn_cannot_carry_an_admin_rotation` before this fix.
+
+Every case needs a misconfiguration that §11 already told operators to avoid, a role keyed at a
+script of this deployment; hence low. The fix makes the always-present cases fail closed.
+
+### The fix
+
+Each refusal sits where the role is checked, so a later rotation cannot reopen it, and no validator
+gains a parameter:
+
+* **Minting authority.** It binds its own hash. Every operator and admin check goes through
+  `role_signed`, which refuses the authority's own hash, the minting proxy
+  (`minting_logic_script_credential_hash`) and the transfer and seizure scripts the authority pins
+  (F08), and only then checks the signature (header invariant 8). The field-0 refusal stays.
+* **`MintBurn` must change supply** (`minted_amount != 0`, header invariant 7). This supersedes the
+  2026-08-20 rule that a zero-amount mint needs `can_mint`. `RegisterMint` keeps its zero-supply
+  CIP-68 registration: the check sits in the `MintBurn` branch only.
+* **Seizure logic.** It binds its own hash; the `can_force_transfer` operator must differ from it
+  and from GlobalState field 4, the current minting authority.
+* **GlobalState.** Genesis refuses an admin equal to the minting authority; `RotateAdmin` refuses a
+  new admin equal to field 4; `RotateMintingScript` refuses a new authority equal to the admin, or to
+  the current one (a rotation to itself only churns the UTxO). Invariant 5 of
+  `global_state_logic.ak` records the rule.
+
+`PauseTransfers`, the lists and `Deinit` need no change. After `MintBurn ≠ 0` the authority and the
+proxy run without the admin only in `MintSecurity` transactions, and every other GlobalState action
+requires the security token to be untouched, so no admin or `can_pause` action can share a
+transaction with them. The list writes and `Deinit` read GlobalState by reference, which a
+transaction that spends it cannot do — by the rule below. That argument covers the authority and the
+proxy only. The transfer logic and the seizure logic can run beside a list write, and stay in the
+table below.
+
+**The ledger rule this relies on — and why it holds only for Plutus V3.** At protocol versions 9 and
+10 the UTXO rule rejects any transaction that both spends and references one UTxO
+(`BabbageNonDisjointRefInputs`). From version 11 that blanket rule is gone: the overlap is rejected
+only while a **Plutus V3** script context is built (`ReferenceInputsNotDisjointFromInputs`, checked
+in `Cardano.Ledger.Conway.TxInfo` when the protocol version is 11 or higher); Plutus V1 and V2
+contexts do not check it. These scripts require version 11 (they use batch-6 builtins, see the
+README), every one of them is Plutus V3, and spending GlobalState always runs one, so the overlap
+cannot occur in any transaction that involves them. Re-check this at every hard fork and Plutus
+version: without the check, a list write could reference the very GlobalState its transaction
+spends, and the readers that take GlobalState by reference would then need to require that it is
+not also spent.
+
+### What stays open, on purpose
+
+| Credential | Where it could still sign | Why it is not refused on chain | Mitigation |
+|---|---|---|---|
+| This deployment's transfer logic | any role outside the minting authority: GlobalState admin, pause, sanctions, seizure | its withdraw-0 passes for anyone when no token moves ([acknowledged](#the-transfer-withdraw-0-is-satisfiable-with-no-parties)); only the authority knows its hash, and a compile-time pin elsewhere would go stale on a registry upgrade | never use it as a role credential |
+| This deployment's seizure logic | the power-users list's admin actions (an admin keyed at it) and denylist `is_admin` operators, in a seizure that references GlobalState | the permanent lists cannot know its hash, which only the authority pins and a registry upgrade changes; it needs a seized input and a signing `can_force_transfer` operator, so it never runs beside a GlobalState admin or pause action | never use it as a role credential |
+| Superseded scripts of this deployment (a previous minting authority, GlobalState logic or seizure logic) | wherever that script can still run: an older authority that still accepts a zero-amount `MintBurn` runs for any `can_mint` operator through it, beside any GlobalState action | the refusals name only the current scripts | include them in the comparison below |
+| The base layer's programmable-logic-global and issuance logic | roles checked in transfers, seizures and mints | this module does not know their hashes | the same operator rule |
+| The minting proxy, for the seizure role | a `can_force_transfer` node keyed at it, in a seizure that also mints or burns | the seizure logic has no proxy parameter; using it also needs a signing `can_mint` or `can_burn` operator | operator rule; one new seizure-logic parameter would close it (considered and declined) |
+| An admin equal to the minting proxy | nowhere: it locks the admin instead of handing it over | the proxy runs without the admin only in `MintSecurity` transactions, which carry no admin action | make the admin a key or a native multisig, never a script of this deployment |
+
+For all of these: before granting a role, rotating the admin or rotating the authority, compare the
+credential against every script hash of this deployment, current and superseded, and of the base
+layer. A match is never legitimate. The [integration guide](../integration-guide.md#upgrades-and-operator-checks) carries
+this as an operator checklist; a behavioural smoke test alone misses some of these.
+
+**Pinned by** `mint_rejects_an_operator_keyed_at_the_minting_proxy`, `…_at_the_authority_itself`,
+`…_at_the_transfer_logic`, `…_at_the_seizure_logic`, `mint_burn_rejects_a_zero_amount`,
+`upgrade_registry_node_rejects_an_admin_equal_to_the_minting_proxy`, `…_equal_to_the_authority_itself`,
+`register_structural_rejects_an_admin_equal_to_the_minting_proxy` and
+`register_mint_rejects_an_admin_equal_to_the_minting_proxy` (`validators/minting_authority.ak`);
+`force_transfer_rejects_an_operator_keyed_at_the_seizure_logic_itself` and
+`…_at_the_minting_authority` (`validators/third_party_transfer_logic_script.ak`);
+`rotate_admin_to_the_minting_authority_fails`, `rotate_minting_script_to_the_admin_fails`,
+`rotate_minting_script_to_the_current_authority_fails` and the composite
+`zero_amount_mint_burn_cannot_carry_an_admin_rotation`, which runs the GlobalState logic, the proxy
+and the authority on one transaction, with its control (`validators/global_state_logic_tests.ak`);
+`sanitise_rejects_an_admin_equal_to_the_minting_authority` (`validators/global_state.ak`). Every
+rejection failed against the unfixed code, and every new conjunct and call site, made `True` or
+weakened to a plain signature check, is caught by its own test (16 mutants, 16 killed).
+
+---
+
+## 19. `RotateMintingScript` installs an authority it never sees run
+
+**Severity: low.**
+
+`RotateGlobalStateScript` makes the incoming GlobalState logic run in the rotation
+([§15](#15-genesis-never-ran-the-field-0-logic-and-rotation-accepted-any-script-that-runs)).
+`RotateMintingScript` does not: any 28-byte value the admin signs becomes the minting authority,
+unless it equals the admin, the current authority or the GlobalState logic. A typo blocks every
+mint, burn and registry update until the admin rotates again; an unregistered credential blocks
+them until it is registered. Worse, any other script of this deployment can be installed. The worst is the transfer logic: its
+withdraw-0 passes for anyone when no token moves, so anyone could then mint up to the cap with no
+KYC, denylist or operator check. An earlier authority build can be installed again too, and brings
+back whatever it lacked, such as the fixes in [§18](#18-scripts-that-always-run-could-sign-for-a-role).
+
+**Accepted by decision, and not checked on chain.** The rotation is admin-signed, and the admin
+checks the target (integration guide,
+[*Upgrades and operator checks*](../integration-guide.md#upgrades-and-operator-checks)):
+
+* rebuild the new authority from source at a pinned commit with every parameter, and compare its
+  hash before signing;
+* register its stake credential before the rotation;
+* after every rotation, test that a mint without a power-user signature is rejected. The failure is
+  silent and fails open, so it will not surface on its own.
+
+---
+
 ## Acknowledged, and deliberately not changed
 
 Findings from the 2026-08-28 audit that were reviewed and judged not to warrant a code change. They
@@ -1172,7 +1305,7 @@ strictly stronger.
 
 ### KYC revocation is per issuer or per holding, never per holder-before-TTL
 
-The two proof channels are independent by design. `verify_attestation_proof` never consults
+The two proof channels are independent by design. `verify_cip30_attestation_proof` never consults
 `member_root_hash`, and `verify_membership_proof` never consults the trusted-entity list. So
 removing a holder from the membership tree does **not** invalidate an attestation that holder already
 holds: until it expires, they can still transfer.
@@ -1235,9 +1368,11 @@ order is load-bearing: the positional `idx_*` constants and the tripwire test th
 The base layer is not vendored here, so several severity judgements originally rested on
 assumptions. Those were checked by reading
 `cardano-foundation/cip113-programmable-tokens` at `feat/upgradability-in-place` (commit `018415d`),
-and **re-checked on 2026-08-28 against that repository's `main` at commit `9db7e06`.**
+re-checked on 2026-08-28 against that repository's `main` at commit `9db7e06`, and **re-checked
+on 2026-10-15 at commit `95e99ac`, whose validator code is identical to `main` at `369e8c2`** (no
+`.ak` file differs).
 
-**Every guarantee in the table below still holds at `9db7e06`.** What moved in between — five
+**Every guarantee in the table below still holds at `95e99ac`.** What moved between `018415d` and `9db7e06` — five
 commits: #99 federated upgradability, #110 the dissolution of the programmable-logic *global*
 coordinator, #114 a PLB performance pass, #115 output-shape rules, #116 the Aiken v1.1.23 bump — and
 what a redeploy onto that base would have to account for:
@@ -1250,18 +1385,33 @@ what a redeploy onto that base would have to account for:
   off-chain builders need updating before a redeploy.
 * **Programmable-base outputs must stay seizable (#115).** No datum hash and no reference script on
   any output holding the policy, and every such output needs an inline stake credential. This is
-  enforced on the issuance path and on both third-party output scans.
+  enforced on the issuance path, on both third-party output scans and, at `95e99ac`, on the
+  ordinary transfer path as well (`transfer.ak` collects its outputs through
+  `prog_assets.collect_output_assets`, which requires both).
 * **Inline datums are size-bounded (#115).** `max_inline_datum_bytes`, a protocol-params field,
   now caps the inline datum of programmable-base outputs. **This applies to the CIP-68 reference
   NFT's metadata datum**, which is the only datum this deployment puts on a token UTxO. Check the
   deployed value before publishing metadata.
 * **A new trust dependency, and it is worth stating plainly.** `coordination_spend` lets whoever
-  holds `upgrade_cred` rewrite those three delegate credentials in place, subject only to a 28-byte
+  holds `upgrade_cred` rewrite those three delegate credentials (four at `95e99ac`, see below) in place, subject only to a 28-byte
   shape check. A rewrite pointing `transfer_cred` or `third_party_cred` at a permissive stub would
   bypass this module's transfer and seizure gates entirely, in one transaction, with nothing on
   this side able to detect or resist it. **Record who holds that authority for the target
   deployment** (script, signers, threshold) and treat any change to the coordination datum as a
   security event. See [what is still open](#what-is-still-open).
+
+What moved between `9db7e06` and `95e99ac` (13 commits), re-checked on 2026-10-15:
+
+* **Issuance is split in two (#134).** The permanent `issuance_mint` policy now requires the
+  withdraw-0 of a replaceable `issuance_logic`, named by the protocol-params datum
+  (`issuance_logic_cred`), and `no_escape` lives there. The custody guarantee holds for the
+  `issuance_logic` deployed at that commit; replacing it is an act of the same upgrade authority as
+  below.
+* **The upgrade authority grew.** `ProtocolUpgrade` may rewrite `programmable_logic_global_cred`,
+  `issuance_logic_cred`, `transfer_cred` and `third_party_cred`; the authority is a multisig tree in a
+  config UTxO (#133), handed over in two phases, nominate then activate (#132), and must be activated
+  at protocol genesis (#143). The trust statement below applies to all four credentials.
+* **The ordinary transfer path checks output shape too** (see the seizable-outputs point above).
 
 The deployment currently targeted on preview still bootstraps a pre-#110 base layer — the layout the
 `018415d` verification describes — so the table applies as written to what is deployed today, and
@@ -1273,7 +1423,7 @@ the notes above apply to any redeploy onto current `main`.
 | Registry keys are unique | **True** | `validate_directory_node_output` asserts `key < next` on **both** insert outputs, forcing `covering.key < new.key < covering.next`; in a sorted list a duplicate is unconstructible | Same as above — rules out a duplicate node at this policy's key |
 | Registry fields 3 and 4 are free | **True — confirmed the defect** | `is_inserted_directory_node` only length-checks them | — |
 | A stranger can register a node naming someone else's minting logic | **False** — a protection that was not assumed | `RegistryInsert` requires that credential's own withdraw-0 ("proof of instance") | — |
-| Minted supply is confined to programmable-base addresses | **True** | `issuance_mint`'s `no_escape` forbids the policy at any non-base output and requires an inline stake credential on every base output | The mint-path programmable-base payment-credential pin removal (2026-08-20) |
+| Minted supply is confined to programmable-base addresses | **True** | `no_escape` (in `issuance_mint` up to `9db7e06`; at `95e99ac` in the replaceable `issuance_logic` that `issuance_mint` requires) forbids the policy at any non-base output and requires an inline stake credential on every base output | The mint-path programmable-base payment-credential pin removal (2026-08-20) |
 | Transfers cannot move tokens out of the base, and conserve value | **True** | the transfer path requires base outputs ⊇ base inputs per policy, which with ledger value-conservation forbids escape | The ordinary-transfer-path programmable-base payment-credential pin removal (2026-08-20) |
 | Seizure (forced-transfer) custody: tokens cannot escape the programmable base | **True** | `validate_io_constraints_and_balance` (`third_party.ak`) requires each spent programmable-base input to pair with an output at the identical address, datum and reference script, and requires the acted-on policy's tokens across **all** programmable-base outputs to be a superset of those across programmable-base inputs plus mint/burn | The seizure-path programmable-base payment-credential pin removal (2026-08-21) |
 | This deployment's transfer logic runs on every spend of its token | **True** | `has_withdrawal(transfer_logic_script)` is required for every input policy proved to exist | `transfer_logic_validator`/`third_party_transfer_logic_validator`'s registry-node read removal (2026-08-20) — no independent registry lookup on transfer or seizure |
@@ -1313,6 +1463,19 @@ weakens the gate. But nothing works until off-chain moves:
 2. **The membership MPF tree must be rebuilt.** Leaf key `credential_type ‖ hash`; leaf value
    `valid_until_ms ‖ security_policy_id ‖ network_id`. Use the exported encoders. Rebuild the root
    **before** calling `UpdateMemberRootHash`.
+
+### The role refusals: no schema change, four moved hashes
+
+* **Refused values.** A `MintBurn` with `minted_amount = 0`; an admin equal to the minting authority
+  (genesis, `RotateAdmin`); a new authority equal to the admin or to the current one; operators and
+  admins keyed at the scripts listed in [§18](#18-scripts-that-always-run-could-sign-for-a-role).
+* **Moved hashes.** `global_state_logic`, `minting_authority_validator`,
+  `third_party_transfer_logic_validator`, and the genesis policy `global_state_mint_validator` (new
+  deployments only). Both proxies, the transfer logic and both lists are unchanged. The registry
+  node must then name the new seizure logic: a separate `UpgradeRegistryNode` after the authority
+  rotation.
+* **Blueprint.** The descriptions of `TransferLogicScriptAction`, `GlobalStateSpendAction`,
+  `MembershipProof` and `Cip30AttestationProof` changed. No schema, field name or encoding did.
 
 ### The 2026-10-23 partial freeze: one datum change, one redeemer variant, two new parameters
 
@@ -1474,10 +1637,14 @@ Grant the two roles together to whoever is expected to perform court- or regulat
   the NFT's address on chain immediately after genesis. If it is wrong, the protocol's entire state
   is forgeable and destructible by whoever holds that UTxO, with no exploit needed.
 - **Every role credential must name something that genuinely decides.** Run the smoke test described
-  in defect 11, for all five roles, after every grant and rotation.
+  in defect 11, for all five roles, after every grant and rotation, and compare the credential
+  against every script hash of this deployment, current and superseded, and of the base layer: [§18](#18-scripts-that-always-run-could-sign-for-a-role) refuses
+  the scripts that always run where their roles are checked, and lists what it leaves to this rule.
 - **The CIP-113 coordination UTxO's upgrade authority is part of this token's trust boundary.**
-  Whoever holds `upgrade_cred` can re-point the base layer's `transfer_cred`, `third_party_cred` and
-  `unfracking_cred` at scripts of their choosing, which would bypass every gate in this module
+  Whoever holds `upgrade_cred` can re-point the base layer's delegate scripts at scripts of their
+  choosing (`transfer_cred`, `third_party_cred` and `unfracking_cred` at `9db7e06`;
+  `programmable_logic_global_cred`, `issuance_logic_cred`, `transfer_cred` and `third_party_cred` at
+  `95e99ac`), which would bypass every gate in this module
   at once. Nothing on this side can detect or resist it. Record the authority (script, signers,
   threshold) for the target network alongside the deployment parameters, and monitor the
   coordination datum for changes. Identified in the 2026-08-28 re-audit.

@@ -78,6 +78,13 @@ use utils.{
 //      when written; an operator credential is refused where the role is USED
 //      (PauseTransfers here, mint/burn in the minting authority, seizure in
 //      the third-party transfer logic, sanctions in the denylist), so a later rotation cannot reopen it.
+//      The admin and the minting authority are kept apart too (genesis,
+//      RotateAdmin, RotateMintingScript); the minting authority refuses
+//      itself, the minting proxy and the transfer and seizure scripts it
+//      pins as operator or admin, and accepts no MintBurn that changes no
+//      supply; the seizure logic refuses itself and the current minting
+//      authority as operator. A successor logic must keep the two roles
+//      apart.
 //   6. `publish` accepts registration only, so nobody can deregister the
 //      stake credential the proxy's withdraw-0 depends on.
 //   7. It acts only when it is the input's field 0, except as the incoming
@@ -636,6 +643,10 @@ validator global_state_logic(
                   // Never this logic's own hash: its withdrawal is in every
                   // GlobalState transaction and would sign for the admin.
                   new_admin_credential_hash != own_hash,
+                  // Nor the minting authority: the admin and the authority stay
+                  // two credentials (genesis and RotateMintingScript keep them
+                  // apart too), so one script never decides both.
+                  new_admin_credential_hash != input_datum.minting_script_credential_hash,
                   //Dual-sig: both old (from input datum) and new admins must sign.
                   //Prevents silent takeover; prevents lost-key soft-brick by
                   //forcing continuity.
@@ -660,6 +671,11 @@ validator global_state_logic(
                   // Never this logic's own hash: MintSecurity alone would then
                   // satisfy the minting proxy, skipping every authority rule.
                   new_minting_script_credential_hash != own_hash,
+                  // Nor the admin (the two roles stay apart, as genesis and
+                  // RotateAdmin also require), nor the current authority: a
+                  // rotation to itself only churns the UTxO.
+                  new_minting_script_credential_hash != input_datum.admin_credential_hash,
+                  new_minting_script_credential_hash != input_datum.minting_script_credential_hash,
                   // The one-way upgrade lock closes this path permanently. See
                   // `upgrades_locked` on GlobalStateDatum.
                   !input_datum.upgrades_locked,

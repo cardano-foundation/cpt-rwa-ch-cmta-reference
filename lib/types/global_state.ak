@@ -72,6 +72,10 @@ pub type GlobalStateDatum {
   // Can only be set if transfers are paused. Once set to true, it cannot be reverted back to false.
   deactivated: Bool,
   //Key-hash of the protocol administrator. Rotatable via RotateAdmin action.
+  // Never the minting authority (field 4): genesis and `RotateAdmin` refuse
+  // it, and `RotateMintingScript` refuses an authority equal to it. Use a key
+  // or a native multisig, never a script of this deployment: such a script
+  // runs in transactions its holder does not sign.
   admin_credential_hash: ByteArray,
   //PowerUsers linked list minting policy
   power_user_linked_list_policy_id: ByteArray,
@@ -112,8 +116,13 @@ pub type GlobalStateDatum {
   // `utils.must_be_signed_by_credential`, which gates `is_admin`, `can_mint`,
   // `can_burn`, `can_pause` and `can_force_transfer` identically. Any of those
   // credentials set to a permissive script hash is satisfiable by a stranger.
-  // After granting or rotating any role, assert that an operation exercising
-  // it without that operator's signature is REJECTED.
+  // The always-present ones are refused where the role is checked:
+  // the minting authority refuses its own hash, the minting proxy and the
+  // transfer and seizure scripts it pins, as operator and as admin; the
+  // seizure logic refuses its own hash and this field's authority as
+  // operator. Every other script stays an operator rule (see the security
+  // notes' residuals table). After granting or rotating any role, assert that
+  // an operation exercising it without that operator's signature is REJECTED.
   minting_script_credential_hash: ByteArray,
   // ── LOGIC-OWNED TAIL (5+) — v1 layout; a later logic may reshape it ──────────
   //If true, no transfer can be executed
@@ -626,6 +635,9 @@ pub type GlobalStateSpendAction {
   /// an authority being replaced (e.g. because it is buggy or compromised)
   /// is exactly the scenario this action needs to handle even when that
   /// script itself can no longer be trusted to co-sign.
+  ///
+  /// The new value must differ from the admin, from the current authority and
+  /// from the GlobalState logic.
   RotateMintingScript { new_minting_script_credential_hash: ByteArray }
   /// ONE-WAY upgrade lock — see `upgrades_locked`; closes `RotateMintingScript`,
   /// registry-node upgrades, `SetMintableAmount` and `RotateGlobalStateScript`. Admin-signed, and

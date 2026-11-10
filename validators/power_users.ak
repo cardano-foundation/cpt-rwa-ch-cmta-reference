@@ -1020,3 +1020,11 @@ test power_users_insert_rejects_a_malformed_deactivated_flag() fail {
     tests.with_malformed_gs_deactivated(t_pu_insert_tx(t_key_28), t_gs_policy),
   )
 }
+
+// ── Add: the node key must match the redeemer ────────────────────────────────
+const t_other_key: ByteArray =
+  #"06060606060606060606060606060606060606060606060606060606"
+
+test pu_add_rejects_a_node_keyed_other_than_the_redeemer() fail {
+  t_run_pu_add(t_key_28, t_pu_insert_tx(t_other_key))
+}
