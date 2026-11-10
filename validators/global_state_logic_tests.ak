@@ -36,7 +36,7 @@ use types/global_state.{
   RotateGlobalStateScript, RotateMintingScript, SetMintableAmount,
   SetRequiresReceiverKyc, SetRequiresSenderKyc, TrustedEntityMetadata,
   UpdateMemberRootHash, UpdateTrustedEntity, gs_core_field_count,
-  idx_deactivated, idx_mintable_amount, set_security_info,
+  idx_deactivated, idx_transfers_paused, set_security_info,
 }
 use types/minting_authority.{MintBurn}
 use types/power_users.{PowerUser}
@@ -2473,7 +2473,7 @@ test rotate_gs_logic_fails_when_the_new_logic_is_merely_signed_for() {
 test rotate_to_the_current_logic_fails_with_admin() {
   let output_datum = GlobalStateDatum {
     ..t_datum(False, False),
-    mintable_amount: 999_999_999,
+    network_id: 999,
   }
   !outgoing(t_gs_logic, t_rotate_tx(output_datum))
 }
@@ -2484,7 +2484,7 @@ test incoming_side_rejects_self_rotation() {
     ..t_datum(False, False),
     admin_credential_hash: t_new_admin,
     upgrades_locked: False,
-    mintable_amount: 999_999_999,
+    network_id: 999,
   }
   !outgoing(
     t_gs_logic,
@@ -2538,9 +2538,7 @@ test rotate_gs_logic_succeeds_with_the_consistent_fixture() {
 test rotate_to_the_current_logic_fails_with_its_own_redeemer() {
   let r: Data = rotate_gs_redeemer(t_gs_logic)
   let tx = Transaction {
-    ..t_rotate_tx(
-      GlobalStateDatum { ..t_datum(False, False), mintable_amount: 999_999_999 },
-    ),
+    ..t_rotate_tx(GlobalStateDatum { ..t_datum(False, False), network_id: 999 }),
     withdrawals: [Pair(Script(t_gs_logic), 0)],
     redeemers: [Pair(Withdraw(Script(t_gs_logic)), r)],
   }
@@ -2621,11 +2619,18 @@ test rotate_gs_logic_fails_when_the_minting_script_changes() {
   )
 }
 
+test rotate_gs_logic_fails_when_the_mintable_amount_changes() {
+  !outgoing(
+    t_new_gs_logic,
+    t_rotate_tx(GlobalStateDatum { ..t_rotated_datum(), mintable_amount: 7 }),
+  )
+}
+
 // A retyped known field would make the frozen readers trap for good.
 test rotate_gs_logic_fails_when_the_output_is_not_readable() fail {
   // Frozen core (2026-10-15): the tail is the successor's to retype, so the
   // unreadable output is now one whose CORE cannot be read — here constructor
-  // 1, which only the outgoing core decode catches (fields 1–4 are pinned by
+  // 1, which only the outgoing core decode catches (fields 1–5 are pinned by
   // `unchanged` anyway). The proxy would trap on it forever.
   let raw: Data = t_rotated_datum()
   let fields = builtin.unconstr_fields(raw)
@@ -2670,7 +2675,7 @@ test rotate_gs_logic_fails_with_a_reference_script_on_the_output() {
 test rotate_gs_logic_outgoing_allows_another_field_to_change() {
   outgoing(
     t_new_gs_logic,
-    t_rotate_tx(GlobalStateDatum { ..t_rotated_datum(), mintable_amount: 7 }),
+    t_rotate_tx(GlobalStateDatum { ..t_rotated_datum(), network_id: 7 }),
   )
 }
 
@@ -3148,7 +3153,7 @@ fn rotated_core_with_tail(tail: List<Data>) -> Data {
   )
 }
 
-// A successor may give the datum a different shape after the core — here 10
+// A successor may give the datum a different shape after the core — here 11
 // fields, the tail retyped — and the outgoing logic hands over.
 test rotate_gs_logic_outgoing_allows_a_reshaped_tail() {
   outgoing(
@@ -3168,12 +3173,12 @@ test rotate_gs_logic_outgoing_allows_a_reshaped_tail() {
   )
 }
 
-// A v1 tail field retyped (mintable_amount as bytes) is the successor's call.
+// A v1 tail field retyped (transfers_paused as bytes) is the successor's call.
 test rotate_gs_logic_outgoing_allows_a_retyped_tail_field() {
   let raw: Data = t_rotated_datum()
   let fields = utils.replace_data_field(
     builtin.unconstr_fields(raw),
-    idx_mintable_amount,
+    idx_transfers_paused,
     builtin.b_data(#"00"),
   )
   outgoing(
@@ -3195,7 +3200,7 @@ test rotate_gs_logic_outgoing_allows_the_core_alone() {
 }
 
 // A core field retyped would make the permanent readers trap for good. (Fields
-// 1–4 are also pinned by `unchanged`, so this is not evidence for the decoder
+// 1–5 are also pinned by `unchanged`, so this is not evidence for the decoder
 // — `rotate_gs_logic_fails_when_the_output_is_not_readable` is.)
 test rotate_gs_logic_fails_when_a_core_field_is_retyped() fail {
   let raw: Data = t_rotated_datum()

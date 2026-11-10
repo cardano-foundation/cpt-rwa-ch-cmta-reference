@@ -25,7 +25,7 @@ use types/global_state.{
   RotateMintingScript, SetMintableAmount, SetRequiresReceiverKyc,
   SetRequiresSenderKyc, UpdateMemberRootHash, UpdateTrustedEntity,
   decode_global_state, decode_global_state_core, idx_admin_credential_hash,
-  idx_deactivated, idx_minting_script_credential_hash,
+  idx_deactivated, idx_mintable_amount, idx_minting_script_credential_hash,
   idx_power_user_linked_list_policy_id, set_admin_credential_hash,
   set_deactivated, set_global_state_script_credential_hash, set_member_root_hash,
   set_mintable_amount, set_minting_script_credential_hash,
@@ -71,10 +71,12 @@ use utils.{must_be_signed_by_credential, must_run_script_withdrawal}
 //      `SetMintableAmount`.
 //   3. MintSecurity keeps the supply-cap accounting, and every other action
 //      rejects security-token mints and movements.
-//   4. The frozen core (fields 0–4, `GlobalStateCore`) keeps its order, types
+//   4. The frozen core (fields 0–5, `GlobalStateCore`) keeps its order, types
 //      and constructor 0, inline: the proxy, the minting proxy and the
 //      power-users and denylist lists read it and can never be redeployed.
-//      Fields 5+ are the installed logic's to reshape.
+//      Fields 6+ are the installed logic's to reshape. The outgoing side of a
+//      rotation keeps core fields 1–5 unchanged, so only field 0 is the
+//      rotation's to change.
 //   5. The logic's own hash is never accepted as the admin, the minting
 //      authority or an operator: every GlobalState transaction carries this
 //      withdrawal, and `must_be_signed_by_credential` accepts a withdrawal as
@@ -329,7 +331,7 @@ validator global_state_logic(
                 global_state_output_datum,
               )
               // The permanent readers (minting proxy, power-users and denylist
-              // lists) read only the frozen core, fields 0–4, with their types;
+              // lists) read only the frozen core, fields 0–5, with their types;
               // whatever layout the new logic gives the rest, they must still be
               // able to read it. Everything after the core is the new logic's.
               let output_datum = decode_global_state_core(
@@ -360,12 +362,14 @@ validator global_state_logic(
                 output_datum.global_state_script_credential_hash == new_global_state_script_hash,
                 // The rest of the core is not the rotation's to change.
                 // `deactivated` and the admin keep their own rules, the power-users
-                // list is fixed for life, and the minting authority has its own
-                // rotation.
+                // list is fixed for life, the minting authority has its own
+                // rotation, and the supply headroom moves only through
+                // `SetMintableAmount` and mint/burn, never through a rotation.
                 unchanged(idx_deactivated),
                 unchanged(idx_admin_credential_hash),
                 unchanged(idx_power_user_linked_list_policy_id),
                 unchanged(idx_minting_script_credential_hash),
+                unchanged(idx_mintable_amount),
                 // The new logic RUNS in this transaction — so its script is
                 // producible and its stake credential registered...
                 must_run_script_withdrawal(self, new_global_state_script_hash),

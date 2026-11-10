@@ -336,9 +336,10 @@ The GlobalState admin has three distinct upgrade paths, plus control over the su
   admin a native-script multisig with a registered stake credential: a script admin signs through
   its own zero-value withdrawal. The NFT never moves, and
   readers find GlobalState by its NFT, never its address. The datum has a **frozen core and a free
-  tail**. Fields 0–4 (logic hash, `deactivated`, admin, power-users list id, minting authority) are
-  the only fields the scripts that can never be redeployed read after genesis; they keep their
-  position and type forever. Fields 5+ belong to the installed logic: a new logic may drop, reorder,
+  tail**. Fields 0–5 (logic hash, `deactivated`, admin, power-users list id, minting authority,
+  `mintable_amount`) are the only fields the scripts that can never be redeployed read after
+  genesis; they keep their position and type forever. Fields 6+ belong to the installed logic: a new
+  logic may drop, reorder,
   retype or append them (within `max_global_state_datum_bytes`). The replaceable readers (minting
   authority, transfer and third-party logic) decode the v1 tail, and would trap on or silently misread
   a different one, so before installing a logic that changes the tail, first rotate them to versions
@@ -759,9 +760,9 @@ dependent transaction after the preceding output is available.
    same transaction. Put the GlobalState NFT at `global_state_proxy` (the mint validator enforces
    this) with an inline `GlobalStateDatum` in exactly this field order: the frozen core — 0 the hash of
    `global_state_logic`, 1 `deactivated = False`, 2 the admin credential, 3 the power-users list
-   policy ID, 4 the initial minting-authority hash — then the v1 tail: 5 `transfers_paused = False`,
-   6 the supply cap, 7 the denylist policy ID, 8 `security_info`, 9 the trusted entity keys,
-   10 `member_root_hash`, 11/12 the sender/receiver KYC flags, 13 the network ID and
+   policy ID, 4 the initial minting-authority hash, 5 `mintable_amount` (the supply cap) — then the
+   v1 tail: 6 `transfers_paused = False`, 7 the denylist policy ID, 8 `security_info`, 9 the trusted
+   entity keys, 10 `member_root_hash`, 11/12 the sender/receiver KYC flags, 13 the network ID and
    14 `upgrades_locked = False`. Put each root at its own list
    spend validator. Each list's `Init` rejects a GlobalState datum that does not name it. The
    GlobalState mint also requires the withdraw-0 of the logic field 0 names: add it with a

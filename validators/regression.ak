@@ -1120,7 +1120,7 @@ test denylist_deinit_succeeds_for_the_admin_after_deactivation() {
 }
 
 // Frozen core: Deinit's GlobalState read keeps working when a later logic
-// reshapes every field after 0–4.
+// reshapes every field after 0–5.
 test denylist_deinit_accepts_a_global_state_with_a_reshaped_tail() {
   v_denylist.mint.mint(
     gs_policy,

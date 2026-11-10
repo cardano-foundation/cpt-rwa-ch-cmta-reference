@@ -47,17 +47,17 @@ pub type GlobalStateLocation {
 /// the wrong one — the tripwire test `gs_getters_read_correct_fields` exists to
 /// turn that into a build failure.
 ///
-/// FROZEN CORE, FREE TAIL. Fields 0–4 are the `GlobalStateCore`: the only
+/// FROZEN CORE, FREE TAIL. Fields 0–5 are the `GlobalStateCore`: the only
 /// fields the scripts that can never be redeployed (the GlobalState proxy, the
 /// minting proxy, the power-users and denylist lists) read after genesis. They
-/// keep their position and type forever. Fields 5+ belong to whichever
+/// keep their position and type forever. Fields 6+ belong to whichever
 /// GlobalState logic is installed: a later logic (reached through
 /// `RotateGlobalStateScript`) may drop, reorder, retype or append them. The
 /// replaceable readers (minting authority, transfer and third-party logic)
 /// decode this v1 layout in full and must be rotated to readers of the new
 /// layout BEFORE a logic that changes the tail is installed.
 pub type GlobalStateDatum {
-  // ── FROZEN CORE (0–4) — read by the permanent scripts; see `GlobalStateCore` ──
+  // ── FROZEN CORE (0–5) — read by the permanent scripts; see `GlobalStateCore` ──
   // Credential hash of the GlobalState LOGIC script (a withdraw validator,
   // `global_state_logic` in validators/global_state_logic.ak). FIELD 0 FOREVER: the
   // permanent spend proxy (`global_state_proxy`) that holds the NFT reads only
@@ -125,13 +125,16 @@ pub type GlobalStateDatum {
   // notes' residuals table). After granting or rotating any role, assert that
   // an operation exercising it without that operator's signature is REJECTED.
   minting_script_credential_hash: ByteArray,
-  // ── LOGIC-OWNED TAIL (5+) — v1 layout; a later logic may reshape it ──────────
+  //Remaining supply HEADROOM, not total supply. Decreases when tokens are
+  //minted, increases when tokens are burnt. The admin may also set it to an
+  //absolute value via `SetMintableAmount` until `upgrades_locked`. CORE FIELD
+  //5: its position and its Int type are frozen like the rest of the core, and
+  //the outgoing side of a `RotateGlobalStateScript` keeps it unchanged, so a
+  //rotation can never rewrite the remaining headroom.
+  mintable_amount: Int,
+  // ── LOGIC-OWNED TAIL (6+) — v1 layout; a later logic may reshape it ──────────
   //If true, no transfer can be executed
   transfers_paused: Bool,
-  //Remaining supply HEADROOM, not total supply. Decreases when tokens are
-  //minted, increases when tokens are burnt. The admin may also set it to
-  //an absolute value via `SetMintableAmount` until `upgrades_locked`.
-  mintable_amount: Int,
   //Denylist linked list minting policy (presence = frozen: fully, or partially
   //when the entry carries `frozen_amount: Some(f)`)
   denylist_linked_list_policy_id: ByteArray,
@@ -198,9 +201,9 @@ pub const idx_power_user_linked_list_policy_id = 3
 
 pub const idx_minting_script_credential_hash = 4
 
-pub const idx_transfers_paused = 5
+pub const idx_mintable_amount = 5
 
-pub const idx_mintable_amount = 6
+pub const idx_transfers_paused = 6
 
 pub const idx_denylist_linked_list_policy_id = 7
 
@@ -528,7 +531,7 @@ pub fn decode_global_state(raw: Data) -> GlobalStateDatum {
   gs
 }
 
-/// The frozen core of every GlobalState datum: fields 0–4, the only fields the
+/// The frozen core of every GlobalState datum: fields 0–5, the only fields the
 /// permanent scripts read after genesis. A later GlobalState logic may reshape
 /// everything after them, never these.
 pub type GlobalStateCore {
@@ -537,15 +540,16 @@ pub type GlobalStateCore {
   admin_credential_hash: ByteArray,
   power_user_linked_list_policy_id: ByteArray,
   minting_script_credential_hash: ByteArray,
+  mintable_amount: Int,
 }
 
 /// Number of fields in `GlobalStateCore`.
-pub const gs_core_field_count = 5
+pub const gs_core_field_count = 6
 
 /// Decode only the frozen core of a GlobalState datum, IGNORING every field
 /// after it — whatever its number, order or types. The decoder for every
 /// permanent script. Still strict where it reads: the constructor must be 0,
-/// all five core fields must exist, and each must have its type (a typed
+/// all six core fields must exist, and each must have its type (a typed
 /// `expect`, never `utils.data_to_bool`, which would read a malformed flag as
 /// False and fail open on `deactivated`).
 pub fn decode_global_state_core(raw: Data) -> GlobalStateCore {
@@ -968,6 +972,7 @@ fn test_layout_core() -> GlobalStateCore {
     admin_credential_hash: d.admin_credential_hash,
     power_user_linked_list_policy_id: d.power_user_linked_list_policy_id,
     minting_script_credential_hash: d.minting_script_credential_hash,
+    mintable_amount: d.mintable_amount,
   }
 }
 
@@ -1018,7 +1023,10 @@ test decode_global_state_core_ignores_a_reshaped_tail() {
 test decode_global_state_core_rejects_a_short_core() fail {
   let raw: Data = test_layout_datum()
   decode_global_state_core(
-    builtin.constr_data(0, list.take(builtin.unconstr_fields(raw), 4)),
+    builtin.constr_data(
+      0,
+      list.take(builtin.unconstr_fields(raw), gs_core_field_count - 1),
+    ),
   ) == test_layout_core()
 }
 
@@ -1048,6 +1056,12 @@ test decode_global_state_core_rejects_a_retyped_admin() fail {
 test decode_global_state_core_rejects_a_retyped_minting_authority() fail {
   decode_global_state_core(
     core_with_field(idx_minting_script_credential_hash, builtin.i_data(1)),
+  ) == test_layout_core()
+}
+
+test decode_global_state_core_rejects_a_retyped_mintable_amount() fail {
+  decode_global_state_core(
+    core_with_field(idx_mintable_amount, builtin.b_data(#"00")),
   ) == test_layout_core()
 }
 
