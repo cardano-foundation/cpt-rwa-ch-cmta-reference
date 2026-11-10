@@ -1370,6 +1370,47 @@ test transfer_rejects_a_cip68_output_holding_security_tokens() fail {
   )
 }
 
+/// POSITIVE CONTROL: an ordinary transfer of a CIP-68-named security token is
+/// accepted. Neither the destination output nor an ADA-only change output
+/// carries the reference name, so neither is shape-checked: the CIP-68 check
+/// keys on the exact reference name, never on "every output of the policy".
+test transfer_accepts_an_ordinary_transfer_of_a_cip68_named_token() {
+  let with_cip68_name = fn(out: Output) {
+    Output {
+      ..out,
+      value: merge(
+        from_lovelace(2_000_000),
+        from_asset(t_issuance_policy, t_cip68_sec_name, 1_000),
+      ),
+    }
+  }
+  let base = t_transfer_tx(False, False, False, False)
+  run_cip68_transfer(
+    t_redeemer(),
+    Transaction {
+      ..base,
+      inputs: [
+        Input {
+          output_reference: t_out_ref(10),
+          output: with_cip68_name(t_token_utxo(t_sender_stake, 1_000)),
+        },
+      ],
+      outputs: [
+        with_cip68_name(t_token_utxo(t_dest_stake, 1_000)),
+        Output {
+          address: Address {
+            payment_credential: VerificationKey(t_sender_stake),
+            stake_credential: None,
+          },
+          value: from_lovelace(1_500_000),
+          datum: NoDatum,
+          reference_script: None,
+        },
+      ],
+    },
+  )
+}
+
 /// DELIBERATE: a plain-named token has no reference name, so its outputs are
 /// never shape-checked — not even one carrying a `(100)`-labelled name under the
 /// policed policy, with a datum no CIP-68 reader can parse. Protection exists
