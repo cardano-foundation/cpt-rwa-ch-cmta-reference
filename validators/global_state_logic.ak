@@ -60,7 +60,12 @@ use utils.{must_be_signed_by_credential, must_run_script_withdrawal}
 // INVARIANTS ANY REPLACEMENT GS LOGIC MUST PRESERVE (installed through
 // `RotateGlobalStateScript`; nothing on chain re-checks them afterwards):
 //   1. The NFT stays at the proxy with its full address; non-ADA value is
-//      preserved; no reference script on the output.
+//      preserved; no reference script on the output. Genesis creates the UTxO
+//      as exactly ADA + the NFT (`has_nft_strict`), so by induction it stays
+//      exactly that: no token can be stuffed into it. The readers
+//      (`gs_datum_from_output`, `gs_core_from_output`) rely on this but do not
+//      re-check it, on purpose: a strict reader in the permanent scripts
+//      would turn a successor that breaks this rule into a brick.
 //   2. `deactivated` is terminal (no action once set) and `upgrades_locked`
 //      is one-way and closes rotation, minting-script rotation and
 //      `SetMintableAmount`.
