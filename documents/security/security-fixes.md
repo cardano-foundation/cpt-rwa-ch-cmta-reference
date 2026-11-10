@@ -38,17 +38,19 @@ the wrong asset name, a list root that did not link to the node being removed, a
 | [10](#10-the-membership-kyc-variant-bound-neither-policy-nor-network) | The membership KYC variant bound neither policy nor network | Info | Fixed |
 | [11](#11-the-power-user-authority-footgun-was-undocumented) | The power-user authority footgun was undocumented | Info | Fixed |
 | [12](#12-dismantling-either-linked-list-was-a-one-way-freeze-of-a-live-protocol) | Dismantling either linked list was a one-way freeze of a live protocol | Medium | Fixed |
-| [13](#13-cip-68-metadata-tokens-were-governed-by-an-exact-name-not-by-their-kind) | CIP-68 metadata tokens were governed by an exact name, not by their kind | Medium | Fixed |
+| [13](#13-cip-68-metadata-tokens-were-governed-by-an-exact-name-not-by-their-kind) | CIP-68 metadata tokens were governed by an exact name, not by their kind | Medium | Fixed; superseded in part by [20](#20-a-cip-68-reference-token-was-never-paired-with-the-security-tokens-name) |
 | [14](#14-registry-fields-3-and-4-accepted-any-script-f08) | Registry fields 3 and 4 accepted any script (F08) | Medium | Fixed |
 | [15](#15-genesis-never-ran-the-field-0-logic-and-rotation-accepted-any-script-that-runs) | Genesis never ran the field-0 logic, and rotation accepted any script that runs | — | Fixed |
 | [16](#16-the-power-users-list-policy-id-was-held-twice-on-the-mint-path) | The power-users list policy id was held twice on the mint path | — | Fixed |
 | [17](#17-partial-freeze-a-denylist-entry-can-freeze-an-amount-not-only-the-whole-holding) | Partial freeze: a denylist entry can freeze an amount | Feature | Added 2026-10-23 |
 | [18](#18-scripts-that-always-run-could-sign-for-a-role) | Scripts that always run could sign for a role | Low | Fixed |
 | [19](#19-rotatemintingscript-installs-an-authority-it-never-sees-run) | `RotateMintingScript` installs an authority it never sees run | Low | **Accepted, by decision** |
+| [20](#20-a-cip-68-reference-token-was-never-paired-with-the-security-tokens-name) | A CIP-68 reference token was never paired with the security token's name | — | Fixed |
+| [21](#21-the-supply-cap-is-debited-by-the-permanent-minting-proxy) | The supply cap is debited by the permanent minting proxy | Hardening | Changed 2026-11 |
 
 Findings 12 and 13 come from the 2026-08-28 re-audit; 1–11 from the original review; 14 from the
 2026-10-15 audit (F08) and 15–16 from the review of PR #29, which assigned them no severity; 17 is a
-feature. Then:
+feature; 20 from the review of PR #29, which assigned it no severity; 21 is a hardening. Then:
 [acknowledged and not changed](#acknowledged-and-deliberately-not-changed),
 [the linked-list dependency](#the-linked-list-dependency),
 [what the base layer guarantees](#what-the-cip-113-base-layer-actually-guarantees),
@@ -412,16 +414,15 @@ Do not inherit a control this critical. `minting_authority_validator` gained
   registry node (line 183)
 - the `UpgradeRegistryNode` branch, on the spent node (the continuing node is already compared
   against it) (line 322)
-- inside `verify_registration_structure`, shared by `RegisterMint` and `RegisterStructural`
+- inside `verify_registration_structure`, used by `Register`
   (line 609)
 
 Not circular: `gs_policy → proxy hash → issuance_policy_id → this validator`, and this validator is
 compiled last precisely because it is the swappable one.
 
 **Pinned by** `mint_rejects_a_registry_node_keyed_to_a_foreign_policy` for the `MintBurn` branch, and
-three tests in `validators/minting_authority.ak` — `register_mint_fails_when_node_is_keyed_to_a_foreign_policy`,
-`register_structural_fails_when_node_is_keyed_to_a_foreign_policy`,
-`upgrade_fails_when_spent_node_is_keyed_to_a_foreign_policy` — for the other three. Each uses a node
+two tests in `validators/minting_authority.ak` — `register_fails_when_node_is_keyed_to_a_foreign_policy`
+and `upgrade_fails_when_spent_node_is_keyed_to_a_foreign_policy` — for the other two paths. Each uses a node
 that **does** name this deployment's proxy, so the pre-existing identity assertion passes and only
 the new pin can reject it.
 
@@ -817,6 +818,11 @@ win.
 
 ## 13. CIP-68 metadata tokens were governed by an exact name, not by their kind
 
+> **Superseded in part (2026-11).** The prefix rule below was replaced. The one protected name is
+> now the reference name derived from `security_asset_name`, and only for a CIP-68 name: see
+> [§20](#20-a-cip-68-reference-token-was-never-paired-with-the-security-tokens-name). Rules 2 and 3
+> still hold, for that name. Rule 1's count and the prefix constants are gone.
+
 **Severity: medium. Fixed.** Reported as a seizure defect; fixed as a general rule, because the
 seizure hole was one symptom of the underlying shape.
 
@@ -928,7 +934,8 @@ run individually and its trace read, to confirm it stops at the intended asserti
 incidentally — one of them did not at first, and was rewritten.
 
 One existing test changed its ANNOTATION, not its meaning:
-`register_mint_rejects_a_reference_nft_co_located_with_supply` was `!run_withdraw` and is now `fail`,
+`register_mint_rejects_a_reference_nft_co_located_with_supply` (now
+`register_rejects_a_reference_nft_holding_security_tokens`) was `!run_withdraw` and is now `fail`,
 because the co-location rule moved from a `Bool` conjunct into the structural assertion in
 `output_is_well_formed`. The transaction was rejected before and is rejected now.
 
@@ -1220,9 +1227,8 @@ this as an operator checklist; a behavioural smoke test alone misses some of the
 
 **Pinned by** `mint_rejects_an_operator_keyed_at_the_minting_proxy`, `…_at_the_authority_itself`,
 `…_at_the_transfer_logic`, `…_at_the_seizure_logic`, `mint_burn_rejects_a_zero_amount`,
-`upgrade_registry_node_rejects_an_admin_equal_to_the_minting_proxy`, `…_equal_to_the_authority_itself`,
-`register_structural_rejects_an_admin_equal_to_the_minting_proxy` and
-`register_mint_rejects_an_admin_equal_to_the_minting_proxy` (`validators/minting_authority.ak`);
+`upgrade_registry_node_rejects_an_admin_equal_to_the_minting_proxy`, `…_equal_to_the_authority_itself`
+and `register_rejects_an_admin_equal_to_the_minting_proxy` (`validators/minting_authority.ak`);
 `force_transfer_rejects_an_operator_keyed_at_the_seizure_logic_itself` and
 `…_at_the_minting_authority` (`validators/third_party_transfer_logic_script.ak`);
 `rotate_admin_to_the_minting_authority_fails`, `rotate_minting_script_to_the_admin_fails`,
@@ -1258,6 +1264,256 @@ checks the target (integration guide,
 * register its stake credential before the rotation;
 * after every rotation, test that a mint without a power-user signature is rejected. The failure is
   silent and fails open, so it will not surface on its own.
+
+---
+
+## 20. A CIP-68 reference token was never paired with the security token's name
+
+**Severity: —.** Raised in review of PR #29, which assigned it no severity.
+
+### What was wrong
+
+Registration (`RegisterMint`) could mint any `(100)`-labelled name as the metadata token: §13's rule
+admitted any name carrying the prefix, unrelated to `security_asset_name`.
+
+CIP-68 readers find a token's metadata by deriving the `(100)` name from the user token's body. A
+mismatched pair therefore passed on chain, showed wallets and indexers no metadata, and stayed so
+forever, because the reference token is minted once.
+
+Registration was also split over two variants, `RegisterMint` and `RegisterStructural`, and the
+structural one could never carry a reference token.
+
+### The fix
+
+**CIP-68-ness is derived from the name.** The first four bytes of `security_asset_name` are compared
+byte for byte with the three CIP-68 user-token labels: `(222)` NFT `#"000de140"`, `(333)` FT
+`#"0014df10"` and `(444)` RFT `#"001bc280"`. A name that starts with one of them is a CIP-68 name;
+anything else is a plain name. Its reference name is the `(100)` label `#"000643b0"` followed by the
+same body, and `cip68.reference_name` is the only place that name is built, so every script derives
+the same one.
+
+**The name rules**, decided by `security_asset_name` alone (`registration_mint_matches_name`):
+
+* a `(100)`-labelled name is refused, because the supply would be its own metadata token;
+* a CIP-68 name needs a body of at least one byte;
+* a plain name must not be empty.
+
+**A single `Register`.** It is admin-signed, takes GlobalState referenced or spent, and refuses a
+deactivated protocol. It runs the registration structure checks (`verify_registration_structure`;
+see [§4](#4-the-mint-roles-rested-entirely-on-external-code) and
+[§14](#14-registry-fields-3-and-4-accepted-any-script-f08)). For a CIP-68 name it
+mints exactly the reference NFT, quantity 1, under the issuance policy, into one well-formed carrier
+(ADA plus that token, with a CIP-68 datum) that has an inline owner stake credential. For a plain
+name it mints nothing there. It never mints supply.
+
+**`MintBurn` is the only supply path**, and it mints or burns only `security_asset_name`
+(`only_permitted_assets_minted`), so under this authority the reference NFT is never re-minted or
+burned.
+
+**Transfer and seizure are keyed on the exact derived name.** The transfer logic's shape check on
+every move (`cip68.enforce_if_reference`) and the seizure logic's refusal of any input carrying the
+reference NFT both test that one name.
+
+**Removed:** `constants.cip68_protected_prefix` and its length constant, `cip68.is_protected`,
+Rule 1's at-most-one count, and the `!is_protected(security_asset_name)` assertion at registration.
+The `(100)` rejection replaces that assertion.
+
+### Accepted residue
+
+Only this token's exact reference name is protected. A replacement authority that mints another `(100)`-labelled name under the issuance policy creates a token that neither the transfer nor the seizure logic polices.
+
+The metadata authority, the carrier's inline stake credential, is not checked against the denylist
+or KYC: the transfer gates vet only holders of the security token, so denylisting it does not stop
+updates. A pause or deactivation does block updates, because they pass through the transfer logic.
+Seizure cannot recover the token. See the README's
+[CIP-68 metadata tokens](../../README.md#cip-68-metadata-tokens).
+
+### Tests
+
+In `validators/minting_authority.ak`:
+
+* the name rules and the two-way mint rule — `register_plain_name_succeeds_minting_nothing`,
+  `register_cip68_222_name_succeeds_minting_its_reference_nft`,
+  `register_cip68_333_name_succeeds_minting_its_reference_nft`,
+  `register_cip68_444_name_succeeds_minting_its_reference_nft`,
+  `register_allows_a_reference_nft_owned_by_a_metadata_authority`,
+  `register_scopes_its_mint_rule_to_the_issuance_policy`,
+  `register_rejects_a_reference_labelled_security_name`, `register_rejects_an_empty_security_name`,
+  `register_rejects_a_bare_label_security_name_minting_nothing`,
+  `register_rejects_a_bare_label_security_name_minting_its_reference`,
+  `register_cip68_name_rejects_a_missing_reference_nft`,
+  `register_plain_name_rejects_minting_a_reference_nft`,
+  `register_cip68_name_rejects_a_wrong_body_reference`,
+  `register_cip68_name_rejects_two_reference_tokens`,
+  `register_cip68_name_rejects_a_reference_quantity_of_two`,
+  `register_plain_name_rejects_minting_supply`,
+  `register_cip68_name_rejects_minting_supply_alongside_its_reference` and
+  `register_cip68_name_rejects_an_unknown_third_asset_name`;
+* the carrier — `register_rejects_a_reference_nft_without_stake_credential`,
+  `register_rejects_a_reference_nft_with_a_malformed_datum` and
+  `register_rejects_a_reference_nft_holding_security_tokens`;
+* the single variant's gates and structure — `register_fails_when_deactivated`,
+  `register_fails_without_admin_signature`, `register_rejects_a_global_state_without_its_nft`,
+  `register_succeeds_when_global_state_is_spent`,
+  `register_gs_spent_still_requires_the_admin_signature`,
+  `register_fails_when_node_output_names_another_minting_logic`,
+  `register_fails_when_node_is_keyed_to_a_foreign_policy`, `register_fails_when_unfracking_is_enabled`,
+  `register_fails_when_transfer_logic_is_not_a_script`,
+  `register_fails_when_third_party_logic_is_not_a_script`, `register_rejects_a_foreign_global_state_cs`,
+  `register_fails_when_no_registry_nft_is_minted`, `register_cannot_smuggle_a_registry_node_update`
+  and `register_rejects_an_admin_equal_to_the_minting_proxy`;
+* the redeemer a registry insert may carry — `registry_insert_with_a_register_redeemer_succeeds`,
+  `registry_insert_with_a_mint_burn_redeemer_is_rejected` and
+  `registry_insert_with_an_upgrade_registry_node_redeemer_is_rejected`;
+* `MintBurn` — `steady_state_mint_rejects_the_reference_nft`.
+
+In `lib/cip68.ak`: `cip68_reference_name_maps_the_222_label`,
+`cip68_reference_name_maps_the_333_label`, `cip68_reference_name_maps_the_444_label`,
+`cip68_reference_name_detects_a_bare_label`, `cip68_reference_name_is_none_for_a_plain_name`,
+`cip68_reference_name_is_none_for_the_reference_label`,
+`cip68_reference_name_is_none_for_a_short_or_empty_name`, `cip68_labels_have_the_fixed_length`,
+`cip68_output_accepts_the_canonical_shape`, `cip68_output_rejects_a_co_located_security_token`,
+`cip68_output_rejects_a_foreign_policy_token`, `cip68_output_rejects_quantity_two`,
+`cip68_output_rejects_a_malformed_datum`, `cip68_output_rejects_a_missing_datum`,
+`cip68_output_rejects_a_wrong_constructor_tag`, `cip68_output_rejects_non_map_metadata`,
+`cip68_output_rejects_a_wrong_body_reference`,
+`cip68_enforce_if_reference_ignores_a_non_matching_reference_label` and
+`cip68_enforce_if_reference_checks_the_exact_reference`.
+
+In `validators/third_party_transfer_logic_script.ak`: `seizure_cannot_spend_the_reference_nft`,
+`seizure_succeeds_when_the_reference_nft_is_not_spent` and
+`seizure_of_a_plain_token_does_not_police_reference_labelled_inputs`.
+
+In `validators/transfer_logic_script.ak`: `transfer_accepts_a_well_formed_cip68_output`,
+`transfer_rejects_a_malformed_cip68_datum`, `transfer_rejects_a_cip68_output_holding_security_tokens`
+and `transfer_accepts_an_ordinary_transfer_of_a_cip68_named_token`.
+
+Earlier sections name `RegisterMint`, `RegisterStructural` and the protected prefix as the code was
+at their date.
+
+---
+
+## 21. The supply cap is debited by the permanent minting proxy
+
+**Severity: hardening.**
+
+### Before
+
+The GlobalState logic's `MintSecurity` computed the new `mintable_amount`. It ran only because the
+replaceable minting authority's `MintBurn` required GlobalState to be spent. So, before
+`LockUpgrades`, enforcing the cap on a mint rested on two replaceable scripts: a replacement
+authority that did not require the spend, or a GlobalState logic that did not count, minted without
+a debit.
+
+### Now
+
+The frozen minting proxy (`minting_logic_validator`) debits the cap itself. On every run it derives
+this token's issuance policy ID, P, from the registry node the redeemer locates. The delta is the
+quantity of `security_asset_name` minted under P, negative for a burn. A non-zero delta requires:
+
+* GlobalState spent, not referenced;
+* its continuing output at the same address, with the same non-ADA value;
+* a datum equal to the input datum except field 5, written as `in − delta`;
+* a result of at least 0.
+
+`MintSecurity` now only permits that write: it requires a non-zero mint of the security token, and
+field 5 (still an Int) is the only field that may change. It does not count.
+
+`mintable_amount` moved into the frozen core, at field 5, which the outgoing side of a GlobalState
+logic rotation keeps unchanged.
+
+The zero-amount refusal lives in the minting authority's `verify_mint_or_burn`
+([§18](#18-scripts-that-always-run-could-sign-for-a-role)); its behaviour is unchanged.
+
+### The exact guarantee
+
+Every mint or burn of the security token is debited from `mintable_amount` in the same transaction, whichever minting authority or GlobalState logic is installed: the permanent minting proxy checks it.
+
+That is not a promise that no rotation can change the cap. A write of `mintable_amount` outside a mint or burn is a cap amendment, governed by the installed GlobalState logic: this repository's logic allows only `SetMintableAmount`, admin-signed, until `LockUpgrades`, and never beside a mint or burn.
+
+`LockUpgrades` is enforced by the installed GlobalState logic itself, and the registry-upgrade lock by the installed minting authority, so after it the cap and the rules are final only if both are reviewed builds of this repository: before locking, check datum fields 0 and 4 against rebuilds.
+See the README's [deployment checklist](../../README.md#deployment-checklist).
+
+### Accepted residue
+
+Only `security_asset_name` is debited. Which names may be minted under the issuance policy is the minting authority's rule; a replacement authority that drops it can mint other names there, uncapped.
+
+Deliberate lock-in: in a transaction that mints or burns the token, no other GlobalState datum field
+may change, appended fields included. A field that must change on every mint, such as a
+circulating-supply counter, is therefore impossible for this token version.
+
+### Reliance
+
+The permanent minting proxy derives this token's issuance policy ID from its registry node on every run, because it cannot pin it: the ID is derived from the proxy's own hash. That is sound only because the base layer derives a node's key from its field 2 and keeps keys unique. Both are relied on, not re-checked; re-verify them on any change of the CIP-113 version.
+See the first two rows of [the base-layer table](#what-the-cip-113-base-layer-actually-guarantees).
+
+### Cost
+
+Measured with
+`aiken bench -m "minting_authority.{..}" -m "global_state_logic_tests.{..}" --max-size 16 --seed 42`.
+The benches build their transaction in the sampler, so fixture construction is excluded. Before is
+commit `4308bd2`, with the same benches ported onto it; after is this change. Memory / CPU units:
+
+| | before (mem / CPU) | after | change |
+|---|---|---|---|
+| minting proxy, per mint or burn | 81,539 / 30,040,763 | 196,193 / 74,336,399 | +114,654 / +44,295,636 |
+| GlobalState proxy and logic, `MintSecurity` | 282,590 / 122,858,005 | 271,623 / 117,393,487 | −10,967 / −5,464,518 |
+| minting authority, mint, at every n from 1 to 16 | — | — | −14,297 / −3,149,652 |
+| minting authority, burn | 211,253 / 66,900,365 | 196,260 / 63,463,967 | −14,993 / −3,436,398 |
+| whole mint, 1 destination | 770,428 / 284,814,434 | 859,818 / 320,495,900 | +89,390 (+11.6 %) / +35,681,466 (+12.5 %) |
+| whole mint, 16 destinations | 2,436,103 / 997,557,299 | 2,525,493 / 1,033,238,765 | +89,390 (+3.7 %) / +35,681,466 (+3.6 %) |
+| whole burn | 575,382 / 219,799,133 | 664,076 / 255,193,853 | +88,694 (+15.4 %) / +35,394,720 (+16.1 %) |
+
+A whole mint or burn is the sum of the minting proxy, GlobalState and the authority rows; the
+authority's own mint figures by destination count are in the README's *Mint and burn* table.
+
+Compiled sizes, in bytes, before → after:
+
+| Validator | Before | After |
+|---|---:|---:|
+| `minting_logic_validator` | 780 | 1,779 (+999) |
+| `minting_authority_validator` | 9,350 | 8,992 |
+| `global_state_logic` | 5,801 | 5,742 |
+| `transfer_logic_validator` | 7,119 | 7,233 |
+| `third_party_transfer_logic_validator` | 7,302 | 7,440 |
+| `denylist.mint` | 5,761 | 5,772 |
+| `denylist_validator` | 2,896 | 2,907 |
+| `power_users.mint` | 5,094 | 5,105 |
+| `power_users_validator` | 2,301 | 2,311 |
+| `global_state_mint_validator` | 2,335 | 2,335 |
+| `global_state_proxy` | 424 | 424 |
+
+The CIP-113 base layer's own scripts in the same transaction are not included, and no fee is given.
+
+### Tests
+
+In `validators/minting_logic_script.ak`, the debit — `mint_debits_the_counter_by_the_minted_amount`,
+`burn_credits_the_counter_by_the_burned_amount`, `mint_to_exactly_zero_headroom_succeeds`,
+`mint_without_the_debit_fails`, `mint_with_a_wrong_debit_fails`, `mint_beyond_the_headroom_fails`,
+`mint_that_changes_another_core_field_fails`, `mint_that_changes_a_tail_field_fails`,
+`mint_that_changes_an_appended_field_fails`, `mint_keeps_appended_fields_unchanged`,
+`burn_without_the_credit_fails`, `burn_with_global_state_only_referenced_fails`,
+`mint_with_global_state_only_referenced_fails`, `mint_that_moves_global_state_fails`,
+`mint_that_changes_global_state_tokens_fails`, `mint_accepts_an_ada_top_up_on_global_state`,
+`rotated_permissive_authority_cannot_skip_the_debit`,
+`rotated_permissive_global_state_logic_cannot_skip_the_debit`,
+`first_mint_in_the_registration_transaction_is_debited`,
+`first_mint_in_the_registration_transaction_without_the_debit_fails`,
+`delta_zero_with_global_state_spent_checks_no_counter` and
+`proxy_traps_on_a_non_int_mintable_amount` — and the registry-node derivation —
+`registration_with_the_node_inserted_and_global_state_referenced_succeeds`,
+`registration_index_at_the_covering_node_fails`, `upgrade_with_the_node_spent_succeeds`,
+`node_naming_another_proxy_fails`, `node_location_at_a_non_node_utxo_fails`,
+`only_the_issuance_policy_counts` and `other_names_under_the_issuance_policy_are_not_counted`.
+
+In `validators/global_state_logic_tests.ak`: `mint_security_cannot_smuggle_another_field_change`,
+`mint_security_accepts_a_clean_cap_decrement`,
+`a_cap_that_does_not_decrement_is_refused_by_the_minting_proxy`,
+`mint_security_leaves_the_amount_to_the_minting_proxy`,
+`mint_security_rejects_a_retyped_mintable_amount`,
+`mint_security_allows_security_token_input_and_output`,
+`rotate_gs_logic_fails_when_the_mintable_amount_changes`, `mint_security_requires_a_security_mint`
+and `zero_mint_mint_security_cannot_move_the_counter`.
 
 ---
 
@@ -1449,8 +1705,8 @@ the notes above apply to any redeploy onto current `main`.
 
 | Claim | Verdict | Evidence | Relied upon by |
 |---|---|---|---|
-| Registry field 2 is cryptographically bound to the node's key | **True** | `registry_mint` calls `is_programmable_token_id_valid(key, …, minting_logic_script)` — the key is *derived* from the template parameterised with that credential | `MintBurn`'s registry-node read removal (2026-08-20) — no independent field-2 identity re-check on mint or burn |
-| Registry keys are unique | **True** | `validate_directory_node_output` asserts `key < next` on **both** insert outputs, forcing `covering.key < new.key < covering.next`; in a sorted list a duplicate is unconstructible | Same as above — rules out a duplicate node at this policy's key |
+| Registry field 2 is cryptographically bound to the node's key | **True** | `registry_mint` calls `is_programmable_token_id_valid(key, …, minting_logic_script)` — the key is *derived* from the template parameterised with that credential | `MintBurn`'s registry-node read removal (2026-08-20) — no independent field-2 identity re-check on mint or burn; the permanent minting proxy's issuance-policy derivation, on which the supply debit rests (2026-11) |
+| Registry keys are unique | **True** | `validate_directory_node_output` asserts `key < next` on **both** insert outputs, forcing `covering.key < new.key < covering.next`; in a sorted list a duplicate is unconstructible | Same as above — rules out a duplicate node at this policy's key; the permanent minting proxy's issuance-policy derivation, on which the supply debit rests (2026-11) |
 | Registry fields 3 and 4 are free | **True — confirmed the defect** | `is_inserted_directory_node` only length-checks them | — |
 | A stranger can register a node naming someone else's minting logic | **False** — a protection that was not assumed | `RegistryInsert` requires that credential's own withdraw-0 ("proof of instance") | — |
 | Minted supply is confined to programmable-base addresses | **True** | `no_escape` (in `issuance_mint` up to `9db7e06`; at `95e99ac` in the replaceable `issuance_logic` that `issuance_mint` requires) forbids the policy at any non-base output and requires an inline stake credential on every base output | The mint-path programmable-base payment-credential pin removal (2026-08-20) |
@@ -1493,6 +1749,35 @@ weakens the gate. But nothing works until off-chain moves:
 2. **The membership MPF tree must be rebuilt.** Leaf key `credential_type ‖ hash`; leaf value
    `valid_until_ms ‖ security_policy_id ‖ network_id`. Use the exported encoders. Rebuild the root
    **before** calling `UpdateMemberRootHash`.
+
+### The 2026-11 CIP-68 and supply-accounting changes: a new token
+
+[§20](#20-a-cip-68-reference-token-was-never-paired-with-the-security-tokens-name) and
+[§21](#21-the-supply-cap-is-debited-by-the-permanent-minting-proxy) change parameters, the datum,
+redeemers and transaction shapes.
+
+* **Parameters.** `minting_logic_validator` goes from 1 to 3 parameters,
+  `(global_state_policy_id, registry_policy_id, security_asset_name)`. The proxy's hash, and so the
+  issuance policy ID, now depend on the name.
+* **Datum, breaking.** `mintable_amount` is field 5 and `transfers_paused` is field 6; they were the
+  other way round. An old-layout datum fails closed: the core decoder requires an Int at field 5.
+* **Redeemers.**
+  * Minting authority: `Register { registry_node_output_index, global_state_location }` at
+    constructor 1 replaces `RegisterMint` (constructor 1) and `RegisterStructural` (constructor 3).
+    `MintBurn` (0) and `UpgradeRegistryNode` (2) are unchanged.
+  * `MintSecurity` loses its field, `issuance_policy_redeemer_index`, and is now `Constr 0 []`; the
+    other GlobalState action indices are unchanged.
+  * The minting proxy's redeemer is now `MintingLogicScriptWithdrawRedeemer { global_state_location,
+    registry_node_location, global_state_output_index }`, no longer a bare `GlobalStateLocation`. Its
+    `RegistryNodeLocation` is `NodeReferenced`, `NodeInserted` or `NodeSpent`, at constructors 0, 1
+    and 2.
+* **Transaction shapes.**
+  * Every mint and burn references this token's registry node, and its GlobalState output is
+    debited by the minted amount.
+  * Registration mints no supply; first issuance is a separate `MintBurn` transaction.
+  * A CIP-68 registration mints its reference NFT.
+* **Hashes.** Every validator hash except `global_state_proxy`'s moves, including the list policies
+  and the issuance policy ID. This is a fresh genesis and a new token, with nothing to migrate.
 
 ### The role refusals: no schema change, four moved hashes
 
