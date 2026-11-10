@@ -1678,7 +1678,7 @@
         },
         {
           "title": "NodeInserted",
-          "description": "The CIP-113 registry insert of this token's node (the minting\n authority's `Register`). The base layer requires this proxy's withdraw-0\n there, and the node is an OUTPUT of the inserting transaction. A first\n mint of the token in the same transaction is allowed by the base layer,\n and it is debited like any other mint.\n\n Index into `transaction.outputs`. An insert emits two registry-node\n outputs (the new node and the re-emitted covering node); only the new\n node names this proxy, so an index at the covering node traps.",
+          "description": "The CIP-113 registry insert of this token's node (the minting\n authority's `Register`). The base layer requires this proxy's withdraw-0\n there, and the node is an OUTPUT of the inserting transaction. A first\n mint of the token in the same transaction is allowed by the base layer,\n and it is debited like any other mint. This repository's minting\n authority refuses any supply in `Register`, so with it installed first\n issuance is always a separate `MintBurn`.\n\n Index into `transaction.outputs`. An insert emits two registry-node\n outputs (the new node and the re-emitted covering node); only the new\n node names this proxy, so an index at the covering node traps.",
           "dataType": "constructor",
           "index": 1,
           "fields": [

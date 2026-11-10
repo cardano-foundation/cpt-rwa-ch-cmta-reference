@@ -364,9 +364,13 @@ The GlobalState admin has three distinct upgrade paths, plus control over the su
 `LockUpgrades` is an admin-signed, one-way GlobalState action that closes **all four** for later
 transactions — with this repository's GlobalState logic installed, after it `mintable_amount` moves
 only through mint and burn and the GlobalState logic can no longer be replaced.
-`LockUpgrades` is enforced by the installed GlobalState logic itself, so after it the cap is final
-only if that logic is a reviewed build of this repository: before locking, check datum field 0
-against a rebuild (see [Deployment checklist](#deployment-checklist)). It does not deactivate
+`LockUpgrades` is enforced by the installed GlobalState logic itself, which also closes
+`RotateMintingScript`; the lock's closure of `UpgradeRegistryNode` is enforced by the installed
+minting authority, which refuses the upgrade once `upgrades_locked` is set. So after the lock both
+the installed GlobalState logic (datum field 0) and the installed minting authority (field 4) are
+permanent, and "closes all four" holds only if both are reviewed builds of this repository:
+before locking, check datum fields 0 and 4 against rebuilds (see
+[Deployment checklist](#deployment-checklist)). It does not deactivate
 transfers, minting or burning. If a registry upgrade is bundled
 with the lock in one transaction, the upgrade reads the pre-lock GlobalState input and can still
 succeed; audit the whole transaction when deciding which rules were locked. The same pre-state rule
@@ -491,7 +495,7 @@ on it.
   that breaks these rules. The name is built into rows 6–10 and must be byte-identical in all five.
 * There is still **no** parameter for the reference name. A CIP-68 token's reference name is `(100)`
   followed by the same body, derived from `security_asset_name` by `cip68.reference_name` alone, so
-  nothing is configured and no two scripts can disagree on it.
+  nothing is configured: scripts built with byte-identical `security_asset_name` bytes cannot disagree on it.
 * `tx0` / `index0` / `init_input_out_ref` — one-shot genesis UTxOs, each spent once during
   initialisation (see [Initialising a token](#initialising-a-token)).
 
@@ -551,10 +555,13 @@ runs, so forgetting the proxy's registration makes every mint and burn fail from
 3. **A CIP-68 name.** Choose the metadata authority (see
    [CIP-68 metadata tokens](#cip-68-metadata-tokens)), and keep the reference NFT's datum within the
    base layer's `max_inline_datum_bytes`.
-4. **Before `LockUpgrades`.** Rebuild `global_state_logic` from source at the audited commit with
-   every parameter, and check that its hash equals datum field 0. The lock is enforced by the
-   installed GlobalState logic itself, so after it the cap is final only if that logic is a reviewed
-   build of this repository (see [Upgrading and locking the rules](#upgrading-and-locking-the-rules)).
+4. **Before `LockUpgrades`.** Rebuild `global_state_logic` and `minting_authority` from source at
+   the audited commit with every parameter, and check their hashes against datum fields 0 and 4
+   respectively. The lock is enforced by the installed GlobalState logic itself, so after it the cap
+   is final only if that logic is a reviewed build of this repository (see
+   [Upgrading and locking the rules](#upgrading-and-locking-the-rules)). The lock makes the
+   installed authority permanent too: it cannot be rotated afterwards, and it enforces the
+   registry-upgrade lock itself.
 5. **The base-layer commit.** Record the CIP-113 base-layer commit the reliance was checked against
    alongside the deployment parameters; this is recognition condition 4 (see
    [CMTA recognition](#cmta-recognition)). On any CIP-113 version change, re-verify
@@ -567,6 +574,10 @@ independently. In plain terms, the base layer guarantees:
 
 * **Custody on mint.** `issuance_mint`'s `no_escape` rule keeps every newly minted token inside the
   programmable base and forces an inline stake credential onto every programmable-base output.
+* **Every mint or burn runs the token's minting logic.** `issuance_mint` requires the withdraw-0 of
+  the minting-logic credential it is parameterised by, on every mint and burn of its policy. This is
+  why a mint or burn of this token always runs the permanent minting proxy, and why the proxy's
+  same-transaction debit cannot be skipped.
 * **Custody on ordinary transfer.** The transfer path requires programmable-base outputs to hold, per
   policy, at least as much as programmable-base inputs (`tokens.contains(PLB outputs, PLB inputs)`),
   which — combined with ledger value conservation — keeps the token inside the base.
@@ -589,7 +600,8 @@ independently. In plain terms, the base layer guarantees:
 
 The permanent minting proxy derives this token's issuance policy ID from its registry node on every run,
 because it cannot pin it: the ID is derived from the proxy's own hash. That is sound only because the
-base layer derives a node's key from its field 2 and keeps keys unique. Both are relied on, not
+base layer derives a node's key from its field 2 and keeps keys unique. Its supply debit holds only
+because every mint or burn runs the token's minting logic (above). All three are relied on, not
 re-checked; re-verify them on any change of the CIP-113 version.
 
 Because of the registry-dispatch point, this deployment's transfer and seizure logic and the minting
@@ -657,7 +669,7 @@ into the scripts.
 Three rules follow, and together they are an invariant rather than a posture at genesis:
 
 1. **Minted once, at registration.** The reference NFT is minted only by `Register` and is never
-   re-minted or burned: `MintBurn` mints and burns only `security_asset_name`, so a metadata token
+   re-minted or burned by this repository's minting authority: `MintBurn` mints and burns only `security_asset_name`, so a metadata token
    cannot be re-minted after the token is live.
 2. **Its UTxO holds ADA plus that token, and nothing else.** The carrier holds ADA plus that one
    token, has an inline owner stake credential, and carries a CIP-68
@@ -697,10 +709,12 @@ Operational rules:
 **Choosing the metadata authority.** The carrier's inline stake credential is the only key to the
 token's metadata. The transfer gates vet only holders of the security token, so the authority is not
 checked against the denylist or KYC, and denylisting it does not stop updates; a pause or
-deactivation does. Seizure cannot recover the token, and it can never be burned: a lost credential
-freezes the metadata forever, and a compromised one lets its holder rewrite the metadata, though the
-shape rule still holds. Use a dedicated key or a native multisig under the issuer's control,
-recorded with the deployment parameters. Never use a script of this deployment: the transfer logic,
+deactivation does. This repository's seizure logic cannot recover the token, and it can never be
+burned: a lost credential freezes the metadata forever, and a compromised one lets its holder rewrite
+the metadata, though the shape rule still holds. Use a dedicated key or a native multisig under the
+issuer's control, recorded with the deployment parameters. A native-multisig owner is authorised by
+a withdrawal of its stake credential, so that stake credential must be registered before the first
+metadata update. Never use a script of this deployment: the transfer logic,
 above all, runs in every metadata update.
 
 ### Execution budget and transaction sizing
@@ -885,8 +899,9 @@ dependent transaction after the preceding output is available.
    runs the minting proxy and the authority. Under the issuance policy it mints nothing for a plain
    name and exactly the reference NFT for a CIP-68 name (see
    [CIP-68 metadata tokens](#cip-68-metadata-tokens)), and never supply.
-5. **Mint the initial supply.** First issuance is a separate `MintBurn` once the node exists; a
-   registry insert cannot carry one. It spends GlobalState. The minting proxy reads this token's
+5. **Mint the initial supply.** First issuance is a separate `MintBurn` once the node exists;
+   this repository's `Register` refuses any supply, so a registry insert cannot carry one (the base
+   layer alone would allow a first mint there). It spends GlobalState. The minting proxy reads this token's
    registry node, as a reference input, and debits the cap. Destinations must pass the denylist and
    the enabled KYC gates.
 

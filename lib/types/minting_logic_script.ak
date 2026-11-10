@@ -22,7 +22,9 @@ pub type RegistryNodeLocation {
   /// authority's `Register`). The base layer requires this proxy's withdraw-0
   /// there, and the node is an OUTPUT of the inserting transaction. A first
   /// mint of the token in the same transaction is allowed by the base layer,
-  /// and it is debited like any other mint.
+  /// and it is debited like any other mint. This repository's minting
+  /// authority refuses any supply in `Register`, so with it installed first
+  /// issuance is always a separate `MintBurn`.
   ///
   /// Index into `transaction.outputs`. An insert emits two registry-node
   /// outputs (the new node and the re-emitted covering node); only the new

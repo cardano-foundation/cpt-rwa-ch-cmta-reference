@@ -306,7 +306,7 @@ your own, sign the `Sig_structure` above with any Ed25519 library.
 
 ## Mint, burn and forced transfer
 
-For a later mint, spend the GlobalState UTxO at `global_state_proxy` (any spend redeemer; it is
+For every mint (the first included), spend the GlobalState UTxO at `global_state_proxy` (any spend redeemer; it is
 ignored) and continue it at the same address, with its NFT and non-ADA value preserved. Add the
 withdrawal of the GlobalState logic named in datum field 0, with redeemer
 `GlobalStateSpendRedeemer { global_state_output_index, action: MintSecurity }`. `MintSecurity` is
@@ -494,7 +494,8 @@ paths, and admin changes to the supply cap, for **later** transactions. A regist
 unlocked input state and succeed; inspect all redeemers in the locking transaction. Admin-only
 GlobalState actions similarly expose their pre-state to a bundled registry operation. The lock is
 enforced by the installed GlobalState logic itself, so after it the cap is final only if that logic
-is a reviewed build of this repository. Before locking, check datum field 0 against a rebuild (see
+is a reviewed build of this repository. The lock also makes the installed minting authority
+permanent, and that authority enforces the registry-upgrade lock itself. Before locking, check datum fields 0 and 4 against rebuilds (see
 [README: Deployment checklist](../README.md#deployment-checklist)). Record the
 active script hashes, operator credentials, base-layer version and lock transaction as deployment
 artifacts. For final retirement, follow the ordered
