@@ -23,14 +23,14 @@ use minting_authority as v_authority
 use minting_logic_script as v_minting_proxy
 use tests/global_state_fixtures.{
   rotated, t_admin, t_data_of_raw_length, t_datum, t_datum_size, t_dl_ll_policy,
-  t_gs_logic, t_gs_policy, t_gs_script_hash, t_many_entities, t_max_datum_bytes,
-  t_metadata_len_at_cap, t_metadata_len_over_cap, t_minting_script,
-  t_new_gs_logic, t_out_ref, t_output, t_pu_ll_policy, t_reference_script,
-  t_root32, t_security_info_len_at_cap, t_security_info_len_over_cap, t_tx,
-  t_vkey_10,
+  t_gs_logic, t_gs_policy, t_gs_script_hash, t_input, t_many_entities,
+  t_max_datum_bytes, t_metadata_len_at_cap, t_metadata_len_over_cap,
+  t_minting_script, t_new_gs_logic, t_out_ref, t_output, t_pu_ll_policy,
+  t_reference_script, t_root32, t_security_info_len_at_cap,
+  t_security_info_len_over_cap, t_tx, t_vkey_10,
 }
 use types/global_state.{
-  AddTrustedEntity, DeactivateContract, GlobalStateDatum,
+  AddTrustedEntity, DeactivateContract, GlobalStateDatum, GlobalStateLocation,
   GlobalStateSpendRedeemer, GlobalStateSpent, LockUpgrades, MintSecurity,
   ModifySecurityInfo, PauseTransfers, RemoveTrustedEntity, RotateAdmin,
   RotateGlobalStateScript, RotateMintingScript, SetMintableAmount,
@@ -39,6 +39,10 @@ use types/global_state.{
   idx_deactivated, idx_transfers_paused, set_security_info,
 }
 use types/minting_authority.{MintBurn}
+use types/minting_logic_script.{
+  MintingLogicScriptWithdrawRedeemer, NodeReferenced, NodeSpent,
+  RegistryNodeLocation,
+}
 use types/power_users.{PowerUser}
 use utils
 
@@ -3498,6 +3502,90 @@ fn t_minter_node() -> Input {
   }
 }
 
+/// The CIP-113 registry policy: the literal the composites pass to the
+/// authority as `registry_policy_id`.
+const t_registry_policy: ByteArray =
+  #"c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0"
+
+/// Faithful mirror of the CIP-113 registry node layout. Field order is
+/// load-bearing: minting=2, transfer=3, third-party=4, unfracking=5, gs_cs=6.
+type RegNode {
+  key: ByteArray,
+  next: ByteArray,
+  minting_logic_script: Credential,
+  transfer_logic_script: Credential,
+  third_party_transfer_logic_script: Credential,
+  unfracking_logic_script: Credential,
+  global_state_cs: ByteArray,
+}
+
+/// This token's registry node: keyed by its issuance policy id, naming the
+/// minting proxy at field 2.
+fn t_registry_node() -> RegNode {
+  RegNode {
+    key: t_issuance_policy,
+    next: #"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    minting_logic_script: Script(t_minting_proxy_hash),
+    transfer_logic_script: Script(
+      #"f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2",
+    ),
+    third_party_transfer_logic_script: Script(
+      #"f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3",
+    ),
+    unfracking_logic_script: VerificationKey(#""),
+    global_state_cs: t_gs_policy,
+  }
+}
+
+/// A node UTxO as CIP-113 produces it: at the registry address, holding ADA
+/// and exactly one registry NFT named by the node's key, with an inline datum.
+fn t_registry_node_output_of(node: RegNode) -> Output {
+  Output {
+    address: Address {
+      payment_credential: Script(t_registry_policy),
+      stake_credential: None,
+    },
+    value: merge(
+      from_lovelace(2_000_000),
+      from_asset(t_registry_policy, node.key, 1),
+    ),
+    datum: InlineDatum(node),
+    reference_script: None,
+  }
+}
+
+fn t_registry_node_output() -> Output {
+  t_registry_node_output_of(t_registry_node())
+}
+
+/// This token's node as a transaction input, at an out ref no other fixture
+/// uses.
+fn t_registry_node_ref_input() -> Input {
+  Input { output_reference: t_out_ref(7), output: t_registry_node_output() }
+}
+
+/// The minting proxy as this deployment builds it, with the continuing
+/// GlobalState output (read only when the security token is minted or burned)
+/// at output 0.
+fn run_minting_proxy(
+  global_state_location: GlobalStateLocation,
+  registry_node_location: RegistryNodeLocation,
+  tx: Transaction,
+) -> Bool {
+  v_minting_proxy.minting_logic_validator.withdraw(
+    t_gs_policy,
+    t_registry_policy,
+    t_sec_name,
+    MintingLogicScriptWithdrawRedeemer {
+      global_state_location,
+      registry_node_location,
+      global_state_output_index: 0,
+    },
+    Script(t_minting_proxy_hash),
+    tx,
+  )
+}
+
 test zero_amount_mint_burn_cannot_carry_an_admin_rotation() {
   let input_datum = GlobalStateDatum {
     ..t_pause_datum(False),
@@ -3513,7 +3601,7 @@ test zero_amount_mint_burn_cannot_carry_an_admin_rotation() {
   let redeemer_data: Data = redeemer
   let tx = Transaction {
     ..t_tx(input_datum, output_datum, [t_minter_hash]),
-    reference_inputs: [t_minter_node()],
+    reference_inputs: [t_minter_node(), t_registry_node_ref_input()],
     withdrawals: [
       Pair(Script(t_gs_logic), 0),
       Pair(Script(t_minting_proxy_hash), 0),
@@ -3526,16 +3614,15 @@ test zero_amount_mint_burn_cannot_carry_an_admin_rotation() {
     t_out_ref(0),
     tx,
   ) && run_logic(t_gs_logic, redeemer, tx)
-  let proxy_ok = v_minting_proxy.minting_logic_validator.withdraw(
-    t_gs_policy,
+  let proxy_ok = run_minting_proxy(
     GlobalStateSpent { global_state_input_index: 0 },
-    Script(t_minting_proxy_hash),
+    NodeReferenced { registry_node_ref_input_index: 1 },
     tx,
   )
   let authority_ok = v_authority.minting_authority_validator.withdraw(
     t_sec_name,
     t_gs_policy,
-    #"c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+    t_registry_policy,
     t_minting_proxy_hash,
     t_issuance_policy,
     #"d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0",
@@ -3569,7 +3656,7 @@ test zero_amount_mint_burn_composite_control_global_state_and_proxy_pass() {
   let redeemer = rotate_admin_redeemer(t_minter_hash)
   let tx = Transaction {
     ..t_tx(input_datum, output_datum, [t_minter_hash]),
-    reference_inputs: [t_minter_node()],
+    reference_inputs: [t_minter_node(), t_registry_node_ref_input()],
     withdrawals: [
       Pair(Script(t_gs_logic), 0),
       Pair(Script(t_minting_proxy_hash), 0),
@@ -3578,10 +3665,45 @@ test zero_amount_mint_burn_composite_control_global_state_and_proxy_pass() {
   }
   and {
     run_logic(t_gs_logic, redeemer, tx),
-    v_minting_proxy.minting_logic_validator.withdraw(
-      t_gs_policy,
+    run_minting_proxy(
       GlobalStateSpent { global_state_input_index: 0 },
-      Script(t_minting_proxy_hash),
+      NodeReferenced { registry_node_ref_input_index: 1 },
+      tx,
+    ),
+  }
+}
+
+/// A registry-node upgrade and an admin GlobalState action in one transaction.
+/// GlobalState is spent for `LockUpgrades` and this token's node is spent for
+/// a CIP-113 in-place update (a continuing node with a re-pointed transfer
+/// logic). Nothing of the security token is minted, so the proxy debits
+/// nothing and both halves pass.
+test registry_upgrade_and_an_admin_action_share_one_transaction() {
+  let input_datum = t_datum(False, False)
+  let tx = Transaction {
+    ..t_tx(input_datum, t_datum_locked(), [t_admin]),
+    inputs: [t_input(input_datum), t_registry_node_ref_input()],
+    outputs: [
+      t_output(t_datum_locked()),
+      t_registry_node_output_of(
+        RegNode {
+          ..t_registry_node(),
+          transfer_logic_script: Script(
+            #"f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4",
+          ),
+        },
+      ),
+    ],
+    withdrawals: [
+      Pair(Script(t_minting_proxy_hash), 0),
+      Pair(Script(t_minting_script), 0),
+    ],
+  }
+  and {
+    run_spend(input_datum, lock_upgrades_redeemer(), tx),
+    run_minting_proxy(
+      GlobalStateSpent { global_state_input_index: 0 },
+      NodeSpent { registry_node_input_index: 1 },
       tx,
     ),
   }

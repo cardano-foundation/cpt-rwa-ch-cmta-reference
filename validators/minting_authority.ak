@@ -40,10 +40,12 @@ use utils.{must_be_signed_by_credential}
 /// ============================================================================
 /// INVARIANTS ANY REPLACEMENT AUTHORITY MUST PRESERVE
 /// ============================================================================
-/// minting_logic_script.ak — the permanent proxy — checks NOTHING except that
-/// whichever script GlobalState names is running. That is what makes this
-/// validator fully replaceable, and it means everything below is enforced
-/// here or nowhere at all. A replacement that drops one of these does not
+/// minting_logic_script.ak — the permanent proxy — decides only two things:
+/// the delegation (whichever script GlobalState names is running) and HOW
+/// MUCH, the same-transaction debit of `mintable_amount` by every mint or
+/// burn of the security token. That is what makes this validator fully
+/// replaceable, and it means everything listed below is enforced here or
+/// nowhere at all. A replacement that drops one of these does not
 /// merely lose a feature; in the first two cases it causes damage no later
 /// upgrade can undo, because the harm lands in the CIP-113 registry and in
 /// circulating supply rather than in this script.
@@ -226,7 +228,8 @@ validator minting_authority_validator(
     // reference input in steady state, an output of this very transaction
     // during a CIP-113 insert — and in whether supply changes. In every case
     // the node is re-resolved and re-verified HERE against the proxy's known
-    // hash; nothing is trusted from the proxy, which checked nothing.
+    // hash; nothing is trusted from the proxy, which checks only the
+    // delegation and the supply debit.
     when redeemer is {
       MintBurn {
         global_state_input_index,
