@@ -10,6 +10,10 @@ Aiken-shaped sketches, not a ready-to-submit SDK or CLI implementation.
 ## Before building transactions
 
 1. Build and apply every validator's parameters in [README: Parameter order](../README.md#parameter-order).
+   The minting proxy takes `registry_policy_id` and `security_asset_name` too, not only
+   `global_state_policy_id`, so the issuance policy ID depends on the name. The name must be
+   byte-identical in every script that takes it, and must pass the registration rules; see
+   [README: Deployment checklist](../README.md#deployment-checklist).
    Record the applied script hashes, the issuance policy ID, the selected `security_asset_name`,
    the CIP-113 registry policy ID and the deployed base-layer commit. Keep list **policy IDs**
    distinct from list **spend validator hashes**.
@@ -40,7 +44,7 @@ Register the applied stake credential of `global_state_logic` (its `publish` han
 `RegisterCredential`): the genesis transaction runs its withdraw-0, and a withdrawal from an
 unregistered credential fails at ledger phase 1. Publish `global_state_logic` and both list `mint`
 validators as reference-script UTxOs too. Genesis runs those three and the GlobalState mint,
-≈ 19.3 KB of scripts, so they cannot all be inlined under the 16 KiB transaction limit. No
+≈ 19.0 KB of scripts, so they cannot all be inlined under the 16 KiB transaction limit. No
 transaction before genesis may spend one of the three reserved one-shot inputs, so exclude them
 from coin selection: their output references are baked into the mint parameters, and spending one
 means choosing a new input and re-applying every parameter that depends on it.
@@ -96,38 +100,59 @@ registry insert, because registration runs both withdraw-0 scripts. The latter t
 registered before transfers or seizures. Each validator's `publish` handler accepts
 `RegisterCredential` and refuses deregistration.
 
-### 3. Create an operator and register the CIP-113 node
-
-Add a power-user node with `can_mint = True` if the registration will also issue initial supply.
-The admin grants the role through the power-users list. Keep a reference to the new node for mint
-transactions. A structural-only registration does not need a minter role.
+### 3. Register the CIP-113 node
 
 Insert this token's CIP-113 registry node with `key` = the issuance policy ID derived from the
 permanent **proxy** hash (README, What the derived parameters must equal), fields 3 and 4 = exactly
 the transfer and third-party logic script credentials the minting authority was built with
 (`transfer_logic_script_hash`, `third_party_transfer_logic_script_hash`; anything else, or the two
 swapped, is rejected — F08), the deployment's GlobalState policy ID, and the disabled unfracking
-credential. The admin signs. The proxy's withdraw redeemer
-is `GlobalStateReferenced { global_state_ref_input_index }` for the usual structural-only shape;
-the authority's is:
+credential. The admin signs. GlobalState is referenced (or spent) and must not be deactivated.
+
+The insert runs two zero-value withdrawals: the minting proxy and the minting authority. The
+authority's redeemer is `Register`, constructor 1 of `MintingAuthorityWithdrawRedeemer`:
 
 ```aiken
-RegisterStructural {
+Register {
   registry_node_output_index,
   global_state_location: GlobalStateReferenced { global_state_ref_input_index },
 }
 ```
 
-`registry_node_output_index` must identify **this token's new node**, not the covering node that
-the CIP-113 insert also outputs. Do not mint anything under this issuance policy in a
-`RegisterStructural` transaction. [`RegisterMint`](../lib/types/minting_authority.ak) is the
-alternative if initial supply is issued during the insert: spend GlobalState, put `MintSecurity`
-on the `global_state_logic` withdrawal (see
-[How a GlobalState action is submitted](#upgrades-and-operator-checks)), invoke the minting proxy
-with `GlobalStateSpent`, and supply the minter node,
-`minted_amount` and destination actions as for a normal mint below. Only this registration shape
-may also create a single CIP-68 reference NFT. The registry's base-layer redeemers and covering
-node proof are version-specific; construct them using the deployed CIP-113 implementation.
+The proxy's redeemer:
+
+```aiken
+MintingLogicScriptWithdrawRedeemer {
+  global_state_location: GlobalStateReferenced { global_state_ref_input_index },
+  registry_node_location: NodeInserted { registry_node_output_index },
+  global_state_output_index,
+}
+```
+
+If the transaction spends GlobalState instead, use `GlobalStateSpent { global_state_input_index }`
+in both. The proxy's `global_state_output_index` is not read, because nothing of the security token
+is minted, so any value is accepted. Both `registry_node_output_index` values must identify **this
+token's new node**, not the covering node that the CIP-113 insert also outputs; the proxy traps on
+the covering node, which names another proxy.
+
+Under this issuance policy, a plain `security_asset_name` mints nothing. A CIP-68 name mints
+exactly its reference NFT, quantity 1, into one output: a programmable-base output (the base
+layer's custody rule) carrying the metadata authority's inline stake credential, ADA plus that one
+token only, and an inline `Constr 0 [metadata, version, extra]` datum (`metadata` a map, `version`
+an integer) within the base layer's `max_inline_datum_bytes`. For choosing the metadata authority,
+see [README: CIP-68 metadata tokens](../README.md#cip-68-metadata-tokens). No supply is minted in
+this transaction. The registry's base-layer redeemers and covering node proof are version-specific;
+construct them using the deployed CIP-113 implementation.
+
+### 4. Create an operator and issue the first supply
+
+Add a power-user node with `can_mint = True`. The admin grants the role through the power-users
+list. Keep a reference to the new node for mint transactions.
+
+The first issuance is a normal mint (see
+[Mint, burn and forced transfer](#mint-burn-and-forced-transfer)), in a later transaction than the
+registration: a registry insert spends the covering registry node, and the authority's `MintBurn`
+refuses any transaction that spends a registry node.
 
 ## Build a normal transfer
 
@@ -284,17 +309,28 @@ your own, sign the `Sig_structure` above with any Ed25519 library.
 For a later mint, spend the GlobalState UTxO at `global_state_proxy` (any spend redeemer; it is
 ignored) and continue it at the same address, with its NFT and non-ADA value preserved. Add the
 withdrawal of the GlobalState logic named in datum field 0, with redeemer
-`GlobalStateSpendRedeemer { global_state_output_index, action: MintSecurity {
-issuance_policy_redeemer_index } }`; the inner index points into the transaction's **redeemers**
-at `Mint(issuance_policy_id)`. The validator writes the new `mintable_amount` by subtracting the
-actual minted security quantity. Include the `can_mint` power-user node as a reference input,
-signed by that operator; the CIP-113 registry node is referenced, not spent. Besides the
-GlobalState logic, invoke the minting proxy and the minting authority as zero-value withdrawals —
-three withdrawals in all:
+`GlobalStateSpendRedeemer { global_state_output_index, action: MintSecurity }`. `MintSecurity` is
+constructor 0 and has no fields. Include the `can_mint` power-user node as a reference input,
+signed by that operator, and this token's CIP-113 registry node as a reference input too: the
+minting proxy reads it, and it is referenced, not spent. Besides the GlobalState logic, invoke the
+minting proxy and the minting authority as zero-value withdrawals — three withdrawals in all.
+
+**The continuing GlobalState datum.** Write it as the input datum's Data with only field 5,
+`mintable_amount`, replaced by `in − minted_amount`, where `in` is the input's `mintable_amount`
+and `minted_amount` the signed quantity actually minted; a burn's negative amount raises it. The
+minting proxy refuses a different value or a result below zero, any other changed field (appended
+fields included), and a changed address or non-ADA value. Lovelace may change. A builder that
+round-trips the datum through a typed v1 record drops appended fields and is refused.
+`MintSecurity` accepts only a transaction that mints or burns the security token, and in which
+field 5 alone changed.
 
 ```aiken
-// Proxy withdraw redeemer
-GlobalStateSpent { global_state_input_index }
+// Minting proxy withdraw redeemer
+MintingLogicScriptWithdrawRedeemer {
+  global_state_location: GlobalStateSpent { global_state_input_index },
+  registry_node_location: NodeReferenced { registry_node_ref_input_index },
+  global_state_output_index,
+}
 
 // Minting authority withdraw redeemer
 MintBurn {
@@ -307,6 +343,13 @@ MintBurn {
   }],
 }
 ```
+
+At the Plutus Data boundary the proxy's redeemer is
+`Constr(0, [GlobalStateLocation, RegistryNodeLocation, Int])`, where
+`GlobalStateSpent`/`GlobalStateReferenced` are constructors 0/1 and
+`NodeReferenced`/`NodeInserted`/`NodeSpent` are constructors 0/1/2. Here
+`global_state_output_index` names the continuing GlobalState output, and
+`registry_node_ref_input_index` this token's registry node in `reference_inputs`.
 
 `minted_amount` must equal the actual signed quantity under `security_asset_name`, and it must not
 be zero: a `MintBurn` that changes no supply is rejected, because it
@@ -339,13 +382,15 @@ then fails this deployment's destination checks. See
 ## Upgrades and operator checks
 
 The admin can change `minting_script_credential_hash` with GlobalState's `RotateMintingScript`.
-The permanent proxy will delegate **all** mint, burn and registration decisions to the new
-authority. Register its stake credential first. The new hash must differ from the admin, from the
-current authority and from the GlobalState logic; nothing on chain checks that it names a working
-authority. Rebuild it from source at a pinned commit with every parameter and compare its hash
-before signing. Verify that the replacement preserves supply-cap enforcement,
-GlobalState spending for supply changes, allowed asset names, registration structure and
-deactivation rules described at the top of
+The permanent proxy delegates every mint, burn and registration decision to the new authority
+except the supply debit, which it checks itself whichever authority is installed. Register its
+stake credential first. The new hash must differ from the admin, from the current authority and
+from the GlobalState logic; nothing on chain checks that it names a working authority. Rebuild it
+from source at a pinned commit with every parameter and compare its hash before signing. The
+supply cap no longer depends on the authority. Verify that the replacement preserves GlobalState
+spending for supply changes (the proxy requires it too), allowed asset names (only
+`security_asset_name` is debited, and the "only these names" rule is the authority's), registration
+structure and deactivation rules described at the top of
 [`minting_authority.ak`](../validators/minting_authority.ak), and its
 invariants 7 and 8: **a `MintBurn` that changes no supply authorises nothing**, and role
 signatures refuse the scripts that run in the authority's own transactions.
@@ -396,7 +441,12 @@ exactly the scripts the active authority was built with (F08). Then, in a **sepa
 authority), update this token's CIP-113
 registry node with
 `UpgradeRegistryNode { registry_node_input_index, registry_node_output_index,
-global_state_location }` on the minting authority withdrawal. The admin signs. The authority
+global_state_location }` on the minting authority withdrawal. The base layer's in-place update
+also requires the minting proxy's withdraw-0, with
+`MintingLogicScriptWithdrawRedeemer { global_state_location, registry_node_location: NodeSpent {
+registry_node_input_index }, global_state_output_index }`: the same spent node, the same
+`global_state_location` as the authority's, and any `global_state_output_index` (the update cannot
+mint this token). The admin signs. The authority
 pins the node to this issuance policy, retains this deployment's GlobalState and disabled
 unfracking setting, and checks `upgrades_locked == False`. Register replacement logic stake
 credentials before their first use. This transaction cannot change the token supply.
@@ -428,20 +478,24 @@ action: RotateGlobalStateScript { new_global_state_script_hash } }` (action cons
 as the redeemer of **both** withdrawals, the current logic's (old field 0) and the new one's: the
 current logic requires the two to be identical, index included. The continuing output stays at
 the proxy with the same non-ADA value; its datum has field 0 set to the new hash. The current logic
-requires the frozen core (fields 0–4: logic hash, `deactivated`, admin, power-users list policy,
-minting-authority hash) to still decode, with constructor 0, and fields 1–4 to be unchanged; the
+requires the frozen core (fields 0–5: logic hash, `deactivated`, admin, power-users list policy,
+minting-authority hash, `mintable_amount`) to still decode, with constructor 0, and fields 1–5 to
+be unchanged; the
 proxy, the minting proxy and both lists read only the core and can never be redeployed. Everything
 after the core is the new logic's to accept, including a completely different layout.
 This version, as the new logic, accepts exactly the input datum with field 0 rewritten. The new hash
 must differ from the admin and the minting authority. No security token may be minted, burned or
-spent in the same transaction. Off-chain readers should read the core (fields 0–4) by position and the rest according to the
-installed logic's layout: a later logic may reshape everything after field 4. The v1 layout is
+spent in the same transaction. Off-chain readers should read the core (fields 0–5) by position and the rest according to the
+installed logic's layout: a later logic may reshape everything after field 5. The v1 layout is
 `GlobalStateDatum`; `decode_global_state_core` is the on-chain core reader.
 
 `LockUpgrades` irreversibly closes the authority-rotation, registry-upgrade and GlobalState-logic-rotation
 paths, and admin changes to the supply cap, for **later** transactions. A registry upgrade bundled into the same transaction can still read the
 unlocked input state and succeed; inspect all redeemers in the locking transaction. Admin-only
-GlobalState actions similarly expose their pre-state to a bundled registry operation. Record the
+GlobalState actions similarly expose their pre-state to a bundled registry operation. The lock is
+enforced by the installed GlobalState logic itself, so after it the cap is final only if that logic
+is a reviewed build of this repository. Before locking, check datum field 0 against a rebuild (see
+[README: Deployment checklist](../README.md#deployment-checklist)). Record the
 active script hashes, operator credentials, base-layer version and lock transaction as deployment
 artifacts. For final retirement, follow the ordered
 [decommissioning runbook](security/security-fixes.md#the-decommissioning-runbook-in-order).
