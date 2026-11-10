@@ -23,8 +23,7 @@ use types/global_state.{
 }
 use types/kyc_proof.{Cip30Attestation, Cip30AttestationProof}
 use types/minting_authority.{
-  MintBurn, MintingAuthorityWithdrawRedeemer, RegisterMint, RegisterStructural,
-  UpgradeRegistryNode,
+  MintBurn, MintingAuthorityWithdrawRedeemer, Register, UpgradeRegistryNode,
 }
 use types/party_action.{PartyAction}
 use types/power_users.{PowerUser}
@@ -64,19 +63,38 @@ use utils.{must_be_signed_by_credential}
 ///      logic; every logic must keep this branch. Merely
 ///      referencing it leaves the supply cap — a core CMTAT/BaFin invariant
 ///      — entirely unenforced. IRREVERSIBLE (tokens already exist).
-///   3. ONLY `security_asset_name` may be minted under the issuance policy,
-///      plus, in `RegisterMint` alone, ONE CIP-68 reference NFT: a single
-///      `(100)`-prefixed name, quantity 1 (`only_permitted_assets_minted`).
-///      `issuance_mint` constrains no asset names, and the destination
-///      checks only ever inspect the security asset, so any other name would
-///      be minted with no KYC or denylist scrutiny at all.
+///   3. ONLY THE NAMES EACH VARIANT ALLOWS may be minted under the issuance
+///      policy. `MintBurn` mints or burns only `security_asset_name`
+///      (`only_permitted_assets_minted`). `Register` mints nothing for a
+///      plain name, and exactly `cip68.reference_name(security_asset_name)`,
+///      quantity 1, for a CIP-68 name — and never supply
+///      (`registration_mint_matches_name`). `issuance_mint` constrains no
+///      asset names, and the destination checks only ever inspect the
+///      security asset, so any other name would be minted with no KYC or
+///      denylist scrutiny at all.
+///
+///      `UpgradeRegistryNode` does not inspect `self.mint`. It relies on
+///      CIP-113's `registry_spend` forbidding a same-transaction mint of the
+///      spent node's own policy (`expect !mint_has_policy(self.mint,
+///      spent_node.key)`). That rule is hoisted above both of its branches, so
+///      it covers the in-place update AND the case where this token's node is
+///      the covering node spent by another token's insert.
+///
+///      DELIBERATE RESIDUE: protection is keyed on the EXACT reference name
+///      and exists only for CIP-68 names. A replacement authority that mints
+///      any other `(100)`-labelled name under the issuance policy creates a
+///      token that neither the transfer nor the seizure logic polices.
 ///   4. THE PROTOCOL MUST NOT BE `deactivated`. Deactivation is the terminal
 ///      decommissioning switch and is meant to be absolute.
-///   5. REGISTRATION STRUCTURE: the node must name this deployment's proxy,
-///      name exactly the transfer and seizure scripts this authority was
-///      built with (F08 — also on every `UpgradeRegistryNode`), forbid
-///      unfracking, and pin this deployment's GlobalState — AND the node's
-///      own registry NFT must be minted in the same transaction.
+///   5. REGISTRATION STRUCTURE, on the single `Register` variant: the node
+///      must name this deployment's proxy, name exactly the transfer and
+///      seizure scripts this authority was built with (F08 — also on every
+///      `UpgradeRegistryNode`), forbid unfracking, and pin this deployment's
+///      GlobalState — AND the node's own registry NFT must be minted in the
+///      same transaction. Plus the NAME RULES, decided by
+///      `security_asset_name` alone: a `(100)`-labelled name is refused (the
+///      supply would be its own metadata token), a CIP-68 name needs a body
+///      of at least one byte, and a plain name must not be empty.
 ///
 ///      That last clause is what makes registration a once-only event, and
 ///      it is load-bearing, not cosmetic. Requiring merely that SOME registry
@@ -232,8 +250,8 @@ validator minting_authority_validator(
         // Decode GlobalState ONCE. The NFT check authenticates the UTxO
         // BEFORE any field of its datum is read; `!deactivated` traps
         // immediately (INVARIANT 4). The power-users list policy id is read
-        // from that same authenticated datum (INVARIANT 6), here, so both
-        // callers — this one and `RegisterMint` below — read it once.
+        // from that same authenticated datum (INVARIANT 6), here, at the one
+        // call site of `verify_mint_or_burn`, so it is read once.
         let gs_input = utils.safe_list_at(self.inputs, global_state_input_index)
         expect
           value.quantity_of(
@@ -252,20 +270,21 @@ validator minting_authority_validator(
           // that mints nothing would run this authority, and with it the
           // minting proxy, beside ANY GlobalState action (only MintSecurity
           // may carry a mint or burn), where their withdrawals count as
-          // signatures. No legitimate flow needs it: this branch refuses
-          // CIP-68 names, so a zero delta means nothing is minted at all.
+          // signatures. No legitimate flow needs it: this branch mints or
+          // burns only `security_asset_name`, so a zero delta means nothing is
+          // minted at all.
           // `minted_amount` is bound to the ledger's delta inside
           // `verify_mint_or_burn`.
           (minted_amount != 0)?,
-          // Steady state mints supply and nothing else. A CIP-68 metadata
-          // token is a registration-time artefact; allowing one here would let
-          // it be re-minted after the token is live.
+          // Steady state mints or burns supply and nothing else (INVARIANT
+          // 3). A CIP-68 reference NFT is a registration-time artefact;
+          // allowing one here would let it be re-minted after the token is
+          // live.
           only_permitted_assets_minted(
             self,
             expected_issuance_policy_id,
             security_asset_name,
-            False,
-          ),
+          )?,
           verify_mint_or_burn(
             expected_issuance_policy_id,
             minted_amount,
@@ -281,96 +300,48 @@ validator minting_authority_validator(
           ),
         }
       }
-      RegisterMint {
-        registry_node_output_index,
-        global_state_input_index,
-        power_user_node_ref_input_index,
-        minted_amount,
-        destination_actions,
-      } -> {
+      Register { registry_node_output_index, global_state_location } -> {
         // The registration's structural invariants are NOT a base-layer
         // duplicate: CIP-113 binds only key <-> minting logic and leaves
         // fields 3-6 free, and it never tells this authority whether an
         // insert of THIS token's node is actually happening. This call is
-        // what ties `RegisterMint` to that (once-only) insert — the reason it
+        // what ties `Register` to that (once-only) insert — the reason it
         // alone may mint the CIP-68 reference NFT — and what pins the free
-        // fields at genesis.
+        // fields at genesis (INVARIANT 5).
         let issuance_policy_id = verify_registration_structure(
           registry_node_output_index,
           registry_policy_id,
           global_state_policy_id,
           minting_logic_script_credential_hash,
           expected_issuance_policy_id,
-          security_asset_name,
           transfer_logic_script_hash,
           third_party_transfer_logic_script_hash,
           self,
         )
-        // Decode GlobalState ONCE — same shape as the MintBurn call site
-        // above: the NFT check authenticates the UTxO before any field of
-        // its datum is read, and the deactivation trap and the power-users
-        // list policy read both run here rather than inside
-        // `verify_mint_or_burn`.
-        let gs_input = utils.safe_list_at(self.inputs, global_state_input_index)
-        expect
-          value.quantity_of(
-            assets.to_value(gs_input.output.value),
-            global_state_policy_id,
-            constants.global_state_asset_name,
-          ) == 1
-        expect InlineDatum(gs_raw) = gs_input.output.datum
-        let fields = builtin.unconstr_fields(gs_raw)
-        expect !global_state.get_deactivated(fields)
-        let power_user_linked_list_policy_id = global_state.get_power_user_linked_list_policy_id(
-          fields,
-        )
-        let admin_credential_hash = global_state.get_admin_credential_hash(
-          fields,
+        // Read for the deactivation flag and the admin only. No supply
+        // changes here, so there is no cap to enforce and either location
+        // will do.
+        let gs_datum = resolve_global_state(
+          self.inputs,
+          self.reference_inputs,
+          global_state_location,
+          global_state_policy_id,
         )
         and {
-          // Registration is the one moment the CIP-68 reference NFT may be
-          // created, which is what makes it once-only: registration itself is
-          // structurally once-only.
-          only_permitted_assets_minted(
-            self,
-            issuance_policy_id,
-            security_asset_name,
-            True,
-          ),
-          // …and if a CIP-68 token was minted, it must land somewhere defined.
-          //
-          // Gated on whether one was ACTUALLY minted, which is now an
-          // unambiguous question: the protected prefix and `security_asset_name`
-          // are disjoint by construction (`verify_registration_structure`
-          // asserts the security name is not protected), so this can never
-          // accidentally read the security token's own mint. A deployment that
-          // wants no CIP-68 token simply does not mint one, and this arm is
-          // skipped.
-          if cip68.value_has_protected(self.mint, issuance_policy_id) {
-            cip68_output_is_pinned(self, issuance_policy_id)?
-          } else {
-            True
-          },
+          // INVARIANT 4.
+          !gs_datum.deactivated,
           // The admin authorises the registration itself — CIP-113 binds the
           // node's key to the proxy but leaves its transfer-logic fields
           // free, so this signature is what stops a stranger registering the
           // token, and the F08 pin holds even the admin to this deployment's
-          // transfer and seizure scripts.
-          role_signed(admin_credential_hash)?,
-          // ...and the mint half passes exactly the checks every later mint
-          // gets, so a genesis mint is auditable on the same terms.
-          verify_mint_or_burn(
-            issuance_policy_id,
-            minted_amount,
-            gs_raw,
-            power_user_node_ref_input_index,
-            destination_actions,
-            security_asset_name,
-            power_user_linked_list_policy_id,
-            denylist_script_hash,
-            power_user_list_script_hash,
-            role_signed,
+          // transfer and seizure scripts. INVARIANT 8: the registry insert
+          // runs the minting proxy, so an admin keyed at it must not count.
+          role_signed(gs_datum.admin_credential_hash)?,
+          // INVARIANTS 3 and 5: the name rules and the two-way mint rule.
+          registration_mint_matches_name(
             self,
+            issuance_policy_id,
+            security_asset_name,
           ),
         }
       }
@@ -485,40 +456,6 @@ validator minting_authority_validator(
           role_signed(gs_datum.admin_credential_hash)?,
         }
       }
-      RegisterStructural { registry_node_output_index, global_state_location } -> {
-        let issuance_policy_id = verify_registration_structure(
-          registry_node_output_index,
-          registry_policy_id,
-          global_state_policy_id,
-          minting_logic_script_credential_hash,
-          expected_issuance_policy_id,
-          security_asset_name,
-          transfer_logic_script_hash,
-          third_party_transfer_logic_script_hash,
-          self,
-        )
-        let gs_datum = resolve_global_state(
-          self.inputs,
-          self.reference_inputs,
-          global_state_location,
-          global_state_policy_id,
-        )
-        and {
-          // Nothing may be minted under the issuance policy at all. Without
-          // this, `RegisterStructural` would be a way to mint the first
-          // supply while skipping every power-user and receiver gate that
-          // `RegisterMint` applies — GlobalState is only referenced here, so
-          // the cap would go unenforced too.
-          //
-          // Checked as a SHAPE, not a sum — see `only_permitted_assets_minted`.
-          // Summing would accept +N of one asset name netted against -N of
-          // another under the same policy.
-          dict.is_empty(assets.tokens(self.mint, issuance_policy_id))?,
-          // INVARIANT 4.
-          !gs_datum.deactivated,
-          role_signed(gs_datum.admin_credential_hash)?,
-        }
-      }
     }
   }
 
@@ -539,8 +476,9 @@ validator minting_authority_validator(
   }
 }
 
-/// INVARIANT 3 — see the header. Only two kinds of asset may appear under the
-/// issuance policy: the security token, and at most ONE CIP-68 metadata token.
+/// INVARIANT 3 — see the header. `MintBurn` mints or burns only
+/// `security_asset_name` under the issuance policy: holds iff every name minted
+/// under it equals `security_asset_name`.
 ///
 /// Checked as a SHAPE, not a sum: `quantity_of_policy_id(...) == 0` would also
 /// accept +N of the security asset netted against -N of another name under the
@@ -549,81 +487,70 @@ validator minting_authority_validator(
 /// invisible to the destination checks below, which only ever inspect outputs
 /// carrying `security_asset_name`.
 ///
-/// The CIP-68 arm is keyed on the PROTECTED PREFIX (`constants.cip68_protected_prefix`),
-/// not on an exact name. That is what makes "only one CIP-68 token" a
-/// meaningful rule: with an exact-name parameter at most one name could ever
-/// match, so a second metadata token was unconstructible by accident rather
-/// than by design. With prefixes, `(100)Foo` and `(100)Bar` are both protected
-/// and both reach this check — so the count is enforced explicitly.
+/// Vacuous on an empty mint: refusing a mint that changes nothing is
+/// `(minted_amount != 0)?`'s job (INVARIANT 7), not this function's.
 fn only_permitted_assets_minted(
   self: Transaction,
   issuance_policy_id: ByteArray,
   security_asset_name: ByteArray,
-  // Whether a CIP-68 token may be minted in THIS branch. True only for
-  // `RegisterMint`; see the call sites.
-  cip68_mint_allowed: Bool,
+) -> Bool {
+  list.all(
+    dict.to_pairs(assets.tokens(self.mint, issuance_policy_id)),
+    fn(entry) { entry.1st == security_asset_name },
+  )
+}
+
+/// INVARIANTS 3 and 5 — see the header. `Register`'s name rules and its mint
+/// rule, both decided by `security_asset_name` alone, and the mint rule
+/// enforced in BOTH directions under the issuance policy: what must be minted
+/// is minted, and nothing else is. Mints under other policies are not this
+/// function's concern.
+///
+///   * A `(100)`-labelled security name is always refused: the supply would be
+///     its own metadata token, and every rule meant for metadata would fire on
+///     it.
+///   * A CIP-68 name (`cip68.reference_name` is `Some`) needs a body of at
+///     least one byte, mints EXACTLY its reference NFT once — never supply,
+///     never another name — and pins it in one well-formed carrier
+///     (`cip68_output_is_pinned`).
+///   * A plain name must not be empty, and mints NOTHING.
+///
+/// Checked as a SHAPE (`minted == ..`), not a sum, for the same reason as
+/// `only_permitted_assets_minted`. Returns False rather than trapping, with a
+/// label on each rule, so a refusal names the rule that fired.
+fn registration_mint_matches_name(
+  self: Transaction,
+  issuance_policy_id: ByteArray,
+  security_asset_name: ByteArray,
 ) -> Bool {
   let minted = dict.to_pairs(assets.tokens(self.mint, issuance_policy_id))
-
-  // Every minted name is either the supply or one permitted metadata token.
-  // Returns False rather than trapping, so a caller sees the whole `and { }`
-  // fail with a labelled trace — the shape this branch has always had.
-  let every_name_permitted = list.all(
-    minted,
-    fn(entry) {
-      let Pair(asset_name, quantity) = entry
-      if asset_name == security_asset_name {
-        // Supply. Amount is governed by the cap, not here.
-        True
-      } else {
-        and {
-          // A metadata token may only appear where a branch says so.
-          cip68_mint_allowed?,
-          // …and only under a protected prefix. Any other name would be a
-          // second supply that every compliance scan — all of which filter on
-          // `security_asset_name` — would ignore.
-          cip68.is_protected(asset_name)?,
-          // An NFT, and exactly one of it.
-          (quantity == 1)?,
-        }
-      }
-    },
-  )
-
-  // At most ONE metadata token per transaction. With an exact-name parameter
-  // this was unconstructible by accident — only one name could ever match. With
-  // prefixes, `(100)Foo` and `(100)Bar` both reach the arm above, so the rule
-  // has to be stated. Counts every name other than the security asset; the
-  // check above has already required each of those to be protected.
-  let non_supply_count = list.foldl(
-    minted,
-    0,
-    fn(entry, count) {
-      if entry.1st == security_asset_name {
-        count
-      } else {
-        count + 1
-      }
-    },
-  )
-
   and {
-    every_name_permitted,
-    (non_supply_count <= 1)?,
+    (bytearray.take(security_asset_name, constants.cip67_label_length) != constants.cip68_reference_label)?,
+    when cip68.reference_name(security_asset_name) is {
+      Some(ref_name) -> and {
+          (bytearray.length(security_asset_name) > constants.cip67_label_length)?,
+          (minted == [Pair(ref_name, 1)])?,
+          cip68_output_is_pinned(self, issuance_policy_id, ref_name)?,
+        }
+      None -> and {
+          (security_asset_name != "")?,
+          (minted == [])?,
+        }
+    },
   }
 }
 
-/// THE CIP-68 METADATA TOKEN CUSTODY DECISION.
+/// THE CIP-68 REFERENCE NFT CUSTODY DECISION.
 ///
-/// A CIP-68 token is metadata, not value — it is exempt from the supply cap and
-/// from the denylist and KYC gates. It is minted exactly once, here, at
-/// registration (only `RegisterMint` may mint one, and registration is
-/// structurally a once-only event), and this function pins three things about
-/// the UTxO it lands in:
+/// A CIP-68 token's reference NFT is metadata, not value — it is exempt from
+/// the supply cap and from the denylist and KYC gates. It is minted exactly
+/// once, here, at registration (only `Register` may mint it, and registration
+/// is structurally a once-only event), and this function pins three things
+/// about the UTxO it lands in:
 ///
-///   * there is exactly ONE output carrying a protected token in the whole
-///     transaction — with `only_permitted_assets_minted` capping the mint at
-///     one, that makes the metadata token unique and locatable;
+///   * there is exactly ONE output carrying `reference_name` in the whole
+///     transaction — with `registration_mint_matches_name` capping the mint at
+///     one, that makes the reference NFT unique and locatable;
 ///   * that output is WELL FORMED — ADA plus exactly that one token, nothing
 ///     else co-located, and a correctly shaped CIP-68 datum
 ///     (`cip68.output_is_well_formed`); and
@@ -633,24 +560,32 @@ fn only_permitted_assets_minted(
 ///     GlobalState admin; the admin still authorises registration itself.
 ///
 /// The base layer's `no_escape` already confines every token of this policy —
-/// the metadata token included — to the programmable base, so no
+/// the reference NFT included — to the programmable base, so no
 /// payment-credential pin is needed here.
 ///
 /// The SHAPE is re-checked on every later move by `transfer_logic_script`, and
-/// the seizure path refuses to touch a protected token at all. So these are
-/// invariants, not a one-time posture at genesis.
+/// the seizure path refuses to spend the reference NFT at all — both keyed on
+/// the same exact name. So these are invariants, not a one-time posture at
+/// genesis.
 fn cip68_output_is_pinned(
   self: Transaction,
   issuance_policy_id: ByteArray,
+  reference_name: ByteArray,
 ) -> Bool {
   let carriers = list.filter(
     self.outputs,
-    fn(output) { cip68.value_has_protected(output.value, issuance_policy_id) },
+    fn(output) {
+      cip68.value_has_reference(
+        output.value,
+        issuance_policy_id,
+        reference_name,
+      )
+    },
   )
   when carriers is {
     [output] -> {
       expect Some(Inline(_owner)) = output.address.stake_credential
-      cip68.output_is_well_formed(output, issuance_policy_id)?
+      cip68.output_is_well_formed(output, issuance_policy_id, reference_name)?
     }
     _ -> False
   }
@@ -675,21 +610,10 @@ fn verify_registration_structure(
   global_state_policy_id: ByteArray,
   minting_logic_script_credential_hash: ByteArray,
   expected_issuance_policy_id: ByteArray,
-  security_asset_name: ByteArray,
   transfer_logic_script_hash: ByteArray,
   third_party_transfer_logic_script_hash: ByteArray,
   self: Transaction,
 ) -> ByteArray {
-  // DEPLOYMENT SANITY, asserted once at registration because it can never
-  // become true later: the security token must not carry a protected prefix.
-  //
-  // If it did, every rule meant for metadata would fire on the supply itself —
-  // the seizure path would refuse every seizure, the transfer path would demand
-  // that each holding sit alone in its own UTxO with a CIP-68 datum, and
-  // `only_permitted_assets_minted` would cap the supply at one unit. The token
-  // would be inert, and nothing else in the protocol would explain why. This is
-  // the one place that misconfiguration can be caught, and it fails closed.
-  expect !cip68.is_protected(security_asset_name)
   let node_output = utils.safe_list_at(self.outputs, registry_node_output_index)
   let node_fields: List<Data> = builtin.unconstr_fields(
     utils.expect_inline_datum(node_output),
@@ -888,11 +812,11 @@ fn verify_mint_or_burn(
     //A power user must have signed the transaction — and not through a
     //script that runs here anyway (INVARIANT 8)
     role_signed(power_user_node_key)?,
-    // A zero-amount mint — e.g. a `RegisterMint` that mints only the CIP-68
-    // reference NFT, with no initial supply — removes nothing from
-    // circulation, so it is a MINT, not a burn: gating it on `can_burn`
-    // would let a burn-only operator perform what is structurally a mint
-    // action merely because its supply delta happens to be zero.
+    // A zero-amount mint removes nothing from circulation, so it is a MINT,
+    // not a burn: gating it on `can_burn` would let a burn-only operator
+    // perform what is structurally a mint action merely because its supply
+    // delta happens to be zero. The sole caller, `MintBurn`, already refuses
+    // a zero delta (INVARIANT 7); this gate does not rely on that.
     //If minted_amount >= 0, power user must be minter
     //If minted_amount < 0, power user must be burner
     if minted_amount >= 0 {
@@ -1031,11 +955,10 @@ fn verify_mint_destinations(
 
 const test_security_asset_name: ByteArray = "SEC"
 
-// CIP-68 reference NFT name, under the SAME issuance policy. Real deployments
-// use the (100) label prefix; the validator treats it as an opaque name.
-/// CIP-67 label `(100)` followed by "REF" — a genuinely PROTECTED name, which
-/// is what makes these fixtures exercise the prefix rules rather than an exact
-/// name comparison.
+/// CIP-67 label `(100)` followed by "REF", under the SAME issuance policy —
+/// the reference NFT name of the CIP-68 security names below
+/// (`cip68.reference_name`). For the plain "SEC" deployment it is just another
+/// name.
 const test_reference_asset_name: ByteArray = #"000643b0524546"
 
 const test_gs_policy_id: ByteArray =
@@ -1156,8 +1079,8 @@ const test_admin_hash: ByteArray =
   #"0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
 
 // GlobalState carrying a real admin credential, as a REFERENCE input — the
-// shape a structural registration uses (nothing is minted, so there is no
-// cap to enforce and no reason to spend it).
+// shape a registration uses (no supply changes, so there is no cap to enforce
+// and no reason to spend it).
 fn make_gs_ref_input_with(deactivated: Bool) -> Input {
   let base = make_gs_input(False)
   expect InlineDatum(raw) = base.output.datum
@@ -1179,12 +1102,6 @@ fn make_gs_ref_input_with(deactivated: Bool) -> Input {
 
 fn make_gs_ref_input() -> Input {
   make_gs_ref_input_with(False)
-}
-
-// The same GlobalState, SPENT — the shape a registration carrying a mint
-// uses, so that `MintSecurity` runs and enforces the cap.
-fn make_gs_input_with_admin() -> Input {
-  Input { ..make_gs_ref_input(), output_reference: test_out_ref(0) }
 }
 
 fn make_gs_ref_input_deactivated() -> Input {
@@ -1557,6 +1474,15 @@ fn clean_dest_action() -> PartyAction {
 }
 
 fn run_withdraw(redeemer: MintingAuthorityWithdrawRedeemer, tx: Transaction) {
+  run_withdraw_named(test_security_asset_name, redeemer, tx)
+}
+
+/// `run_withdraw` for a deployment whose security token is `security_name`.
+fn run_withdraw_named(
+  security_name: ByteArray,
+  redeemer: MintingAuthorityWithdrawRedeemer,
+  tx: Transaction,
+) {
   // F08: the authority pins the transfer and seizure scripts it accepts in the
   // registry. The upgrade tests model the documented procedure: the authority
   // was first rotated to a build pinned to the NEW transfer script, and
@@ -1566,7 +1492,7 @@ fn run_withdraw(redeemer: MintingAuthorityWithdrawRedeemer, tx: Transaction) {
     _ -> test_transfer_logic_hash
   }
   minting_authority_validator.withdraw(
-    test_security_asset_name,
+    security_name,
     test_gs_policy_id,
     test_registry_policy_id,
     test_proxy_hash,
@@ -1889,182 +1815,33 @@ test mint_succeeds_without_any_registry_reference_input() {
   )
 }
 
-// ── RegisterMint: the first mint, node reached via self.outputs ─────────────
+// ── Register: the CIP-113 registration, node reached via self.outputs ───────
 //
-// The proxy owns the registration's structural invariants and admin gate;
-// this variant authorises only the mint riding along with it, on exactly the
-// same terms as steady-state MintBurn. The node is an OUTPUT here because at
-// insert time it does not exist as a UTxO yet.
+// `Register` creates this token's registry node and nothing else under the
+// issuance policy — except, for a CIP-68-named token, its reference NFT. The
+// node is an OUTPUT here because at insert time it does not exist as a UTxO
+// yet. GlobalState is referenced (no supply changes, so no cap to enforce) and
+// the admin alone authorises. Every negative below differs from a positive
+// control in exactly the condition its name gives.
 
-fn make_register_mint_tx(
-  amount: Int,
-  can_mint: Bool,
-  node_output: Output,
-  signatories: List<ByteArray>,
-) -> Transaction {
-  let base = make_withdraw_tx(
-    amount,
-    can_mint,
-    False,
-    False,
-    make_denylist_root_ref_input(),
-    [make_dest_output(amount)],
-    signatories,
-  )
-  Transaction {
-    ..base,
-    inputs: [make_gs_input_with_admin()],
-    // reference_inputs: 0 = power-user node, 1 = denylist root. The registry
-    // node is deliberately absent — it only exists as an output.
-    reference_inputs: [
-      make_pu_node_ref_input(can_mint, False),
-      make_denylist_root_ref_input(),
-    ],
-    outputs: list.push(base.outputs, node_output),
-    // A RegistryInsert mints exactly one registry node NFT; that is what
-    // distinguishes a registration from an in-place node update.
-    mint: merge(base.mint, from_asset(test_registry_policy_id, "Node", 1)),
-    // The admin authorises the registration; `signatories` varies only the
-    // power-user half so each negative test isolates one condition.
-    extra_signatories: list.push(signatories, test_admin_hash),
-  }
-}
+/// CIP-68 user-token security names — `(222)`, `(333)` and `(444)` + "REF".
+/// All three map to `test_reference_asset_name`, `(100)` + "REF".
+const test_cip68_222_name: ByteArray = #"000de140524546"
 
-fn register_mint_redeemer(amount: Int) -> MintingAuthorityWithdrawRedeemer {
-  RegisterMint {
-    registry_node_output_index: 0,
-    global_state_input_index: 0,
-    power_user_node_ref_input_index: 0,
-    minted_amount: amount,
-    destination_actions: [
-      PartyAction { proof: dummy_proof(), denylist_ref_input_index: 1 },
-    ],
-  }
-}
+const test_cip68_333_name: ByteArray = #"0014df10524546"
 
-test register_mint_succeeds_resolving_the_node_from_outputs() {
-  run_withdraw(
-    register_mint_redeemer(1_000),
-    make_register_mint_tx(
-      1_000,
-      True,
-      make_registry_ref_input().output,
-      [test_pu_credential_hash],
-    ),
-  )
-}
+const test_cip68_444_name: ByteArray = #"001bc280524546"
 
-test register_mint_fails_without_power_user_signature() {
-  !run_withdraw(
-    register_mint_redeemer(1_000),
-    make_register_mint_tx(1_000, True, make_registry_ref_input().output, []),
-  )
-}
+/// `(100)` + "Y" — reference-labelled, but another body: not the reference
+/// name of any security name these fixtures use.
+const test_wrong_body_reference_name: ByteArray = #"000643b059"
 
-test register_mint_fails_when_power_user_cannot_mint() {
-  !run_withdraw(
-    register_mint_redeemer(1_000),
-    make_register_mint_tx(
-      1_000,
-      False,
-      make_registry_ref_input().output,
-      [test_pu_credential_hash],
-    ),
-  )
-}
-
-test register_mint_fails_when_amount_disagrees() {
-  // The redeemer's claimed amount is cross-checked against ledger truth.
-  !run_withdraw(
-    register_mint_redeemer(999),
-    make_register_mint_tx(
-      1_000,
-      True,
-      make_registry_ref_input().output,
-      [test_pu_credential_hash],
-    ),
-  )
-}
-
-test register_mint_fails_when_node_output_names_another_minting_logic() fail {
-  // The decoy node is a genuine registry node for a DIFFERENT token, so it
-  // must not be usable to derive this token's issuance policy — otherwise a
-  // redeemer could point at an unrelated policy and make every check below
-  // vacuous while a real mint proceeded unchecked.
-  run_withdraw(
-    register_mint_redeemer(1_000),
-    make_register_mint_tx(
-      1_000,
-      True,
-      make_decoy_registry_ref_input().output,
-      [test_pu_credential_hash],
-    ),
-  )
-}
-
-// ── zero-amount mint is a mint, not a burn ───────────────────────────────────
-
-// A registration whose first mint carries NO initial supply — only the
-// CIP-68 reference NFT. Mirrors `make_register_mint_tx`, but threads
-// `can_burn` through independently (that fixture hardcodes it to `False`)
-// so a can-burn-only operator can be modelled, and layers the reference NFT
-// mint/output on top.
-fn make_register_mint_reference_only_tx(
-  can_mint: Bool,
-  can_burn: Bool,
-) -> Transaction {
-  let amount = 0
-  let base = make_withdraw_tx(
-    amount,
-    can_mint,
-    can_burn,
-    False,
-    make_denylist_root_ref_input(),
-    [],
-    [test_pu_credential_hash],
-  )
-  Transaction {
-    ..base,
-    inputs: [make_gs_input_with_admin()],
-    reference_inputs: [
-      make_pu_node_ref_input(can_mint, can_burn),
-      make_denylist_root_ref_input(),
-    ],
-    outputs: [make_registry_ref_input().output, make_reference_nft_output()],
-    mint: merge(
-      merge(base.mint, from_asset(test_registry_policy_id, "Node", 1)),
-      from_asset(test_issuance_policy_id, test_reference_asset_name, 1),
-    ),
-    extra_signatories: [test_pu_credential_hash, test_admin_hash],
-  }
-}
-
-test register_mint_reference_only_succeeds_with_mint_only_operator() {
-  // A `RegisterMint` that carries no initial supply — only the CIP-68
-  // reference NFT — mints ZERO of the security asset. That is still a MINT
-  // (see the role-gate doc comment in `verify_mint_or_burn`), so a
-  // `can_mint`-only operator must be able to authorise it.
-  run_withdraw(
-    register_mint_redeemer(0),
-    make_register_mint_reference_only_tx(True, False),
-  )
-}
-
-test register_mint_reference_only_fails_with_burn_only_operator() {
-  // Same transaction, differing in exactly the power user's role flags: a
-  // `can_burn`-only operator must not be able to authorise a zero-amount
-  // mint just because the supply delta happens to read as non-positive
-  // under the old `> 0` gate.
-  !run_withdraw(
-    register_mint_redeemer(0),
-    make_register_mint_reference_only_tx(False, True),
-  )
-}
-
-// ── RegisterStructural: registration with no mint ───────────────────────────
-
-fn make_register_structural_tx(
-  extra_issuance_mint: Assets,
+/// A registration of a plain-named token: GlobalState referenced, the new
+/// node at output 0, its registry NFT minted, `issuance_mint` added under the
+/// issuance policy and `extra_outputs` appended after the node.
+fn make_register_tx(
+  issuance_mint: Assets,
+  extra_outputs: List<Output>,
   signatories: List<ByteArray>,
 ) -> Transaction {
   Transaction {
@@ -2078,16 +1855,13 @@ fn make_register_structural_tx(
       signatories,
     ),
     reference_inputs: [make_gs_ref_input()],
-    outputs: [make_registry_ref_input().output],
-    mint: merge(
-      from_asset(test_registry_policy_id, "Node", 1),
-      extra_issuance_mint,
-    ),
+    outputs: [make_registry_ref_input().output, ..extra_outputs],
+    mint: merge(from_asset(test_registry_policy_id, "Node", 1), issuance_mint),
   }
 }
 
-fn register_structural_redeemer() -> MintingAuthorityWithdrawRedeemer {
-  RegisterStructural {
+fn register_redeemer() -> MintingAuthorityWithdrawRedeemer {
+  Register {
     registry_node_output_index: 0,
     global_state_location: GlobalStateReferenced {
       global_state_ref_input_index: 0,
@@ -2095,13 +1869,37 @@ fn register_structural_redeemer() -> MintingAuthorityWithdrawRedeemer {
   }
 }
 
-// ── CIP-68: a second asset name under the issuance policy ───────────────────
-//
-// The compliance layer identifies "the token" by ASSET NAME, while the CIP-113
-// base layer gates and confines by POLICY. The mint allowlist is what keeps
-// those two views the same set. Relaxing it for CIP-68 is therefore only safe
-// while the extra name is known, quantity-capped, and creatable exactly once —
-// these tests pin all three.
+/// A registration of a CIP-68-named token: its reference NFT minted once and
+/// pinned in `carrier`.
+fn make_cip68_register_tx(carrier: Output) -> Transaction {
+  make_register_tx(
+    from_asset(test_issuance_policy_id, test_reference_asset_name, 1),
+    [carrier],
+    [test_admin_hash],
+  )
+}
+
+/// `Register` for a deployment whose security token is `name`.
+fn register_named(name: ByteArray, tx: Transaction) -> Bool {
+  run_withdraw_named(name, register_redeemer(), tx)
+}
+
+/// `Register` for the `(333)` CIP-68 deployment.
+fn register_cip68(tx: Transaction) -> Bool {
+  register_named(test_cip68_333_name, tx)
+}
+
+/// A carrier output holding exactly `name` ×1 under the issuance policy, at
+/// the programmable base, owned by the admin, with a CIP-68 datum.
+fn make_carrier_for(name: ByteArray) -> Output {
+  Output {
+    ..make_reference_nft_output(),
+    value: merge(
+      from_lovelace(2_000_000),
+      from_asset(test_issuance_policy_id, name, 1),
+    ),
+  }
+}
 
 /// A reference-NFT output: at the programmable base, with an owner.
 fn make_reference_nft_output_for_owner(owner_hash: ByteArray) -> Output {
@@ -2134,70 +1932,241 @@ fn test_cip68_datum() -> Data {
   raw
 }
 
-/// A registration that also mints the CIP-68 reference NFT alongside the first
-/// supply. POSITIVE control — without it the negatives below would pass even if
-/// the whole branch were broken.
-fn register_mint_with_reference_tx(extra_qty: Int, out: Output) -> Transaction {
-  let amount = 1_000
-  let base = make_register_mint_tx(
-    amount,
-    True,
-    make_registry_ref_input().output,
-    [test_pu_credential_hash],
+// ── Register: accepted shapes ────────────────────────────────────────────────
+
+/// POSITIVE CONTROL for every plain-name negative: the node is created,
+/// nothing is minted under the issuance policy, the admin signs.
+test register_plain_name_succeeds_minting_nothing() {
+  run_withdraw(
+    register_redeemer(),
+    make_register_tx(zero, [], [test_admin_hash]),
   )
-  Transaction {
-    ..base,
-    mint: merge(
-      base.mint,
-      from_asset(test_issuance_policy_id, test_reference_asset_name, extra_qty),
-    ),
-    // APPEND: the registry node must stay at output index 0, which is what
-    // `register_mint_redeemer` names. `list.push` would prepend.
-    outputs: list.concat(base.outputs, [out]),
-  }
 }
 
-// A registration with NO CIP-68 token: the way a deployment opts out now that
-// the metadata token is identified by PREFIX rather than by an exact-name
-// parameter. It simply does not mint one, and the pinned-output arm is skipped.
-//
-// This replaces an older regression that disabled CIP-68 by ALIASING
-// `reference_asset_name` to `security_asset_name`. That mechanism is gone with
-// the parameter: aliasing was what made "was a metadata token minted?"
-// ambiguous, and the prefix rules plus the not-protected assertion on
-// `security_asset_name` make the two sets disjoint by construction. A multi-unit
-// first mint is kept as the case that exposed the old bug.
-test register_mint_without_a_cip68_token_allows_a_multi_unit_first_mint() {
-  run_withdraw(
-    register_mint_redeemer(1_000),
-    make_register_mint_tx(
-      1_000,
-      True,
-      make_registry_ref_input().output,
-      [test_pu_credential_hash],
+test register_cip68_222_name_succeeds_minting_its_reference_nft() {
+  register_named(
+    test_cip68_222_name,
+    make_cip68_register_tx(make_reference_nft_output()),
+  )
+}
+
+/// POSITIVE CONTROL for every CIP-68-name negative.
+test register_cip68_333_name_succeeds_minting_its_reference_nft() {
+  register_cip68(make_cip68_register_tx(make_reference_nft_output()))
+}
+
+test register_cip68_444_name_succeeds_minting_its_reference_nft() {
+  register_named(
+    test_cip68_444_name,
+    make_cip68_register_tx(make_reference_nft_output()),
+  )
+}
+
+/// The metadata authority may be separate from the GlobalState admin. The admin
+/// still signs the registration, but the reference NFT may start at a
+/// different inline owner credential.
+test register_allows_a_reference_nft_owned_by_a_metadata_authority() {
+  register_cip68(
+    make_cip68_register_tx(
+      make_reference_nft_output_for_owner(test_dest_stake_hash),
     ),
   )
 }
 
-test register_mint_may_also_mint_the_cip68_reference_nft() {
+/// The mint rule is scoped to the issuance policy: a registration that also
+/// mints an unrelated policy's token (a bundled insert, say) is not refused
+/// for it.
+test register_scopes_its_mint_rule_to_the_issuance_policy() {
+  let tx = make_register_tx(zero, [], [test_admin_hash])
   run_withdraw(
-    register_mint_redeemer(1_000),
-    register_mint_with_reference_tx(1, make_reference_nft_output()),
+    register_redeemer(),
+    Transaction {
+      ..tx,
+      mint: merge(
+        tx.mint,
+        from_asset(
+          #"abababababababababababababababababababababababababababab",
+          "OTHER",
+          1,
+        ),
+      ),
+    },
   )
 }
 
-/// NEGATIVE TWIN. POSITIVE CONTROL:
-/// `register_mint_may_also_mint_the_cip68_reference_nft`, whose reference-NFT
-/// output differs from this one in exactly the stake credential
-/// (`Some(Inline(...))` there, `None` here). With no stake credential,
-/// `cip68_output_is_pinned`'s
+// ── Register: name rules ─────────────────────────────────────────────────────
+
+/// A `(100)`-labelled security name is refused, even minting nothing: the
+/// supply would be its own metadata token. Not a CIP-68 name, so the plain
+/// rules all pass; only the label rule refuses. POSITIVE CONTROL:
+/// `register_plain_name_succeeds_minting_nothing`.
+test register_rejects_a_reference_labelled_security_name() {
+  !register_named(
+    #"000643b0534543",
+    make_register_tx(zero, [], [test_admin_hash]),
+  )
+}
+
+/// A plain name must not be empty. POSITIVE CONTROL:
+/// `register_plain_name_succeeds_minting_nothing`.
+test register_rejects_an_empty_security_name() {
+  !register_named(#"", make_register_tx(zero, [], [test_admin_hash]))
+}
+
+/// A bare `(333)` label is a CIP-68 name with an empty body, which is refused.
+/// Minting nothing, it also fails the mint rule — so this one alone would not
+/// isolate the body rule; the next test does.
+test register_rejects_a_bare_label_security_name_minting_nothing() {
+  !register_named(#"0014df10", make_register_tx(zero, [], [test_admin_hash]))
+}
+
+/// A bare `(333)` label minting its (bare `(100)`) reference NFT ×1 into a
+/// well-formed pinned carrier: the mint and custody rules both pass, so only
+/// the body rule refuses.
+test register_rejects_a_bare_label_security_name_minting_its_reference() {
+  !register_named(
+    #"0014df10",
+    make_register_tx(
+      from_asset(test_issuance_policy_id, #"000643b0", 1),
+      [make_carrier_for(#"000643b0")],
+      [test_admin_hash],
+    ),
+  )
+}
+
+// ── Register: the two-way mint rule ──────────────────────────────────────────
+
+/// A CIP-68 name must mint its reference NFT.
+test register_cip68_name_rejects_a_missing_reference_nft() {
+  !register_cip68(make_register_tx(zero, [], [test_admin_hash]))
+}
+
+/// A plain name mints nothing — not even a reference NFT for "SEC", in a
+/// well-formed carrier.
+test register_plain_name_rejects_minting_a_reference_nft() {
+  !run_withdraw(
+    register_redeemer(),
+    make_register_tx(
+      from_asset(test_issuance_policy_id, #"000643b0534543", 1),
+      [make_carrier_for(#"000643b0534543")],
+      [test_admin_hash],
+    ),
+  )
+}
+
+/// A `(100)` name with another body is not this token's reference NFT, even
+/// alone in a well-formed carrier.
+test register_cip68_name_rejects_a_wrong_body_reference() {
+  !register_cip68(
+    make_register_tx(
+      from_asset(test_issuance_policy_id, test_wrong_body_reference_name, 1),
+      [make_carrier_for(test_wrong_body_reference_name)],
+      [test_admin_hash],
+    ),
+  )
+}
+
+/// The exact reference NFT, well-formed and alone in its carrier, PLUS a second
+/// `(100)` name in its own UTxO. Only the exact-shape mint rule refuses: a
+/// rule that merely counted the reference name would accept it.
+test register_cip68_name_rejects_two_reference_tokens() {
+  !register_cip68(
+    make_register_tx(
+      merge(
+        from_asset(test_issuance_policy_id, test_reference_asset_name, 1),
+        from_asset(test_issuance_policy_id, test_wrong_body_reference_name, 1),
+      ),
+      [
+        make_reference_nft_output(),
+        make_carrier_for(test_wrong_body_reference_name),
+      ],
+      [test_admin_hash],
+    ),
+  )
+}
+
+/// The reference NFT is an NFT. Two of it would be a second, uncapped supply
+/// under the security token's own policy id.
+test register_cip68_name_rejects_a_reference_quantity_of_two() {
+  !register_cip68(
+    make_register_tx(
+      from_asset(test_issuance_policy_id, test_reference_asset_name, 2),
+      [
+        Output {
+          ..make_reference_nft_output(),
+          value: merge(
+            from_lovelace(2_000_000),
+            from_asset(test_issuance_policy_id, test_reference_asset_name, 2),
+          ),
+        },
+      ],
+      [test_admin_hash],
+    ),
+  )
+}
+
+/// `Register` never mints supply: the first supply is a later `MintBurn`,
+/// which applies the power-user, destination and cap rules a registration
+/// does not.
+test register_plain_name_rejects_minting_supply() {
+  !run_withdraw(
+    register_redeemer(),
+    make_register_tx(
+      from_asset(test_issuance_policy_id, test_security_asset_name, 1_000),
+      [make_dest_output(1_000)],
+      [test_admin_hash],
+    ),
+  )
+}
+
+/// Nor alongside the reference NFT, whose carrier is well-formed.
+test register_cip68_name_rejects_minting_supply_alongside_its_reference() {
+  !register_cip68(
+    make_register_tx(
+      merge(
+        from_asset(test_issuance_policy_id, test_reference_asset_name, 1),
+        from_asset(test_issuance_policy_id, test_cip68_333_name, 1_000),
+      ),
+      [
+        make_reference_nft_output(),
+        Output {
+          ..make_dest_output(1_000),
+          value: merge(
+            from_lovelace(2_000_000),
+            from_asset(test_issuance_policy_id, test_cip68_333_name, 1_000),
+          ),
+        },
+      ],
+      [test_admin_hash],
+    ),
+  )
+}
+
+/// THE CORE PROTECTION. A name that is neither the reference NFT nor anything
+/// else `Register` may mint is refused. Without this the extra name would be
+/// uncapped, unvetted at mint, and — because the transfer path filters by
+/// asset name — movable with no denylist or KYC check at all.
+test register_cip68_name_rejects_an_unknown_third_asset_name() {
+  !register_cip68(
+    make_register_tx(
+      merge(
+        from_asset(test_issuance_policy_id, test_reference_asset_name, 1),
+        from_asset(test_issuance_policy_id, "SHADOW", 1_000_000),
+      ),
+      [make_reference_nft_output()],
+      [test_admin_hash],
+    ),
+  )
+}
+
+// ── Register: the reference NFT's carrier ────────────────────────────────────
+
+/// With no stake credential on the carrier, `cip68_output_is_pinned`'s
 /// `expect Some(Inline(_owner)) = output.address.stake_credential` traps —
 /// hence `fail`.
-test register_mint_rejects_a_reference_nft_without_stake_credential() fail {
-  run_withdraw(
-    register_mint_redeemer(1_000),
-    register_mint_with_reference_tx(
-      1,
+test register_rejects_a_reference_nft_without_stake_credential() fail {
+  register_cip68(
+    make_cip68_register_tx(
       Output {
         ..make_reference_nft_output(),
         address: Address {
@@ -2209,128 +2178,242 @@ test register_mint_rejects_a_reference_nft_without_stake_credential() fail {
   )
 }
 
-/// The reference NFT is an NFT. Two of them would be a second, uncapped supply
-/// under the security token's own policy id.
-test register_mint_rejects_a_reference_quantity_above_one() {
-  !run_withdraw(
-    register_mint_redeemer(1_000),
-    register_mint_with_reference_tx(
-      2,
+/// A carrier whose datum is not the CIP-68 three-field constructor: the
+/// reference NFT cannot be created holding something a CIP-68 reader cannot
+/// parse. `cip68.output_is_well_formed` traps.
+test register_rejects_a_reference_nft_with_a_malformed_datum() fail {
+  register_cip68(
+    make_cip68_register_tx(
+      Output {
+        ..make_reference_nft_output(),
+        datum: InlineDatum(builtin.constr_data(0, [])),
+      },
+    ),
+  )
+}
+
+/// A carrier that ALSO holds security tokens. Metadata must never carry value:
+/// every compliance scan is scoped to the security asset name and would not
+/// look at this UTxO. `cip68.output_is_well_formed` traps.
+test register_rejects_a_reference_nft_holding_security_tokens() fail {
+  register_cip68(
+    make_cip68_register_tx(
       Output {
         ..make_reference_nft_output(),
         value: merge(
-          from_lovelace(2_000_000),
-          from_asset(test_issuance_policy_id, test_reference_asset_name, 2),
+          make_reference_nft_output().value,
+          from_asset(test_issuance_policy_id, test_cip68_333_name, 10),
         ),
       },
     ),
   )
 }
 
-/// NEGATIVE TWIN of `register_mint_may_also_mint_the_cip68_reference_nft`.
-/// THE CIP-68 CUSTODY DECISION: the metadata token must start life ALONE in
-/// its own UTxO. Here it shares ONE output with the first supply instead —
-/// `co_located_dest` carries both `test_reference_asset_name` and 1_000 of
-/// `test_security_asset_name`.
-///
-/// FAILURE MODE CHANGED, deliberately, when the protected-prefix rules landed.
-/// The co-location rule used to be a `quantity_of(.., security_asset_name) == 0`
-/// conjunct inside the pinning function, which returned a clean `False` into the
-/// branch's `and { }` — hence `!run_withdraw` originally. It is now subsumed by
-/// `cip68.output_is_well_formed`, which asserts the whole value structurally
-/// (`expect [Pair(ada, _), Pair(policy, names)]` … `expect [Pair(name, 1)]`) and
-/// therefore TRAPS. The accepted set is identical — this transaction was
-/// rejected before and is rejected now — so the test keeps its meaning and
-/// changes only its annotation, `!` to `fail`.
-test register_mint_rejects_a_reference_nft_co_located_with_supply() fail {
-  let amount = 1_000
-  let base = make_register_mint_tx(
-    amount,
-    True,
-    make_registry_ref_input().output,
-    [test_pu_credential_hash],
-  )
-  let co_located_dest = Output {
-    ..make_dest_output(amount),
-    value: merge(
-      make_dest_output(amount).value,
-      from_asset(test_issuance_policy_id, test_reference_asset_name, 1),
-    ),
-  }
-  run_withdraw(
-    register_mint_redeemer(amount),
-    Transaction {
-      ..base,
-      // Same node at index 0 (what `register_mint_redeemer` names); the
-      // supply output at index 1 now also carries the reference NFT, in
-      // place of the reference NFT's own output.
-      outputs: [make_registry_ref_input().output, co_located_dest],
-      mint: merge(
-        base.mint,
-        from_asset(test_issuance_policy_id, test_reference_asset_name, 1),
-      ),
-    },
-  )
-}
+// ── Register: protocol state and authorisation ───────────────────────────────
 
-/// The metadata authority may be separate from the GlobalState admin. The admin
-/// still signs the registration, but the CIP-68 reference NFT may start at a
-/// different inline owner credential.
-test register_mint_allows_reference_nft_owned_by_metadata_authority() {
-  run_withdraw(
-    register_mint_redeemer(1_000),
-    register_mint_with_reference_tx(
-      1,
-      make_reference_nft_output_for_owner(test_dest_stake_hash),
-    ),
-  )
-}
-
-/// THE CORE PROTECTION, UNCHANGED. Any name that is neither the security asset
-/// nor the declared reference NFT is still refused. Without this the second
-/// name would be uncapped, unvetted at mint, and — because the transfer path
-/// filters by asset name — movable with no denylist or KYC check at all.
-test register_mint_rejects_an_unknown_third_asset_name() {
-  let amount = 1_000
-  let base = make_register_mint_tx(
-    amount,
-    True,
-    make_registry_ref_input().output,
-    [test_pu_credential_hash],
-  )
+/// INVARIANT 4: deactivation is terminal. The `!deactivated` conjunct returns
+/// False.
+test register_fails_when_deactivated() {
+  let base = make_register_tx(zero, [], [test_admin_hash])
   !run_withdraw(
-    register_mint_redeemer(amount),
+    register_redeemer(),
+    Transaction { ..base, reference_inputs: [make_gs_ref_input_deactivated()] },
+  )
+}
+
+test register_fails_without_admin_signature() {
+  !run_withdraw(register_redeemer(), make_register_tx(zero, [], []))
+}
+
+/// A UTxO carrying a GlobalState-shaped datum but NOT the NFT must not stand in
+/// for GlobalState: its datum would choose the admin.
+test register_rejects_a_global_state_without_its_nft() fail {
+  let base = make_register_tx(zero, [], [test_admin_hash])
+  run_withdraw(
+    register_redeemer(),
     Transaction {
       ..base,
-      mint: merge(
-        base.mint,
-        from_asset(test_issuance_policy_id, "SHADOW", 1_000_000),
-      ),
+      reference_inputs: [without_gs_nft(make_gs_ref_input())],
     },
+  )
+}
+
+// ── Register: registration structure (INVARIANT 5) ───────────────────────────
+
+/// The decoy node is a genuine registry node for a DIFFERENT token, so it
+/// must not be usable to derive this token's issuance policy — otherwise a
+/// redeemer could point at an unrelated policy and make every check below
+/// vacuous.
+test register_fails_when_node_output_names_another_minting_logic() fail {
+  let base = make_register_tx(zero, [], [test_admin_hash])
+  run_withdraw(
+    register_redeemer(),
+    Transaction { ..base, outputs: [make_decoy_registry_ref_input().output] },
+  )
+}
+
+/// Issuance-policy pin. `validators/regression.ak` covers the `MintBurn`
+/// branch; this covers the pin inside `verify_registration_structure`. The
+/// node names this deployment's proxy, so the pre-existing identity assertion
+/// PASSES — only `expected_issuance_policy_id` rejects it. `expect`, so
+/// `fail`.
+test register_fails_when_node_is_keyed_to_a_foreign_policy() fail {
+  let base = make_register_tx(zero, [], [test_admin_hash])
+  run_withdraw(
+    register_redeemer(),
+    Transaction {
+      ..base,
+      outputs: [make_registry_node_output_with_foreign_key()],
+    },
+  )
+}
+
+test register_fails_when_unfracking_is_enabled() fail {
+  // INVARIANT 5: unfracking would let a holder split this policy out of a
+  // shared UTxO without its transfer logic ever running.
+  let base = make_register_tx(zero, [], [test_admin_hash])
+  run_withdraw(
+    register_redeemer(),
+    Transaction {
+      ..base,
+      outputs: [make_registry_node_output_with_unfracking()],
+    },
+  )
+}
+
+test register_fails_when_transfer_logic_is_not_a_script() fail {
+  // Field 3 must be script-gated so the transfer side actually runs — a
+  // `VerificationKey` here would make `transfer_logic_script` unable to
+  // ever execute as transfer logic. POSITIVE CONTROL:
+  // `register_plain_name_succeeds_minting_nothing`, whose node (via
+  // `make_register_tx` -> `make_registry_ref_input`) differs from this one in
+  // exactly this field.
+  let base = make_register_tx(zero, [], [test_admin_hash])
+  run_withdraw(
+    register_redeemer(),
+    Transaction {
+      ..base,
+      outputs: [make_registry_node_output_with_vkey_transfer_logic()],
+    },
+  )
+}
+
+test register_fails_when_third_party_logic_is_not_a_script() fail {
+  // Same requirement, field 4. POSITIVE CONTROL: same as above.
+  let base = make_register_tx(zero, [], [test_admin_hash])
+  run_withdraw(
+    register_redeemer(),
+    Transaction {
+      ..base,
+      outputs: [make_registry_node_output_with_vkey_third_party_logic()],
+    },
+  )
+}
+
+/// Registration must declare this deployment as GlobalState in field 6:
+/// off-chain readers locate GlobalState through it.
+test register_rejects_a_foreign_global_state_cs() fail {
+  let node = TestRegistryNode {
+    key: test_issuance_policy_id,
+    next: #"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    minting_logic_script: Script(test_proxy_hash),
+    transfer_logic_script: Script(test_transfer_logic_hash),
+    third_party_transfer_logic_script: Script(test_third_party_logic_hash),
+    unfracking_logic_script: VerificationKey(#""),
+    global_state_cs: #"abababababababababababababababababababababababababababab",
+  }
+  let base = make_register_tx(zero, [], [test_admin_hash])
+  run_withdraw(
+    register_redeemer(),
+    Transaction {
+      ..base,
+      outputs: [
+        Output { ..make_registry_ref_input().output, datum: InlineDatum(node) },
+      ],
+    },
+  )
+}
+
+test register_fails_when_no_registry_nft_is_minted() fail {
+  // No registry NFT minted means this is an in-place node UPDATE, not an
+  // insert — that path re-points transfer logic and must never be reachable
+  // through a registration redeemer.
+  let base = make_register_tx(zero, [], [test_admin_hash])
+  run_withdraw(register_redeemer(), Transaction { ..base, mint: zero })
+}
+
+test register_cannot_smuggle_a_registry_node_update() fail {
+  // ATTACK: `registry_spend`'s in-place UPDATE path mints no registry NFT and
+  // demands the proxy's withdraw-0, which this validator's approval supplies.
+  // Requiring merely that SOME registry NFT is minted would not exclude
+  // updates — "some" is satisfiable by bundling an unrelated insert for a
+  // DIFFERENT token, while OUR node is simultaneously spent and re-emitted
+  // with `transfer_logic_script` re-pointed at a permissive script. The
+  // re-emitted node still names our proxy (the base layer freezes that field
+  // on update), still forbids unfracking and still pins our GlobalState, so
+  // every other structural check passes.
+  //
+  // Nothing is minted under the issuance policy, so the mint rule passes too.
+  // Only the admin signature is needed — so the registry NFT check must be
+  // scoped to THIS node.
+  let our_node_spent = Input {
+    output_reference: test_out_ref(7),
+    output: make_registry_ref_input().output,
+  }
+  let base = make_register_tx(zero, [], [test_admin_hash])
+  run_withdraw(
+    register_redeemer(),
+    Transaction {
+      ..base,
+      // our node is SPENT (the update), alongside whatever the bundled
+      // unrelated insert spends
+      inputs: [our_node_spent],
+      // the bundled unrelated insert mints a registry NFT, satisfying the
+      // "this is an insert" heuristic
+      mint: from_asset(test_registry_policy_id, "OtherTokenNode", 1),
+    },
+  )
+}
+
+// ── Steady state: MintBurn mints only `security_asset_name` ─────────────────
+
+/// A clean 1 000-unit mint of the `(333)` CIP-68 security name.
+fn cip68_supply_mint_tx() -> Transaction {
+  Transaction {
+    ..signed_mint_tx(1_000),
+    outputs: [
+      Output {
+        ..make_dest_output(1_000),
+        value: merge(
+          from_lovelace(2_000_000),
+          from_asset(test_issuance_policy_id, test_cip68_333_name, 1_000),
+        ),
+      },
+    ],
+    mint: from_asset(test_issuance_policy_id, test_cip68_333_name, 1_000),
+  }
+}
+
+/// POSITIVE CONTROL: a CIP-68-named token's supply mints exactly as a plain
+/// one's does.
+test mint_burn_succeeds_for_a_cip68_security_name() {
+  run_withdraw_named(
+    test_cip68_333_name,
+    mint_burn_redeemer(1_000),
+    cip68_supply_mint_tx(),
   )
 }
 
 /// Steady state mints supply and nothing else. Allowing the reference NFT here
 /// would let it be re-minted after the token is live, defeating the once-only
-/// property that registration gives it.
+/// property that registration gives it. Differs from
+/// `mint_burn_succeeds_for_a_cip68_security_name` in exactly the extra mint
+/// and its carrier.
 test steady_state_mint_rejects_the_reference_nft() {
-  let amount = 1_000
-  let base = make_withdraw_tx(
-    amount,
-    True,
-    False,
-    False,
-    make_denylist_root_ref_input(),
-    [make_dest_output(amount)],
-    [test_pu_credential_hash],
-  )
-  !run_withdraw(
-    MintBurn {
-      global_state_input_index: 0,
-      power_user_node_ref_input_index: 0,
-      minted_amount: amount,
-      destination_actions: [clean_dest_action()],
-    },
+  let base = cip68_supply_mint_tx()
+  !run_withdraw_named(
+    test_cip68_333_name,
+    mint_burn_redeemer(1_000),
     Transaction {
       ..base,
       mint: merge(
@@ -2342,155 +2425,77 @@ test steady_state_mint_rejects_the_reference_nft() {
   )
 }
 
-/// Issuance-policy pin, `RegisterMint`. `validators/regression.ak` covers the
-/// `MintBurn` branch; this covers the pin inside `verify_registration_structure`.
-/// The node names this deployment's proxy, so the pre-existing identity
-/// assertion PASSES — only `expected_issuance_policy_id` rejects it. `expect`,
-/// so `fail`.
-test register_mint_fails_when_node_is_keyed_to_a_foreign_policy() fail {
-  let amount = 1_000
-  run_withdraw(
-    register_mint_redeemer(amount),
-    make_register_mint_tx(
-      amount,
-      True,
-      make_registry_node_output_with_foreign_key(),
-      [test_pu_credential_hash],
-    ),
-  )
-}
-
-test register_structural_succeeds_when_admin_signs() {
-  run_withdraw(
-    register_structural_redeemer(),
-    make_register_structural_tx(zero, [test_admin_hash]),
-  )
-}
-
-/// Issuance-policy pin, `RegisterStructural` — the same shared
-/// `verify_registration_structure` pin, reached through the other caller.
-test register_structural_fails_when_node_is_keyed_to_a_foreign_policy() fail {
-  run_withdraw(
-    register_structural_redeemer(),
-    Transaction {
-      ..make_register_structural_tx(zero, [test_admin_hash]),
-      outputs: [make_registry_node_output_with_foreign_key()],
-    },
-  )
-}
-
-test register_structural_fails_without_admin_signature() {
+/// A second name beside the supply. POSITIVE CONTROL:
+/// `mint_succeeds_with_clean_destination_no_receiver_kyc`.
+test mint_burn_rejects_a_second_asset_name() {
+  let base = signed_mint_tx(1_000)
   !run_withdraw(
-    register_structural_redeemer(),
-    make_register_structural_tx(zero, []),
+    mint_burn_redeemer(1_000),
+    Transaction {
+      ..base,
+      mint: merge(
+        base.mint,
+        from_asset(test_issuance_policy_id, "SHADOW", 1_000_000),
+      ),
+    },
   )
 }
 
-test register_structural_fails_when_it_actually_mints() {
-  // Otherwise this variant would be a way to mint the first supply while
-  // skipping every power-user and receiver gate RegisterMint applies — and
-  // with GlobalState only referenced, the cap would go unenforced too.
-  !run_withdraw(
-    register_structural_redeemer(),
-    make_register_structural_tx(
-      from_asset(test_issuance_policy_id, test_security_asset_name, 1_000),
-      [test_admin_hash],
+// ── A registry INSERT is reachable through Register only ────────────────────
+//
+// The CIP-113 insert shape: another token's registry node is the covering
+// node, spent and re-emitted; our new node is emitted beside it; the new
+// node's registry NFT is minted. Each redeemer below is given that shape.
+
+fn covering_node_input() -> Input {
+  make_decoy_registry_ref_input()
+}
+
+/// Our new node at output 0, the re-emitted covering node at output 1.
+fn registry_insert_tx(base: Transaction) -> Transaction {
+  Transaction {
+    ..base,
+    inputs: list.concat(base.inputs, [covering_node_input()]),
+    outputs: list.concat(
+      [make_registry_ref_input().output, covering_node_input().output],
+      base.outputs,
     ),
-  )
-}
-
-test register_structural_fails_when_deactivated() fail {
-  let base = make_register_structural_tx(zero, [test_admin_hash])
-  run_withdraw(
-    register_structural_redeemer(),
-    Transaction { ..base, reference_inputs: [make_gs_ref_input_deactivated()] },
-  )
-}
-
-test register_structural_fails_when_unfracking_is_enabled() fail {
-  // INVARIANT 5: unfracking would let a holder split this policy out of a
-  // shared UTxO without its transfer logic ever running.
-  let base = make_register_structural_tx(zero, [test_admin_hash])
-  run_withdraw(
-    register_structural_redeemer(),
-    Transaction {
-      ..base,
-      outputs: [make_registry_node_output_with_unfracking()],
-    },
-  )
-}
-
-test register_structural_fails_when_transfer_logic_is_not_a_script() fail {
-  // Field 3 must be script-gated so the transfer side actually runs — a
-  // `VerificationKey` here would make `transfer_logic_script` unable to
-  // ever execute as transfer logic. POSITIVE CONTROL:
-  // `register_structural_succeeds_when_admin_signs`, whose node (via
-  // `make_register_structural_tx` -> `make_registry_ref_input`) differs
-  // from this one in exactly this field.
-  let base = make_register_structural_tx(zero, [test_admin_hash])
-  run_withdraw(
-    register_structural_redeemer(),
-    Transaction {
-      ..base,
-      outputs: [make_registry_node_output_with_vkey_transfer_logic()],
-    },
-  )
-}
-
-test register_structural_fails_when_third_party_logic_is_not_a_script() fail {
-  // Same requirement, field 4. POSITIVE CONTROL: same as above.
-  let base = make_register_structural_tx(zero, [test_admin_hash])
-  run_withdraw(
-    register_structural_redeemer(),
-    Transaction {
-      ..base,
-      outputs: [make_registry_node_output_with_vkey_third_party_logic()],
-    },
-  )
-}
-
-test register_structural_fails_when_no_registry_nft_is_minted() fail {
-  // No registry NFT minted means this is an in-place node UPDATE, not an
-  // insert — that path re-points transfer logic and must never be reachable
-  // through a registration redeemer.
-  let base = make_register_structural_tx(zero, [test_admin_hash])
-  run_withdraw(
-    register_structural_redeemer(),
-    Transaction { ..base, mint: zero },
-  )
-}
-
-test register_structural_cannot_smuggle_a_registry_node_update() fail {
-  // ATTACK: `registry_spend`'s in-place UPDATE path mints no registry NFT and
-  // demands the proxy's withdraw-0, which this validator's approval supplies.
-  // The Register variants try to exclude updates by requiring that SOME
-  // registry NFT is minted — but "some" is satisfiable by bundling an
-  // unrelated insert for a DIFFERENT token, while OUR node is simultaneously
-  // spent and re-emitted with `transfer_logic_script` re-pointed at a
-  // permissive script. The re-emitted node still names our proxy (the base
-  // layer freezes that field on update), still forbids unfracking and still
-  // pins our GlobalState, so every structural check passes.
-  //
-  // Nothing is minted under the issuance policy, so the no-mint assertion
-  // passes too. Only the admin signature is needed — and re-pointing
-  // transfer logic is exactly the operation the codebase says must stay
-  // rejected "pending a deliberate authorisation design".
-  let our_node_spent = Input {
-    output_reference: test_out_ref(7),
-    output: make_registry_ref_input().output,
+    mint: merge(base.mint, from_asset(test_registry_policy_id, "Node", 1)),
   }
-  let base = make_register_structural_tx(zero, [test_admin_hash])
+}
+
+/// POSITIVE CONTROL for the two tests below.
+test registry_insert_with_a_register_redeemer_succeeds() {
+  let base = make_register_tx(zero, [], [test_admin_hash])
   run_withdraw(
-    register_structural_redeemer(),
-    Transaction {
-      ..base,
-      // our node is SPENT (the update), alongside whatever the bundled
-      // unrelated insert spends
-      inputs: [our_node_spent],
-      // the bundled unrelated insert mints a registry NFT, satisfying the
-      // "this is an insert" heuristic
-      mint: from_asset(test_registry_policy_id, "OtherTokenNode", 1),
+    register_redeemer(),
+    registry_insert_tx(Transaction { ..base, outputs: [], mint: zero }),
+  )
+}
+
+/// A valid supply mint carrying the insert components. INVARIANT 1: the
+/// spent covering node trips the MintBurn no-registry-node-spent guard.
+test registry_insert_with_a_mint_burn_redeemer_is_rejected() fail {
+  let base = signed_mint_tx(1_000)
+  run_withdraw(mint_burn_redeemer(1_000), registry_insert_tx(base))
+}
+
+/// The insert tx under `UpgradeRegistryNode`, aimed at the covering node as
+/// the spent node: it names another token's minting logic, so the spent-node
+/// identity assertion in `derive_issuance_policy_id_from_registry_node`
+/// traps.
+test registry_insert_with_an_upgrade_registry_node_redeemer_is_rejected() fail {
+  let base = make_register_tx(zero, [], [test_admin_hash])
+  let tx = registry_insert_tx(Transaction { ..base, outputs: [], mint: zero })
+  run_withdraw(
+    UpgradeRegistryNode {
+      registry_node_input_index: 1,
+      registry_node_output_index: 0,
+      global_state_location: GlobalStateReferenced {
+        global_state_ref_input_index: 0,
+      },
     },
+    tx,
   )
 }
 
@@ -2594,13 +2599,13 @@ test upgrade_fails_when_spent_node_is_keyed_to_a_foreign_policy() fail {
 
 // ── GlobalState may be spent instead of referenced ──────────────────────────
 //
-// `UpgradeRegistryNode` and `RegisterStructural` both read GlobalState for the
-// admin credential (and, for the upgrade, the lock) and nothing else, so both
-// were widened from a fixed reference index to a `GlobalStateLocation`. These
-// tests exercise the SPENT branch, which the widening made reachable and which
-// the platform does not build today — an unverified branch of shared,
-// security-relevant code is exactly what a future caller trips over. Contrast
-// `MintBurn`/`RegisterMint`, which keep a bare index because they MUST spend.
+// `UpgradeRegistryNode` and `Register` both read GlobalState for the admin
+// credential (and the deactivation flag, and for the upgrade the lock) and
+// nothing else, so both take a `GlobalStateLocation` rather than a fixed
+// reference index. These tests exercise the SPENT branch, which the platform
+// does not build today — an unverified branch of shared, security-relevant
+// code is exactly what a future caller trips over. Contrast `MintBurn`, which
+// keeps a bare index because it MUST spend.
 //
 // GlobalState is absent from `reference_inputs` in both fixtures, as it would
 // be in a real transaction that spends it (Conway rejects the overlap). The
@@ -2668,28 +2673,28 @@ test upgrade_gs_spent_fails_when_index_is_not_global_state() fail {
   )
 }
 
-test register_structural_succeeds_when_global_state_is_spent() {
+test register_succeeds_when_global_state_is_spent() {
   run_withdraw(
-    RegisterStructural {
+    Register {
       registry_node_output_index: 0,
       global_state_location: GlobalStateSpent { global_state_input_index: 0 },
     },
     Transaction {
-      ..make_register_structural_tx(zero, [test_admin_hash]),
+      ..make_register_tx(zero, [], [test_admin_hash]),
       inputs: [make_gs_ref_input()],
       reference_inputs: [],
     },
   )
 }
 
-test register_structural_gs_spent_still_requires_the_admin_signature() {
+test register_gs_spent_still_requires_the_admin_signature() {
   !run_withdraw(
-    RegisterStructural {
+    Register {
       registry_node_output_index: 0,
       global_state_location: GlobalStateSpent { global_state_input_index: 0 },
     },
     Transaction {
-      ..make_register_structural_tx(zero, []),
+      ..make_register_tx(zero, [], []),
       inputs: [make_gs_ref_input()],
       reference_inputs: [],
     },
@@ -2964,74 +2969,6 @@ test publish_rejects_credential_deregistration() {
   )
 }
 
-// ── RED: the protected-prefix rules the current code does not yet enforce ────
-
-/// A registration whose CIP-68 output carries a datum that is not the CIP-68
-/// three-field constructor. The shape rule exists so the metadata token cannot
-/// be created holding something a CIP-68 reader cannot parse.
-test register_mint_rejects_a_cip68_output_with_a_malformed_datum() fail {
-  run_withdraw(
-    register_mint_redeemer(1_000),
-    register_mint_with_reference_tx(
-      1,
-      Output {
-        ..make_reference_nft_output(),
-        datum: InlineDatum(builtin.constr_data(0, [])),
-      },
-    ),
-  )
-}
-
-/// A registration whose CIP-68 output ALSO holds security tokens. Metadata must
-/// never carry value: every compliance scan is scoped to the security asset
-/// name and would not look at this UTxO.
-test register_mint_rejects_a_cip68_output_holding_security_tokens() fail {
-  run_withdraw(
-    register_mint_redeemer(1_000),
-    register_mint_with_reference_tx(
-      1,
-      Output {
-        ..make_reference_nft_output(),
-        value: merge(
-          make_reference_nft_output().value,
-          from_asset(test_issuance_policy_id, test_security_asset_name, 10),
-        ),
-      },
-    ),
-  )
-}
-
-/// `security_asset_name` must not itself carry a protected prefix. If it did,
-/// every seizure and every transfer of the security token would be refused —
-/// so the misconfiguration has to fail closed at registration, where it is
-/// still cheap, rather than silently later.
-fn run_withdraw_with_protected_security_name(
-  redeemer: MintingAuthorityWithdrawRedeemer,
-  tx: Transaction,
-) {
-  minting_authority_validator.withdraw(
-    #"000643b0534543",
-    test_gs_policy_id,
-    test_registry_policy_id,
-    test_proxy_hash,
-    test_issuance_policy_id,
-    test_denylist_script_hash,
-    test_pu_script_hash,
-    test_transfer_logic_hash,
-    test_third_party_logic_hash,
-    redeemer,
-    Script(test_authority_hash),
-    tx,
-  )
-}
-
-test registration_rejects_a_protected_security_asset_name() fail {
-  run_withdraw_with_protected_security_name(
-    register_structural_redeemer(),
-    make_register_structural_tx(zero, [test_admin_hash]),
-  )
-}
-
 // ── the GlobalState logic can never stand in for the operator ────────────────
 //
 // A supply change spends GlobalState, so the logic named in its field 0 runs as
@@ -3083,8 +3020,8 @@ test burn_rejects_an_operator_that_is_the_global_state_logic() {
 // ── F08: registry fields 3 and 4 are pinned to this authority's build ──────
 //
 // Every case below differs from its positive control only in fields 3 and 4.
-// Registration resolves through `make_register_structural_tx`, the upgrade
-// through `make_upgrade_tx`; `run_withdraw` builds the upgrade authority with
+// Registration resolves through `make_register_tx`, the upgrade through
+// `make_upgrade_tx`; `run_withdraw` builds the upgrade authority with
 // the NEW transfer script, as the documented upgrade procedure does.
 
 fn registry_node_naming(
@@ -3105,9 +3042,9 @@ fn registry_node_naming(
 
 fn register_naming(transfer_logic: Credential, third_party_logic: Credential) {
   run_withdraw(
-    register_structural_redeemer(),
+    register_redeemer(),
     Transaction {
-      ..make_register_structural_tx(zero, [test_admin_hash]),
+      ..make_register_tx(zero, [], [test_admin_hash]),
       outputs: [registry_node_naming(transfer_logic, third_party_logic)],
     },
   )
@@ -3208,10 +3145,10 @@ test an_authority_built_with_one_hash_for_both_scripts_refuses_registration() fa
     test_pu_script_hash,
     test_transfer_logic_hash,
     test_transfer_logic_hash,
-    register_structural_redeemer(),
+    register_redeemer(),
     Script(test_authority_hash),
     Transaction {
-      ..make_register_structural_tx(zero, [test_admin_hash]),
+      ..make_register_tx(zero, [], [test_admin_hash]),
       outputs: [
         registry_node_naming(
           Script(test_transfer_logic_hash),
@@ -3314,19 +3251,6 @@ test mint_rejects_a_global_state_input_without_its_nft() fail {
   )
 }
 
-test register_mint_rejects_a_global_state_input_without_its_nft() fail {
-  let tx = make_register_mint_tx(
-    1_000,
-    True,
-    make_registry_ref_input().output,
-    [test_pu_credential_hash],
-  )
-  run_withdraw(
-    register_mint_redeemer(1_000),
-    Transaction { ..tx, inputs: [without_gs_nft(make_gs_input_with_admin())] },
-  )
-}
-
 /// INVARIANT 1: a mint may not spend a registry node.
 test mint_rejects_spending_a_registry_node() fail {
   run_withdraw(
@@ -3335,20 +3259,6 @@ test mint_rejects_spending_a_registry_node() fail {
       ..signed_mint_tx(1_000),
       inputs: [make_gs_input(False), make_registry_ref_input()],
     },
-  )
-}
-
-/// RegisterMint needs the GlobalState admin as well as the minting operator.
-test register_mint_requires_the_admin_signature() {
-  let tx = make_register_mint_tx(
-    1_000,
-    True,
-    make_registry_ref_input().output,
-    [test_pu_credential_hash],
-  )
-  !run_withdraw(
-    register_mint_redeemer(1_000),
-    Transaction { ..tx, extra_signatories: [test_pu_credential_hash] },
   )
 }
 
@@ -3368,29 +3278,6 @@ test burn_rejects_an_operator_without_can_burn() {
       False,
       make_denylist_root_ref_input(),
       [],
-      [test_pu_credential_hash],
-    ),
-  )
-}
-
-/// Registration must declare this deployment as GlobalState in field 6:
-/// off-chain readers locate GlobalState through it.
-test register_mint_rejects_a_foreign_global_state_cs() fail {
-  let node = TestRegistryNode {
-    key: test_issuance_policy_id,
-    next: #"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-    minting_logic_script: Script(test_proxy_hash),
-    transfer_logic_script: Script(test_transfer_logic_hash),
-    third_party_transfer_logic_script: Script(test_third_party_logic_hash),
-    unfracking_logic_script: VerificationKey(#""),
-    global_state_cs: #"abababababababababababababababababababababababababababab",
-  }
-  run_withdraw(
-    register_mint_redeemer(1_000),
-    make_register_mint_tx(
-      1_000,
-      True,
-      Output { ..make_registry_ref_input().output, datum: InlineDatum(node) },
       [test_pu_credential_hash],
     ),
   )
@@ -3566,30 +3453,12 @@ test upgrade_registry_node_rejects_an_admin_equal_to_the_authority_itself() {
   )
 }
 
-test register_structural_rejects_an_admin_equal_to_the_minting_proxy() {
+test register_rejects_an_admin_equal_to_the_minting_proxy() {
   !run_withdraw(
-    register_structural_redeemer(),
+    register_redeemer(),
     Transaction {
-      ..make_register_structural_tx(zero, []),
+      ..make_register_tx(zero, [], []),
       reference_inputs: [gs_input_with_admin(test_proxy_hash, 5)],
-      withdrawals: withdrawals_with(test_proxy_hash),
-    },
-  )
-}
-
-test register_mint_rejects_an_admin_equal_to_the_minting_proxy() {
-  let tx = make_register_mint_tx(
-    1_000,
-    True,
-    make_registry_ref_input().output,
-    [test_pu_credential_hash],
-  )
-  !run_withdraw(
-    register_mint_redeemer(1_000),
-    Transaction {
-      ..tx,
-      inputs: [gs_input_with_admin(test_proxy_hash, 0)],
-      extra_signatories: [test_pu_credential_hash],
       withdrawals: withdrawals_with(test_proxy_hash),
     },
   )

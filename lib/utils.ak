@@ -291,8 +291,8 @@ pub fn expect_inline_datum(output: Output) -> Data {
 /// not "this is MY node", and the derived policy id is attacker-chosen.
 ///
 /// Every on-chain caller passes field index 2 today, all of them in the minting
-/// authority: `verify_registration_structure` (for `RegisterMint` and
-/// `RegisterStructural`) and both nodes of `UpgradeRegistryNode`. The transfer
+/// authority: `verify_registration_structure` (for `Register`) and both
+/// nodes of `UpgradeRegistryNode`. The transfer
 /// and seizure validators no longer call this: their issuance policy is pinned
 /// at compile time. Only a test fixture (`lib/tests.ak`) passes field 3. A
 /// FUTURE CALLER PASSING FIELD INDEX 3 OR 4 MUST compare the returned policy id
