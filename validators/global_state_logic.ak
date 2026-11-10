@@ -13,9 +13,7 @@ use aiken/primitive/bytearray
 use cardano/address.{Credential, Script}
 use cardano/assets.{without_lovelace}
 use cardano/certificate.{Certificate, RegisterCredential}
-use cardano/transaction.{
-  InlineDatum, Input, Mint, Output, Transaction, Withdraw,
-}
+use cardano/transaction.{InlineDatum, Input, Output, Transaction, Withdraw}
 use cardano/value
 use constants
 use types/global_state.{
@@ -24,10 +22,11 @@ use types/global_state.{
   PauseTransfers, RemoveTrustedEntity, RotateAdmin, RotateGlobalStateScript,
   RotateMintingScript, SetMintableAmount, SetRequiresReceiverKyc,
   SetRequiresSenderKyc, UpdateMemberRootHash, UpdateTrustedEntity,
-  decode_global_state, decode_global_state_core, idx_admin_credential_hash,
-  idx_deactivated, idx_mintable_amount, idx_minting_script_credential_hash,
-  idx_power_user_linked_list_policy_id, set_admin_credential_hash,
-  set_deactivated, set_global_state_script_credential_hash, set_member_root_hash,
+  decode_global_state, decode_global_state_core, get_mintable_amount,
+  idx_admin_credential_hash, idx_deactivated, idx_mintable_amount,
+  idx_minting_script_credential_hash, idx_power_user_linked_list_policy_id,
+  set_admin_credential_hash, set_deactivated,
+  set_global_state_script_credential_hash, set_member_root_hash,
   set_mintable_amount, set_minting_script_credential_hash,
   set_requires_receiver_kyc, set_requires_sender_kyc, set_security_info,
   set_transfers_paused, set_trusted_entity_vkeys, set_upgrades_locked,
@@ -44,14 +43,26 @@ use utils.{must_be_signed_by_credential, must_run_script_withdrawal}
 // action dispatch, so every branch (`RotateGlobalStateScript` included) is held
 // to them by construction. Keep them there; a branch cannot opt out.
 //
-// INVARIANT: every action except MintSecurity rejects security-token mints,
-// burns and movements, also checked once before the dispatch. Together with
-// the minting_logic_script input-branch check, this is what makes
-// `mintable_amount` a binding supply cap on operators: the only way to mint a
-// security token in steady state is through MintSecurity, which decrements
-// `mintable_amount`. The cap itself is admin-settable via `SetMintableAmount`
-// until `upgrades_locked` — that branch writes the field but, like every
-// non-Mint branch, cannot mint alongside the write.
+// INVARIANT (security-token guard and supply cap): every action except
+// MintSecurity rejects security-token mints, burns and movements, also checked
+// once before the dispatch. MintSecurity may write only field 5
+// (`mintable_amount`, which must stay an Int), and only in a transaction that
+// mints or burns the security token under the issuance policy. It does not
+// count, bound or compute the amount: HOW MUCH the field moves is the frozen
+// minting proxy's same-transaction debit (minting_logic_script.ak), which
+// requires GlobalState spent and its output datum to be the input datum with
+// exactly `mintable_amount - minted` written, never below zero.
+// That a non-zero mint under the issuance policy means the minting proxy ran
+// is the CIP-113 base layer's guarantee (`issuance_mint` requires its
+// withdraw-0), cited here rather than re-checked. Counting is therefore not
+// duplicated here.
+//
+// A write of the counter outside a mint or burn is a cap amendment:
+// `SetMintableAmount`, admin-only, closed by `LockUpgrades`, and — like every
+// branch except MintSecurity — unable to share a transaction with any
+// security-token mint, burn or movement. After `LockUpgrades` the cap is final
+// only because the GlobalState logic installed at lock time can no longer be
+// rotated: post-lock finality rests on that logic.
 //
 // ADMIN: admin credential hash now lives in the input datum (field
 // `admin_credential_hash`). No compile-time owner parameter. Rotation via the
@@ -69,8 +80,12 @@ use utils.{must_be_signed_by_credential, must_run_script_withdrawal}
 //   2. `deactivated` is terminal (no action once set) and `upgrades_locked`
 //      is one-way and closes rotation, minting-script rotation and
 //      `SetMintableAmount`.
-//   3. MintSecurity keeps the supply-cap accounting, and every other action
-//      rejects security-token mints and movements.
+//   3. Every action except MintSecurity rejects security-token mints, burns
+//      and movements. MintSecurity writes only field 5, and only in a
+//      transaction that mints or burns the security token; the amount is the
+//      frozen minting proxy's debit. A counter write outside a mint is a cap
+//      amendment (`SetMintableAmount`: admin-only, closed by `LockUpgrades`,
+//      never beside a security-token mint, burn or movement).
 //   4. The frozen core (fields 0–5, `GlobalStateCore`) keeps its order, types
 //      and constructor 0, inline: the proxy, the minting proxy and the
 //      power-users and denylist lists read it and can never be redeployed.
@@ -150,7 +165,7 @@ validator global_state_logic(
     // nothing without a spent GlobalState. The redeemer's action is ignored;
     // its `global_state_output_index` names the GlobalState output.
     // Converted once: every path reads it twice (the genesis test below, then
-    // the security-token mint check or `MintSecurity`'s minted amount).
+    // the security-token mint check or `MintSecurity`'s non-zero-mint check).
     let mint = assets.to_value(self.mint)
     if value.quantity_of(
       mint,
@@ -264,8 +279,10 @@ validator global_state_logic(
 
       // Every action except MintSecurity rejects a concurrent security mint or
       // burn: that is what keeps the supply cap binding across all the
-      // non-cap-aware admin flows (on SetMintableAmount, a mint riding along on
-      // the cap write would never be decremented from it).
+      // non-cap-aware admin flows (on SetMintableAmount the minting proxy would
+      // still debit a mint riding along, but the one absolute value written
+      // would then be both a cap amendment and a debit; kept apart, every
+      // counter write is exactly one of the two).
       //
       // They also forbid the security token from moving through the
       // transaction at all — not merely from being minted or burned. Every validator that reads GlobalState as a SPENT input
@@ -304,7 +321,7 @@ validator global_state_logic(
         }
       }
       let is_mint_security = when redeemer.action is {
-        MintSecurity { .. } -> True
+        MintSecurity -> True
         _ -> False
       }
 
@@ -407,30 +424,27 @@ validator global_state_logic(
             // Every other action is this logic's only while it is the one installed.
             expect input_datum.global_state_script_credential_hash == own_hash
             when redeemer.action is {
-              MintSecurity { issuance_policy_redeemer_index } -> {
-                //issuance_logic.mint validator must be called
-                let issuance_policy_redeemer = utils.safe_list_at(
-                  self.redeemers,
-                  issuance_policy_redeemer_index,
-                )
-                expect issuance_policy_redeemer.1st == Mint(issuance_policy_id)
-                let minted_amount = value.quantity_of(
+              MintSecurity -> {
+                // Why this is enough: see the header. The security token is
+                // minted or burned, and only field 5 changes, to an Int; HOW
+                // MUCH is the frozen minting proxy's debit, not counted here.
+                let security_delta = value.quantity_of(
                   mint,
                   issuance_policy_id,
                   security_asset_name,
                 )
-                let remaining_amount = input_datum.mintable_amount - minted_amount
-                let expected_output_datum = set_mintable_amount(
-                  input_fields,
-                  remaining_amount,
+                let only_the_counter_changed = builtin.equals_data(
+                  set_mintable_amount(
+                    input_fields,
+                    get_mintable_amount(
+                      builtin.unconstr_fields(global_state_output_datum),
+                    ),
+                  ),
+                  global_state_output_datum,
                 )
                 and {
-                  //Remaining amount must NOT be negative
-                  remaining_amount >= 0,
-                  builtin.equals_data(
-                    expected_output_datum,
-                    global_state_output_datum,
-                  ),
+                  (security_delta != 0)?,
+                  only_the_counter_changed?,
                 }
               }
               PauseTransfers {

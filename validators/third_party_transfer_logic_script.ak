@@ -652,11 +652,10 @@ test force_transfer_works_while_paused() {
 
 // ── GlobalState may be spent instead of referenced ──────────────────────────
 //
-// The BURN shape. A burn must SPEND GlobalState — only then does
-// the GlobalState logic's `MintSecurity` branch run and credit the
-// burned supply back to `mintable_amount` — and it must also run THIS
-// withdrawal, because CIP-113's `ThirdPartyAct` is the only
-// programmable-logic-global branch a burn can take. Conway rejects a
+// The BURN shape. A burn must SPEND GlobalState — so that the minting
+// proxy can credit the burned supply back to `mintable_amount` — and it
+// must also run THIS withdrawal, because CIP-113's `ThirdPartyAct` is the
+// only programmable-logic-global branch a burn can take. Conway rejects a
 // transaction whose `inputs` and `reference_inputs` overlap
 // (`BabbageNonDisjointRefInputs`, observed on chain), so while this validator
 // resolved GlobalState exclusively from `reference_inputs` the burn was

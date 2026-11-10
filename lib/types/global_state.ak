@@ -20,10 +20,11 @@ pub type TrustedEntityMetadata =
 /// whose `inputs` and `reference_inputs` overlap — so any validator that only
 /// needs to READ the GlobalState datum must let the caller say which list it
 /// is in, or it silently dictates the shape of every transaction it takes part
-/// in. That is not hypothetical: a burn MUST spend GlobalState (only then does
-/// `global_state_logic`'s `MintSecurity` branch credit the burned
-/// supply back to `mintable_amount`), and any co-running validator hard-wired
-/// to `reference_inputs` makes that burn unbuildable.
+/// in. That is not hypothetical: a burn MUST spend GlobalState (the minting
+/// proxy refuses a mint or burn whose GlobalState is only referenced, and
+/// debits or credits `mintable_amount` in the spent UTxO's continuing output),
+/// and any co-running validator hard-wired to `reference_inputs` makes that
+/// burn unbuildable.
 ///
 /// Both forms are equally authentic: authenticity comes from the single
 /// GlobalState NFT, which is present wherever the UTxO appears. What the two
@@ -125,9 +126,11 @@ pub type GlobalStateDatum {
   // notes' residuals table). After granting or rotating any role, assert that
   // an operation exercising it without that operator's signature is REJECTED.
   minting_script_credential_hash: ByteArray,
-  //Remaining supply HEADROOM, not total supply. Decreases when tokens are
-  //minted, increases when tokens are burnt. The admin may also set it to an
-  //absolute value via `SetMintableAmount` until `upgrades_locked`. CORE FIELD
+  //Remaining supply HEADROOM, not total supply. The frozen minting proxy
+  //debits it on every mint and credits it on every burn, in the same
+  //transaction; `MintSecurity` is the GlobalState action that permits that
+  //one write. The admin may also set it to an absolute value via
+  //`SetMintableAmount` until `upgrades_locked`. CORE FIELD
   //5: its position and its Int type are frozen like the rest of the core, and
   //the outgoing side of a `RotateGlobalStateScript` keeps it unchanged, so a
   //rotation can never rewrite the remaining headroom.
@@ -463,9 +466,9 @@ pub fn resolve_global_state(
 /// can never be consumed again, and `global_state_logic` preserves
 /// it in the continuing output on every branch. So a UTxO carrying it IS the
 /// GlobalState, wherever it appears — spent as an input or merely
-/// referenced. Callers that need the supply cap enforced must additionally
-/// ensure it is SPENT (only then does the logic's `MintSecurity`
-/// branch run); this function alone does not distinguish the two.
+/// referenced. The supply cap is enforced by the minting proxy, which itself
+/// requires GlobalState SPENT for any mint or burn; this function alone does
+/// not distinguish the two.
 pub fn gs_datum_from_output(
   gs_output: Output,
   global_state_policy_id: ByteArray,
@@ -616,7 +619,11 @@ pub fn active_admin_from_ref_input(
 /// compile-time owner parameter is gone. Rotation happens via `RotateAdmin`
 /// with dual-signature (old + new admin).
 pub type GlobalStateSpendAction {
-  MintSecurity { issuance_policy_redeemer_index: Int }
+  /// Permits the one write a security-token mint or burn makes: field 5,
+  /// `mintable_amount`, and nothing else, in a transaction that mints or
+  /// burns the security token under the issuance policy. It does not count:
+  /// the amount written is checked by the frozen minting proxy's debit.
+  MintSecurity
   PauseTransfers {
     transfers_paused: Bool,
     power_user_node_ref_input_index: Int,

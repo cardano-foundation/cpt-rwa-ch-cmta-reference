@@ -10,9 +10,10 @@ pub type ThirdPartyTransferLogicScriptWithdrawRedeemer {
   /// spend validator having run, so it accepts either form. Demanding a
   /// reference input, as this field did when it was a bare
   /// `global_state_ref_input_index`, made the BURN unbuildable: a burn must
-  /// SPEND GlobalState so `MintSecurity` credits the supply back, this
-  /// withdrawal is not droppable from a burn (CIP-113's `ThirdPartyAct` is the
-  /// only programmable-logic-global branch a burn can take), and Conway
+  /// SPEND GlobalState so the minting proxy can credit the burned supply
+  /// back to `mintable_amount`, this withdrawal is not droppable from a burn
+  /// (CIP-113's `ThirdPartyAct` is the only programmable-logic-global branch
+  /// a burn can take), and Conway
   /// rejects a transaction that both spends and references one UTxO.
   global_state_location: GlobalStateLocation,
   power_user_node_ref_input_index: Int,

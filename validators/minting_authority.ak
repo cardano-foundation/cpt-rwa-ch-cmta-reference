@@ -58,13 +58,13 @@ use utils.{must_be_signed_by_credential}
 ///      re-points `transfer_logic_script` /
 ///      `third_party_transfer_logic_script` at permissive scripts,
 ///      permanently destroying transfer-side compliance. IRREVERSIBLE.
-///   2. GLOBALSTATE MUST BE SPENT for any supply change, so its
-///      `MintSecurity` branch runs and decrements `mintable_amount`. "Its"
-///      means whichever logic GlobalState datum field 0 names (the proxy
-///      requires its withdraw-0) — after a `RotateGlobalStateScript`, the new
-///      logic; every logic must keep this branch. Merely
-///      referencing it leaves the supply cap — a core CMTAT/BaFin invariant
-///      — entirely unenforced. IRREVERSIBLE (tokens already exist).
+///   2. GLOBALSTATE MUST BE SPENT for any supply change. The frozen minting
+///      proxy itself requires it, and debits the exact delta from
+///      `mintable_amount` on every mint and burn, so no authority can bypass
+///      the cap — a core CMTAT/BaFin invariant. `MintBurn` still requires the
+///      spend (its bare `global_state_input_index`); a replacement must not
+///      rely on a referenced GlobalState for a supply change. IRREVERSIBLE
+///      (tokens already exist).
 ///   3. ONLY THE NAMES EACH VARIANT ALLOWS may be minted under the issuance
 ///      policy. `MintBurn` mints or burns only `security_asset_name`
 ///      (`only_permitted_assets_minted`). `Register` mints nothing for a
@@ -86,6 +86,14 @@ use utils.{must_be_signed_by_credential}
 ///      and exists only for CIP-68 names. A replacement authority that mints
 ///      any other `(100)`-labelled name under the issuance policy creates a
 ///      token that neither the transfer nor the seizure logic polices.
+///
+///      DELIBERATE RESIDUE: this "only these names" rule lives in this
+///      replaceable authority, not in the frozen minting proxy. A replacement
+///      that drops it can mint other names under the issuance policy,
+///      uncapped. That is the admin's choice, the same trust as choosing the
+///      authority, and such an authority could already mint the real token to
+///      unvetted destinations. Only HOW MUCH of `security_asset_name` is
+///      frozen.
 ///   4. THE PROTOCOL MUST NOT BE `deactivated`. Deactivation is the terminal
 ///      decommissioning switch and is meant to be absolute.
 ///   5. REGISTRATION STRUCTURE, on the single `Register` variant: the node
@@ -269,16 +277,6 @@ validator minting_authority_validator(
           fields,
         )
         and {
-          // INVARIANT 7 — see the header. A MintBurn must change supply. One
-          // that mints nothing would run this authority, and with it the
-          // minting proxy, beside ANY GlobalState action (only MintSecurity
-          // may carry a mint or burn), where their withdrawals count as
-          // signatures. No legitimate flow needs it: this branch mints or
-          // burns only `security_asset_name`, so a zero delta means nothing is
-          // minted at all.
-          // `minted_amount` is bound to the ledger's delta inside
-          // `verify_mint_or_burn`.
-          (minted_amount != 0)?,
           // Steady state mints or burns supply and nothing else (INVARIANT
           // 3). A CIP-68 reference NFT is a registration-time artefact;
           // allowing one here would let it be re-minted after the token is
@@ -803,6 +801,14 @@ fn verify_mint_or_burn(
   }
 
   and {
+    // INVARIANT 7 — see the header. A MintBurn must change supply. One that
+    // mints nothing would run this authority, and with it the minting proxy,
+    // beside ANY GlobalState action (only MintSecurity may carry a mint or
+    // burn), where their withdrawals count as signatures. No legitimate flow
+    // needs it: `MintBurn` mints or burns only `security_asset_name`, so a
+    // zero delta means nothing is minted at all. Applied to the ledger-derived
+    // `minted_amount`, which the next conjunct binds to the redeemer's.
+    (minted_amount != 0)?,
     //Redeemer contains the amount just for easy reference for eventual other contracts
     (minted_amount == expected_minted_amount)?,
     // Never the GlobalState logic named in field 0: a supply change spends
@@ -818,8 +824,8 @@ fn verify_mint_or_burn(
     // A zero-amount mint removes nothing from circulation, so it is a MINT,
     // not a burn: gating it on `can_burn` would let a burn-only operator
     // perform what is structurally a mint action merely because its supply
-    // delta happens to be zero. The sole caller, `MintBurn`, already refuses
-    // a zero delta (INVARIANT 7); this gate does not rely on that.
+    // delta happens to be zero. The first conjunct above already refuses a
+    // zero delta (INVARIANT 7); this gate does not rely on that.
     //If minted_amount >= 0, power user must be minter
     //If minted_amount < 0, power user must be burner
     if minted_amount >= 0 {

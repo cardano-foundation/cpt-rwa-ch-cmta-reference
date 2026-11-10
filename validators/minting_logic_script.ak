@@ -155,9 +155,10 @@ validator minting_logic_validator(
     // `constants.global_state_asset_name` (with the `idx_mintable_amount` and
     // `gs_core_field_count` they rely on), as well as the stdlib functions they
     // use. After launch, editing any of them changes this hash and so the
-    // token. Before launch the hash changed deliberately twice: the frozen-core
-    // layout of 2026-10-15 changed its reads, and the supply debit changed it
-    // again.
+    // token. Before launch the hash changed deliberately: (a) when the
+    // frozen-core layout changed its reads (2026-10-15, and again when
+    // `mintable_amount` moved into the core), and (b) when the supply debit
+    // was added.
     let gs_output: Output = when redeemer.global_state_location is {
       GlobalStateSpent { global_state_input_index } ->
         utils.safe_list_at(self.inputs, global_state_input_index).output
@@ -874,6 +875,30 @@ test mint_keeps_appended_fields_unchanged() {
       100,
     ),
   )
+}
+
+/// The burn direction of `mint_without_the_debit_fails`: 100 are burned and
+/// the output datum equals the input datum, so the counter is not credited.
+/// Only the counter check refuses.
+test burn_without_the_credit_fails() {
+  let d = gs_with_headroom(1_000_000)
+  !run_withdraw(spent_redeemer(), mint_tx(d, d, -100))
+}
+
+test burn_with_global_state_only_referenced_fails() fail {
+  // The burn direction of the test below: GS is a reference input, yet the
+  // outputs hold, at the redeemer's output index, a copy of the GS output
+  // credited by exactly the 100 burned. Only the spent-location requirement
+  // traps.
+  let d = gs_with_headroom(1_000_000)
+  run_withdraw(
+    referenced_redeemer(),
+    Transaction {
+      ..referenced_tx(d),
+      outputs: [gs_output_of(debited(d, -100))],
+      mint: sec_mint(-100),
+    },
+  ) || True
 }
 
 test mint_with_global_state_only_referenced_fails() fail {

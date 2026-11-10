@@ -101,8 +101,8 @@ pub type MintingAuthorityWithdrawRedeemer {
     /// upgrading a registry node in the same transaction that spends
     /// GlobalState (Conway rejects the overlap). Contrast `MintBurn` above,
     /// whose bare `global_state_input_index` is load-bearing: it MUST spend,
-    /// or `MintSecurity` never runs and the supply cap goes unenforced. The
-    /// type carries that distinction.
+    /// because the frozen minting proxy refuses a mint or burn whose
+    /// GlobalState is only referenced. The type carries that distinction.
     global_state_location: GlobalStateLocation,
   }
 }
