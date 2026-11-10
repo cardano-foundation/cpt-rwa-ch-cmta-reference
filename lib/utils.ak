@@ -39,6 +39,26 @@ use types/power_users.{PowerUser}
 /// check this: whether a hash names something that genuinely decides is not
 /// visible on chain.
 ///
+/// WHAT IS REFUSED ON CHAIN, AND WHERE. This helper
+/// stays neutral; the refusals sit at the role checks, so a later rotation
+/// cannot reopen them. They cover the scripts whose withdraw-0 someone other
+/// than the role holder can put into a transaction:
+///   * the minting authority, for every operator and admin it checks (through
+///     its `role_signed`): its own hash, the minting proxy, and the transfer
+///     and seizure scripts it pins;
+///   * the seizure logic, for the `can_force_transfer` operator: its own hash
+///     and the current minting authority (GlobalState field 4);
+///   * GlobalState: the admin is never the minting authority (genesis,
+///     `RotateAdmin`, `RotateMintingScript`), and field 0 is never the admin
+///     or the authority (genesis and every rotation);
+///   * a `MintBurn` that changes no supply authorises nothing, so no operator
+///     can make the authority and the proxy run beside an unrelated action.
+/// Everything else stays an OPERATOR RULE: this deployment's transfer logic
+/// (any role outside the authority) and seizure logic (list roles, beside a
+/// seizure), superseded scripts of this deployment, the base layer's own
+/// scripts, and the minting proxy for the seizure role. See the security
+/// notes' residuals table.
+///
 /// DEPLOYMENT REQUIREMENT, not enforced on-chain: after granting OR rotating
 /// ANY power-user role, run the smoke test prescribed in
 /// `lib/types/global_state.ak` — assert that an operation exercising that role
@@ -270,9 +290,13 @@ pub fn expect_inline_datum(output: Output) -> Data {
 /// those callers the identity assertion below proves only "some node names me",
 /// not "this is MY node", and the derived policy id is attacker-chosen.
 ///
-/// EVERY CALLER PASSING FIELD INDEX 3 OR 4 MUST additionally compare the
-/// returned policy id against a compile-time `expected_issuance_policy_id`.
-/// Both transfer validators do, on the line immediately after the call.
+/// Every on-chain caller passes field index 2 today, all of them in the minting
+/// authority: `verify_registration_structure` (for `RegisterMint` and
+/// `RegisterStructural`) and both nodes of `UpgradeRegistryNode`. The transfer
+/// and seizure validators no longer call this: their issuance policy is pinned
+/// at compile time. Only a test fixture (`lib/tests.ak`) passes field 3. A
+/// FUTURE CALLER PASSING FIELD INDEX 3 OR 4 MUST compare the returned policy id
+/// against a compile-time expected policy id, on the line after the call.
 ///
 /// Takes the script HASH rather than a `Credential`: callers either hold a hash
 /// already, or unwrap their withdrawal credential at the call site, where the

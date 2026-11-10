@@ -94,9 +94,13 @@ validator third_party_transfer_logic_validator(
 ) {
   withdraw(
     redeemer: ThirdPartyTransferLogicScriptWithdrawRedeemer,
-    _credential: Credential,
+    credential: Credential,
     self: Transaction,
   ) {
+    // A withdrawal credential may be a verification key, so this is a real
+    // assertion, not a formality.
+    expect Script(own_hash) = credential
+
     // Resolve and AUTHENTICATE GlobalState, then read every flag from the one
     // parsed datum — the full datum is needed anyway, so the cheap first-field
     // reader would only add a second NFT scan and a second decode. It also
@@ -215,6 +219,11 @@ validator third_party_transfer_logic_validator(
       // spends GlobalState, that logic's withdrawal is in the transaction and
       // would sign for the operator.
       power_user_node_key != gs_datum.global_state_script_credential_hash,
+      // Nor this script itself, whose withdrawal is in every seizure, nor the
+      // current minting authority, which a minter or burner can run beside a
+      // seizure that also mints or burns.
+      power_user_node_key != own_hash,
+      power_user_node_key != gs_datum.minting_script_credential_hash,
       must_be_signed_by_credential(self, power_user_node_key),
     }
   }
@@ -1301,4 +1310,110 @@ test seizure_to_a_fully_frozen_destination_fails() {
     outputs: [p_token_utxo(p_source_stake, 1_000)],
   }
   !run_third_party(p_redeemer(), tx)
+}
+
+// ── publish refuses deregistration ───────────────────────────────────────────
+test seizure_publish_rejects_credential_deregistration() {
+  !third_party_transfer_logic_validator.publish(
+    p_sec_name,
+    p_gs_policy,
+    p_issuance_policy,
+    p_denylist_script_hash,
+    p_pu_script_hash,
+    builtin.constr_data(0, []),
+    certificate.UnregisterCredential {
+      credential: Script(p_third_party_hash),
+      refund: Never,
+    },
+    p_tx(False, False, False, True, [p_seized_input()], [p_pu_cred]),
+  )
+}
+
+// ── The operator is never this script, nor the minting authority ─────────────
+//
+// This script's withdrawal is in every seizure, and a minter or burner can
+// run the minting authority beside a seizure that also mints or burns. An
+// operator keyed at either would be "signed" with nobody signing.
+
+const p_minting_authority_hash: ByteArray =
+  #"45454545454545454545454545454545454545454545454545454545"
+
+/// A `can_force_transfer` node keyed at `key`, at the list's own address.
+fn p_pu_node_keyed_at(key: ByteArray) -> Input {
+  let pu = PowerUser {
+    credential_hash: key,
+    is_admin: False,
+    can_mint: False,
+    can_burn: False,
+    can_pause: False,
+    can_force_transfer: True,
+  }
+  let element: Element<Data, PowerUser> = Element {
+    data: Node { data: pu },
+    link: None,
+  }
+  let base = p_pu_node_ref_input(True)
+  Input {
+    ..base,
+    output: Output {
+      ..base.output,
+      value: merge(
+        from_lovelace(2_000_000),
+        from_asset(
+          p_pu_policy,
+          bytearray.concat(constants.linked_list_node_key_prefix, key),
+          1,
+        ),
+      ),
+      datum: InlineDatum(element),
+    },
+  }
+}
+
+/// `p_gs_ref_input`'s GlobalState naming `authority` as the minting authority.
+fn p_gs_naming_authority(authority: ByteArray) -> Input {
+  let base = p_gs_ref_input(False, False, False)
+  expect InlineDatum(raw) = base.output.datum
+  expect gs_datum: GlobalStateDatum = raw
+  Input {
+    ..base,
+    output: Output {
+      ..base.output,
+      datum: InlineDatum(
+        GlobalStateDatum {
+          ..gs_datum,
+          minting_script_credential_hash: authority,
+        },
+      ),
+    },
+  }
+}
+
+/// A clean seizure, nobody signing, operator node keyed at `key` and `key`'s
+/// withdrawal present.
+fn p_unsigned_seizure(key: ByteArray, gs: Input) -> Bool {
+  run_third_party(
+    p_redeemer(),
+    Transaction {
+      ..p_tx(False, False, False, True, [p_seized_input()], []),
+      reference_inputs: [
+        p_registry_ref_input(),
+        gs,
+        p_denylist_root_ref_input(),
+        p_pu_node_keyed_at(key),
+      ],
+      withdrawals: [Pair(Script(key), 0)],
+    },
+  )
+}
+
+test force_transfer_rejects_an_operator_keyed_at_the_seizure_logic_itself() {
+  !p_unsigned_seizure(p_third_party_hash, p_gs_ref_input(False, False, False))
+}
+
+test force_transfer_rejects_an_operator_keyed_at_the_minting_authority() {
+  !p_unsigned_seizure(
+    p_minting_authority_hash,
+    p_gs_naming_authority(p_minting_authority_hash),
+  )
 }

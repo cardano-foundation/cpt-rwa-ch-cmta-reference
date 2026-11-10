@@ -1273,3 +1273,38 @@ test denylist_update_accepts_distinct_input_and_output_indices() {
     tx,
   )
 }
+
+// ── Add/Remove authorisation ─────────────────────────────────────────────────
+// Each test isolates one authorisation check of Add or Remove.
+
+const t_other_key: ByteArray =
+  #"06060606060606060606060606060606060606060606060606060606"
+
+test dl_add_rejects_a_power_user_without_is_admin() {
+  let tx = Transaction {
+    ..t_dl_insert_tx(t_key_28),
+    reference_inputs: [
+      t_gs_utxo(0, t_gs_datum(False)),
+      t_pu_node_input(1, t_power_user(False)),
+    ],
+  }
+  !t_run_denylist_add(t_key_28, tx)
+}
+
+test dl_add_rejects_a_missing_signature() {
+  !t_run_denylist_add(
+    t_key_28,
+    Transaction { ..t_dl_insert_tx(t_key_28), extra_signatories: [] },
+  )
+}
+
+test dl_add_rejects_a_node_keyed_other_than_the_redeemer() fail {
+  t_run_denylist_add(t_key_28, t_dl_insert_tx(t_other_key))
+}
+
+test dl_remove_rejects_a_missing_signature() {
+  !t_run_denylist_remove(
+    t_key_28,
+    Transaction { ..t_dl_remove_tx(t_key_28), extra_signatories: [] },
+  )
+}

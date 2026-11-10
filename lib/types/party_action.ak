@@ -11,7 +11,9 @@ use types/kyc_proof.{KycProof}
 /// - `denylist_ref_input_index` — the reference input holding the party's
 ///   denylist element, always checked: a covering node (the party is not
 ///   listed) or the party's own node (partially frozen; a sender must then
-///   pay at least the frozen amount back to itself, a receiver is admitted).
+///   pay back to outputs carrying its stake credential hash at least the
+///   frozen amount, or at least what it spends from that hash; a receiver is
+///   admitted).
 ///
 /// One type for every side and every path. There used to be four
 /// field-for-field identical copies (`TransferLogicScriptAction`,

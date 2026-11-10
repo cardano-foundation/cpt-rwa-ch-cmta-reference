@@ -308,7 +308,9 @@ MintBurn {
 }
 ```
 
-`minted_amount` must equal the actual signed quantity under `security_asset_name`. Supply
+`minted_amount` must equal the actual signed quantity under `security_asset_name`, and it must not
+be zero: a `MintBurn` that changes no supply is rejected, because it
+would let any `can_mint` operator run the authority and the proxy beside an unrelated action. Supply
 increases require one action per unique token destination, with the denylist gate (a covering
 node, or a partially frozen holder's own node) and receiver KYC when enabled. The authenticated,
 signing `can_mint` operator may mint to their own stake credential without a separate KYC proof;
@@ -338,20 +340,60 @@ then fails this deployment's destination checks. See
 
 The admin can change `minting_script_credential_hash` with GlobalState's `RotateMintingScript`.
 The permanent proxy will delegate **all** mint, burn and registration decisions to the new
-authority. Register its stake credential first. Before switching, verify that the replacement
-preserves supply-cap enforcement, GlobalState spending for supply changes, allowed asset names,
-registration structure and deactivation rules described at the top of
-[`minting_authority.ak`](../validators/minting_authority.ak). Test an unsigned mint and each
+authority. Register its stake credential first. The new hash must differ from the admin, from the
+current authority and from the GlobalState logic; nothing on chain checks that it names a working
+authority. Rebuild it from source at a pinned commit with every parameter and compare its hash
+before signing. Verify that the replacement preserves supply-cap enforcement,
+GlobalState spending for supply changes, allowed asset names, registration structure and
+deactivation rules described at the top of
+[`minting_authority.ak`](../validators/minting_authority.ak), and its
+invariants 7 and 8: **a `MintBurn` that changes no supply authorises nothing**, and role
+signatures refuse the scripts that run in the authority's own transactions.
+Test an unsigned mint and each
 power-user role without its authorised signature; each should reject. **No power-user credential,
 admin or minting authority may ever equal GlobalState datum field 0** (the GlobalState logic hash):
 every GlobalState spend carries that logic's withdrawal, and `must_be_signed_by_credential` accepts
 a withdrawal as a signature, so such a role would be exercisable by anyone. All three are guarded
 on chain — the admin and minting authority when written, an operator wherever its role is used
 (pause, mint/burn, seizure, sanctions) — so a misconfigured role fails closed; still avoid granting one.
+The same holds for the other scripts whose withdrawal someone else can produce, where
+the role is checked: the admin never equals the minting authority (genesis, `RotateAdmin`,
+`RotateMintingScript`); the minting authority refuses, as operator or admin, its own hash, the
+minting proxy and the transfer and seizure scripts it pins; the seizure logic refuses, as
+`can_force_transfer` operator, its own hash and the current minting authority.
+
+**Operator checklist — what is not refused on chain.** Keep these out of every role by procedure:
+
+* any script but the rebuilt authority as the **minting authority** (`RotateMintingScript`): beyond
+  the admin, the current authority and the GlobalState logic, the new value is not checked. A typo
+  or an unregistered hash blocks minting, the transfer logic lets anyone mint, and an earlier
+  authority build brings back what it lacked;
+* this deployment's **transfer logic**, for any role outside the minting authority (GlobalState
+  admin, pause, sanctions, seizure): its withdraw-0 passes for anyone when no token moves;
+* this deployment's **seizure logic**, as the admin of the power-users list or as a denylist
+  `is_admin` operator: any `can_force_transfer` operator can put a list write into a seizure that
+  references GlobalState;
+* **superseded scripts** of this deployment (a previous authority, GlobalState logic or seizure
+  logic): the refusals name only the current ones, and an older authority that still accepts a
+  zero-amount `MintBurn` runs for any `can_mint` operator through it;
+* the CIP-113 base layer's own scripts (programmable-logic-global, issuance logic), for roles
+  checked in transfers, seizures and mints;
+* the **minting proxy** as a `can_force_transfer` operator: a seizure that also mints or burns
+  carries the proxy's withdrawal;
+* the minting proxy as **admin**: no longer a takeover, since the proxy runs without the admin only
+  in `MintSecurity` transactions, but it locks the admin out of every admin action.
+
+Before granting a role, rotating the admin or rotating the authority, compare the credential
+against every script hash of this deployment, current and superseded, and of the base layer. A
+match is never legitimate. A
+behavioural smoke test misses some of these (a seizure test that mints nothing never runs the
+proxy), so do the comparison as well as the smoke test.
 
 To change transfer or third-party logic, first `RotateMintingScript` to a minting authority built
 with the new script hash (register its stake credential), because the continuing node must name
-exactly the scripts the active authority was built with (F08). Then update this token's CIP-113
+exactly the scripts the active authority was built with (F08). Then, in a **separate** transaction
+(the proxy reads the spent GlobalState, so during the rotation it still delegates to the outgoing
+authority), update this token's CIP-113
 registry node with
 `UpgradeRegistryNode { registry_node_input_index, registry_node_output_index,
 global_state_location }` on the minting authority withdrawal. The admin signs. The authority

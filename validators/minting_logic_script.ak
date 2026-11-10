@@ -452,3 +452,16 @@ test fails_when_deactivated_is_not_a_bool() fail {
     },
   )
 }
+
+// ── Deactivation ─────────────────────────────────────────────────────────────
+/// The permanent proxy refuses a deactivated protocol on its own.
+test proxy_fails_when_deactivated() {
+  !run_withdraw(
+    GlobalStateReferenced { global_state_ref_input_index: 0 },
+    Transaction {
+      ..base_tx(),
+      reference_inputs: [make_gs_input(test_minting_authority_hash, True)],
+      withdrawals: [Pair(Script(test_minting_authority_hash), 0)],
+    },
+  )
+}

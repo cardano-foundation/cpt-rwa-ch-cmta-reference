@@ -101,6 +101,9 @@ fn sanitise_initial_datum(datum: GlobalStateDatum, self_mint: Assets) -> Bool {
     bytearray.length(datum.global_state_script_credential_hash) == 28,
     datum.global_state_script_credential_hash != datum.minting_script_credential_hash,
     datum.global_state_script_credential_hash != datum.admin_credential_hash,
+    // The admin is never the minting authority either: the two roles stay two
+    // credentials from birth, as RotateAdmin and RotateMintingScript keep them.
+    datum.admin_credential_hash != datum.minting_script_credential_hash,
     // Born unlocked. Locking is a single admin transaction away, so a
     // deployment that wants immutability from day one loses nothing — but a
     // token that started locked could never be corrected at all.
@@ -771,4 +774,15 @@ test global_state_mint_fails_without_the_global_state_logic_withdrawal() {
 
 test global_state_mint_fails_when_only_another_script_withdraws() {
   !genesis_withdrawing([Pair(Script(t_new_gs_logic), 0)])
+}
+
+/// The admin and the minting authority are two credentials from birth.
+test sanitise_rejects_an_admin_equal_to_the_minting_authority() {
+  !sanitise_initial_datum(
+    GlobalStateDatum {
+      ..sanitise_datum(#"", 1),
+      minting_script_credential_hash: t_admin,
+    },
+    sanitise_mint(),
+  )
 }
