@@ -292,11 +292,9 @@ pub fn expect_inline_datum(output: Output) -> Data {
 /// those callers the identity assertion below proves only "some node names me",
 /// not "this is MY node", and the derived policy id is attacker-chosen.
 ///
-/// Every on-chain caller passes field index 2 today: the frozen minting proxy
-/// (validators/minting_logic_script.ak) on every run, with the node location
-/// taken from its redeemer and its own runtime hash as `expected_script_hash`;
-/// and, in the minting authority, `verify_registration_structure` (for
-/// `Register`) and both nodes of `UpgradeRegistryNode`. The transfer
+/// Every on-chain caller passes field index 2 today, and every one is in the
+/// minting authority: `verify_registration_structure` (for `Register`) and
+/// both nodes of `UpgradeRegistryNode`. The transfer
 /// and seizure validators no longer call this: their issuance policy is pinned
 /// at compile time. Only a test fixture (`lib/tests.ak`) passes field 3. A
 /// FUTURE CALLER PASSING FIELD INDEX 3 OR 4 MUST compare the returned policy id

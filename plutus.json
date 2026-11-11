@@ -1205,7 +1205,7 @@
     },
     "types/global_state/GlobalStateLocation": {
       "title": "GlobalStateLocation",
-      "description": "Where in a transaction the GlobalState UTxO is to be found.\n\n A UTxO cannot be both spent and referenced — Conway rejects a transaction\n whose `inputs` and `reference_inputs` overlap — so any validator that only\n needs to READ the GlobalState datum must let the caller say which list it\n is in, or it silently dictates the shape of every transaction it takes part\n in. That is not hypothetical: a burn MUST spend GlobalState (the minting\n proxy refuses a mint or burn whose GlobalState is only referenced, and\n debits or credits `mintable_amount` in the spent UTxO's continuing output),\n and any co-running validator hard-wired to `reference_inputs` makes that\n burn unbuildable.\n\n Both forms are equally authentic: authenticity comes from the single\n GlobalState NFT, which is present wherever the UTxO appears. What the two\n forms do NOT share is whether the GlobalState logic ran — so a caller that\n needs the datum's constraints ENFORCED (rather than merely read) must\n require `GlobalStateSpent` itself; this type deliberately does not decide\n that for anyone.",
+      "description": "Where in a transaction the GlobalState UTxO is to be found.\n\n A UTxO cannot be both spent and referenced — Conway rejects a transaction\n whose `inputs` and `reference_inputs` overlap — so any validator that only\n needs to READ the GlobalState datum must let the caller say which list it\n is in, or it silently dictates the shape of every transaction it takes part\n in. That is not hypothetical: a burn MUST spend GlobalState (the minting\n authority's `MintBurn` reads it from the spent inputs, and debits or\n credits `mintable_amount` in its continuing output), and any co-running\n validator hard-wired to `reference_inputs` makes that burn unbuildable.\n\n Both forms are equally authentic: authenticity comes from the single\n GlobalState NFT, which is present wherever the UTxO appears. What the two\n forms do NOT share is whether the GlobalState logic ran — so a caller that\n needs the datum's constraints ENFORCED (rather than merely read) must\n require `GlobalStateSpent` itself; this type deliberately does not decide\n that for anyone.",
       "anyOf": [
         {
           "title": "GlobalStateSpent",
@@ -1239,7 +1239,7 @@
       "anyOf": [
         {
           "title": "MintSecurity",
-          "description": "Permits the one write a security-token mint or burn makes: field 5,\n `mintable_amount`, and nothing else, in a transaction that mints or\n burns the security token under the issuance policy. It does not count:\n the amount written is checked by the frozen minting proxy's debit.",
+          "description": "Permits the one write a security-token mint or burn makes: field 5,\n `mintable_amount`, and nothing else, in a transaction that mints or\n burns the security token under the issuance policy. It does not count:\n the amount written is checked by the minting authority's debit.",
           "dataType": "constructor",
           "index": 0,
           "fields": []
@@ -1779,7 +1779,7 @@
           "fields": [
             {
               "title": "global_state_location",
-              "description": "WHERE GlobalState is, not just which reference input it is.\n\n This validator only READS the datum (`requires_receiver_kyc` to decide\n whether destinations need a proof, `deactivated` to refuse once the\n protocol is decommissioned) — it makes no claim that depends on the GS\n spend validator having run, so it accepts either form. Demanding a\n reference input, as this field did when it was a bare\n `global_state_ref_input_index`, made the BURN unbuildable: a burn must\n SPEND GlobalState so the minting proxy can credit the burned supply\n back to `mintable_amount`, this withdrawal is not droppable from a burn\n (CIP-113's `ThirdPartyAct` is the only programmable-logic-global branch\n a burn can take), and Conway\n rejects a transaction that both spends and references one UTxO.",
+              "description": "WHERE GlobalState is, not just which reference input it is.\n\n This validator only READS the datum (`requires_receiver_kyc` to decide\n whether destinations need a proof, `deactivated` to refuse once the\n protocol is decommissioned) — it makes no claim that depends on the GS\n spend validator having run, so it accepts either form. Demanding a\n reference input, as this field did when it was a bare\n `global_state_ref_input_index`, made the BURN unbuildable: a burn must\n SPEND GlobalState so the minting authority can credit the burned supply\n back to `mintable_amount`, this withdrawal is not droppable from a burn\n (CIP-113's `ThirdPartyAct` is the only programmable-logic-global branch\n a burn can take), and Conway\n rejects a transaction that both spends and references one UTxO.",
               "$ref": "#/definitions/types~1global_state~1GlobalStateLocation"
             },
             {

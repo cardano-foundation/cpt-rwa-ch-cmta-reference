@@ -48,14 +48,16 @@ use utils.{must_be_signed_by_credential, must_run_script_withdrawal}
 // once before the dispatch. MintSecurity may write only field 5
 // (`mintable_amount`, which must stay an Int), and only in a transaction that
 // mints or burns the security token under the issuance policy. It does not
-// count, bound or compute the amount: HOW MUCH the field moves is the frozen
-// minting proxy's same-transaction debit (minting_logic_script.ak), which
-// requires GlobalState spent and its output datum to be the input datum with
-// exactly `mintable_amount - minted` written, never below zero.
-// That a non-zero mint under the issuance policy means the minting proxy ran
-// is the CIP-113 base layer's guarantee (`issuance_mint` requires its
-// withdraw-0), cited here rather than re-checked. Counting is therefore not
-// duplicated here.
+// count, bound or compute the amount: HOW MUCH the field moves is the
+// installed minting authority's same-transaction debit (this repository's
+// `MintBurn` in minting_authority.ak), which requires GlobalState spent and
+// its continuing output datum to be the input datum with only
+// `mintable_amount - minted` written, never below zero.
+// That a non-zero mint under the issuance policy reaches that debit rests on
+// two guarantees, both cited here rather than re-checked: the minting proxy
+// ran (the CIP-113 base layer's `issuance_mint` requires its withdraw-0), and
+// the proxy requires the authority named in field 4 to run. Counting is
+// therefore not duplicated here. A replacement authority must keep the debit.
 //
 // A write of the counter outside a mint or burn is a cap amendment:
 // `SetMintableAmount`, admin-only, closed by `LockUpgrades`, and — like every
@@ -83,7 +85,7 @@ use utils.{must_be_signed_by_credential, must_run_script_withdrawal}
 //   3. Every action except MintSecurity rejects security-token mints, burns
 //      and movements. MintSecurity writes only field 5, and only in a
 //      transaction that mints or burns the security token; the amount is the
-//      frozen minting proxy's debit. A counter write outside a mint is a cap
+//      minting authority's debit. A counter write outside a mint is a cap
 //      amendment (`SetMintableAmount`: admin-only, closed by `LockUpgrades`,
 //      never beside a security-token mint, burn or movement).
 //   4. The frozen core (fields 0–5, `GlobalStateCore`) keeps its order, types
@@ -279,10 +281,10 @@ validator global_state_logic(
 
       // Every action except MintSecurity rejects a concurrent security mint or
       // burn: that is what keeps the supply cap binding across all the
-      // non-cap-aware admin flows (on SetMintableAmount the minting proxy would
-      // still debit a mint riding along, but the one absolute value written
-      // would then be both a cap amendment and a debit; kept apart, every
-      // counter write is exactly one of the two).
+      // non-cap-aware admin flows (on SetMintableAmount the minting authority
+      // would still debit a mint riding along, but the one absolute value
+      // written would then be both a cap amendment and a debit; kept apart,
+      // every counter write is exactly one of the two).
       //
       // They also forbid the security token from moving through the
       // transaction at all — not merely from being minted or burned. Every validator that reads GlobalState as a SPENT input
@@ -427,7 +429,7 @@ validator global_state_logic(
               MintSecurity -> {
                 // Why this is enough: see the header. The security token is
                 // minted or burned, and only field 5 changes, to an Int; HOW
-                // MUCH is the frozen minting proxy's debit, not counted here.
+                // MUCH is the minting authority's debit, not counted here.
                 let security_delta = value.quantity_of(
                   mint,
                   issuance_policy_id,
