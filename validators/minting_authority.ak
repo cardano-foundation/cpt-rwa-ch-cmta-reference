@@ -2240,6 +2240,21 @@ test register_fails_when_ref_index_is_not_global_state() fail {
   ) || True
 }
 
+/// Pins that the redeemer's GlobalState index is honoured, not assumed 0.
+test register_succeeds_with_global_state_at_a_non_zero_reference_index() {
+  run_withdraw(
+    Register { registry_node_output_index: 0, global_state_ref_input_index: 1 },
+    Transaction {
+      ..make_register_tx(zero, [], [test_admin_hash]),
+      reference_inputs: [
+        make_registry_ref_input(),
+        make_gs_ref_input(),
+        make_denylist_root_ref_input(),
+      ],
+    },
+  )
+}
+
 // ── Register: registration structure (INVARIANT 5) ───────────────────────────
 
 /// The decoy node is a genuine registry node for a DIFFERENT token, so it
