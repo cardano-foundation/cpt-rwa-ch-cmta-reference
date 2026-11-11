@@ -27,6 +27,11 @@ pub type MintingAuthorityWithdrawRedeemer {
     /// resolves (shared, transaction-wide data; a wrong index just fails the
     /// NFT check).
     global_state_input_index: Int,
+    /// Index into `self.outputs` — GlobalState's continuing output. `MintBurn`
+    /// requires it at GlobalState's address, with GlobalState's non-ADA
+    /// value, carrying the input datum with only field 5 (`mintable_amount`)
+    /// rewritten to `in − minted` (a burn raises it), never below zero.
+    global_state_output_index: Int,
     power_user_node_ref_input_index: Int,
     /// Amount minted (signed: positive for mint, negative for burn).
     minted_amount: Int,
@@ -101,8 +106,8 @@ pub type MintingAuthorityWithdrawRedeemer {
     /// upgrading a registry node in the same transaction that spends
     /// GlobalState (Conway rejects the overlap). Contrast `MintBurn` above,
     /// whose bare `global_state_input_index` is load-bearing: it MUST spend,
-    /// because the frozen minting proxy refuses a mint or burn whose
-    /// GlobalState is only referenced. The type carries that distinction.
+    /// because it debits `mintable_amount` in GlobalState's continuing output,
+    /// which only a spend has. The type carries that distinction.
     global_state_location: GlobalStateLocation,
   }
 }

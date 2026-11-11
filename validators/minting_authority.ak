@@ -41,13 +41,11 @@ use utils.{must_be_signed_by_credential}
 /// ============================================================================
 /// INVARIANTS ANY REPLACEMENT AUTHORITY MUST PRESERVE
 /// ============================================================================
-/// minting_logic_script.ak — the permanent proxy — decides only two things:
-/// the delegation (whichever script GlobalState names is running) and HOW
-/// MUCH, the same-transaction debit of `mintable_amount` by every mint or
-/// burn of the security token. That is what makes this validator fully
-/// replaceable, and it means everything listed below is enforced here or
-/// nowhere at all. A replacement that drops one of these does not
-/// merely lose a feature; in the first two cases it causes damage no later
+/// minting_logic_script.ak — the permanent proxy — checks NOTHING except that
+/// whichever script GlobalState names is running. That is what makes this
+/// validator fully replaceable, and it means everything listed below is
+/// enforced here or nowhere at all. A replacement that drops one of these does
+/// not merely lose a feature; in the first two cases it causes damage no later
 /// upgrade can undo, because the harm lands in the CIP-113 registry and in
 /// circulating supply rather than in this script.
 ///
@@ -59,13 +57,23 @@ use utils.{must_be_signed_by_credential}
 ///      re-points `transfer_logic_script` /
 ///      `third_party_transfer_logic_script` at permissive scripts,
 ///      permanently destroying transfer-side compliance. IRREVERSIBLE.
-///   2. GLOBALSTATE MUST BE SPENT for any supply change. The frozen minting
-///      proxy itself requires it, and debits the exact delta from
-///      `mintable_amount` on every mint and burn, so no authority can bypass
-///      the cap — a core CMTAT/BaFin invariant. `MintBurn` still requires the
-///      spend (its bare `global_state_input_index`); a replacement must not
-///      rely on a referenced GlobalState for a supply change. IRREVERSIBLE
+///   2. EVERY SUPPLY CHANGE IS DEBITED HERE — the supply cap, a core
+///      CMTAT/BaFin invariant. `MintBurn` spends GlobalState (its bare
+///      `global_state_input_index`), and GlobalState's continuing output
+///      (`global_state_output_index`) keeps its address and non-ADA value and
+///      carries the input datum with field 5 (`mintable_amount`) alone
+///      rewritten to `in − minted`, never below zero; a burn credits it
+///      (`debits_mintable_amount`). Neither the proxy nor the GlobalState
+///      logic counts anything: `MintSecurity` only permits the write. A
+///      replacement that drops the debit mints past the cap. IRREVERSIBLE
 ///      (tokens already exist).
+///
+///      Why here and not in the proxy: the proxy's hash is the token's
+///      issuance policy id, so a defect in a rule written there could never
+///      be fixed, while this authority can be rotated. Until `LockUpgrades`
+///      the admin can already set the cap with `SetMintableAmount`; after it,
+///      `RotateMintingScript` is closed, so the installed authority and its
+///      debit are permanent.
 ///   3. ONLY THE NAMES EACH VARIANT ALLOWS may be minted under the issuance
 ///      policy. `MintBurn` mints or burns only `security_asset_name`
 ///      (`only_permitted_assets_minted`). `Register` mints nothing for a
@@ -88,13 +96,12 @@ use utils.{must_be_signed_by_credential}
 ///      any other `(100)`-labelled name under the issuance policy creates a
 ///      token that neither the transfer nor the seizure logic polices.
 ///
-///      DELIBERATE RESIDUE: this "only these names" rule lives in this
-///      replaceable authority, not in the frozen minting proxy. A replacement
-///      that drops it can mint other names under the issuance policy,
-///      uncapped. That is the admin's choice, the same trust as choosing the
-///      authority, and such an authority could already mint the real token to
-///      unvetted destinations. Only HOW MUCH of `security_asset_name` is
-///      frozen.
+///      DELIBERATE RESIDUE: this "only these names" rule, like the supply
+///      debit, lives in this replaceable authority, not in the frozen minting
+///      proxy. A replacement that drops it can mint other names under the
+///      issuance policy, uncapped. That is the admin's choice, the same trust
+///      as choosing the authority, and such an authority could already mint
+///      the real token to unvetted destinations.
 ///   4. THE PROTOCOL MUST NOT BE `deactivated`. Deactivation is the terminal
 ///      decommissioning switch and is meant to be absolute.
 ///   5. REGISTRATION STRUCTURE, on the single `Register` variant: the node
@@ -235,10 +242,11 @@ validator minting_authority_validator(
     // during a CIP-113 insert — and in whether supply changes. In every case
     // the node is re-resolved and re-verified HERE against the proxy's known
     // hash; nothing is trusted from the proxy, which checks only the
-    // delegation and the supply debit.
+    // delegation.
     when redeemer is {
       MintBurn {
         global_state_input_index,
+        global_state_output_index,
         power_user_node_ref_input_index,
         minted_amount,
         destination_actions,
@@ -295,6 +303,16 @@ validator minting_authority_validator(
             denylist_script_hash,
             power_user_list_script_hash,
             role_signed,
+            self,
+          ),
+          // INVARIANT 2 — see the header. Last, so every other refusal fires
+          // first.
+          debits_mintable_amount(
+            gs_input.output,
+            fields,
+            global_state_output_index,
+            security_policy_id,
+            security_asset_name,
             self,
           ),
         }
@@ -494,6 +512,52 @@ fn only_permitted_assets_minted(
     dict.to_pairs(assets.tokens(self.mint, issuance_policy_id)),
     fn(entry) { entry.1st == security_asset_name },
   )
+}
+
+/// INVARIANT 2 — see the header. Every mint or burn of `security_asset_name`
+/// under `security_policy_id` is debited from GlobalState's `mintable_amount`
+/// in this same transaction: the continuing output at
+/// `global_state_output_index` keeps the spent GlobalState input's address and
+/// non-ADA value, and its inline datum is the input datum with field 5 alone
+/// set to `in − minted`, never below zero. A burn credits.
+///
+/// The amount is ledger truth, derived from `self.mint`, never the redeemer's.
+/// The datum is compared as Data, so every other field — core, tail and
+/// appended — is pinned too. It is the last conjunct of `MintBurn`, so every
+/// other refusal fires first.
+fn debits_mintable_amount(
+  gs_input: Output,
+  gs_fields: List<Data>,
+  global_state_output_index: Int,
+  security_policy_id: ByteArray,
+  security_asset_name: ByteArray,
+  self: Transaction,
+) -> Bool {
+  let minted = value.quantity_of(
+    assets.to_value(self.mint),
+    security_policy_id,
+    security_asset_name,
+  )
+  let gs_continuing = utils.safe_list_at(
+    self.outputs,
+    global_state_output_index,
+  )
+  expect InlineDatum(out_raw) = gs_continuing.datum
+  let remaining = global_state.get_mintable_amount(gs_fields) - minted
+  let same_address = gs_continuing.address == gs_input.address
+  let same_tokens = assets.without_lovelace(gs_continuing.value) == assets.without_lovelace(
+    gs_input.value,
+  )
+  let only_the_counter_moved = builtin.equals_data(
+    global_state.set_mintable_amount(gs_fields, remaining),
+    out_raw,
+  )
+  and {
+    (remaining >= 0)?,
+    same_address?,
+    same_tokens?,
+    only_the_counter_moved?,
+  }
 }
 
 /// INVARIANTS 3 and 5 — see the header. `Register`'s name rules and its mint
@@ -1386,8 +1450,27 @@ fn make_enterprise_dest_output(amount: Int) -> Output {
   }
 }
 
+/// GlobalState's continuing output for a `MintBurn` of `minted_amount`:
+/// `input`'s output with its datum's `mintable_amount` lowered by
+/// `minted_amount` (raised for a burn), everything else unchanged.
+fn debited_gs_output(input: Input, minted_amount: Int) -> Output {
+  expect InlineDatum(raw) = input.output.datum
+  expect gs_datum: GlobalStateDatum = raw
+  Output {
+    ..input.output,
+    datum: InlineDatum(
+      GlobalStateDatum {
+        ..gs_datum,
+        mintable_amount: gs_datum.mintable_amount - minted_amount,
+      },
+    ),
+  }
+}
+
 // Reference-input order: 0 = power-user node, 1 = registry node,
 // 2 = denylist covering node (the index the destination actions cite).
+// Output 0 is GlobalState's continuing output, debited by `minted_amount`
+// (INVARIANT 2); `outputs` follow it.
 fn make_withdraw_tx(
   minted_amount: Int,
   can_mint: Bool,
@@ -1404,7 +1487,10 @@ fn make_withdraw_tx(
       make_registry_ref_input(),
       denylist_ref,
     ],
-    outputs,
+    outputs: [
+      debited_gs_output(make_gs_input(requires_receiver_kyc), minted_amount),
+      ..outputs
+    ],
     fee: 0,
     mint: from_asset(
       test_issuance_policy_id,
@@ -1492,6 +1578,7 @@ test mint_succeeds_with_clean_destination_no_receiver_kyc() {
   let amount = 1_000
   let redeemer = MintBurn {
     global_state_input_index: 0,
+    global_state_output_index: 0,
     power_user_node_ref_input_index: 0,
     minted_amount: amount,
     destination_actions: [clean_dest_action()],
@@ -1514,6 +1601,7 @@ test mint_fails_when_destination_denylisted() {
   let amount = 1_000
   let redeemer = MintBurn {
     global_state_input_index: 0,
+    global_state_output_index: 0,
     power_user_node_ref_input_index: 0,
     minted_amount: amount,
     destination_actions: [clean_dest_action()],
@@ -1536,6 +1624,7 @@ test mint_fails_when_receiver_kyc_required_but_proof_invalid() {
   let amount = 1_000
   let redeemer = MintBurn {
     global_state_input_index: 0,
+    global_state_output_index: 0,
     power_user_node_ref_input_index: 0,
     minted_amount: amount,
     destination_actions: [clean_dest_action()],
@@ -1558,6 +1647,7 @@ test mint_to_authorizing_power_user_bypasses_receiver_kyc() {
   let amount = 1_000
   let redeemer = MintBurn {
     global_state_input_index: 0,
+    global_state_output_index: 0,
     power_user_node_ref_input_index: 0,
     minted_amount: amount,
     destination_actions: [clean_dest_action()],
@@ -1580,6 +1670,7 @@ test mint_fails_when_destination_action_missing() fail {
   let amount = 1_000
   let redeemer = MintBurn {
     global_state_input_index: 0,
+    global_state_output_index: 0,
     power_user_node_ref_input_index: 0,
     minted_amount: amount,
     destination_actions: [],
@@ -1602,6 +1693,7 @@ test burn_succeeds_without_destination_checks() {
   let amount = -1_000
   let redeemer = MintBurn {
     global_state_input_index: 0,
+    global_state_output_index: 0,
     power_user_node_ref_input_index: 0,
     minted_amount: amount,
     destination_actions: [],
@@ -1624,6 +1716,7 @@ test mint_to_enterprise_address_is_rejected() fail {
   let amount = 1_000
   let redeemer = MintBurn {
     global_state_input_index: 0,
+    global_state_output_index: 0,
     power_user_node_ref_input_index: 0,
     minted_amount: amount,
     destination_actions: [clean_dest_action()],
@@ -1648,6 +1741,7 @@ test mint_authority_withdraw_fails_when_not_signed_by_power_user() {
   let amount = 1_000
   let redeemer = MintBurn {
     global_state_input_index: 0,
+    global_state_output_index: 0,
     power_user_node_ref_input_index: 0,
     minted_amount: amount,
     destination_actions: [clean_dest_action()],
@@ -1670,6 +1764,7 @@ test mint_authority_withdraw_fails_when_minting_without_mint_permission() {
   let amount = 1_000
   let redeemer = MintBurn {
     global_state_input_index: 0,
+    global_state_output_index: 0,
     power_user_node_ref_input_index: 0,
     minted_amount: amount,
     destination_actions: [clean_dest_action()],
@@ -1697,6 +1792,7 @@ test mint_succeeds_when_global_state_power_user_policy_id_matches() {
   let amount = 1_000
   let redeemer = MintBurn {
     global_state_input_index: 0,
+    global_state_output_index: 0,
     power_user_node_ref_input_index: 0,
     minted_amount: amount,
     destination_actions: [clean_dest_action()],
@@ -1726,6 +1822,7 @@ test mint_fails_when_global_state_power_user_policy_id_mismatches() fail {
   let amount = 1_000
   let redeemer = MintBurn {
     global_state_input_index: 0,
+    global_state_output_index: 0,
     power_user_node_ref_input_index: 0,
     minted_amount: amount,
     destination_actions: [clean_dest_action()],
@@ -1768,6 +1865,7 @@ test mint_succeeds_without_any_registry_reference_input() {
   let amount = 1_000
   let redeemer = MintBurn {
     global_state_input_index: 0,
+    global_state_output_index: 0,
     power_user_node_ref_input_index: 0,
     minted_amount: amount,
     destination_actions: [
@@ -2383,6 +2481,7 @@ fn cip68_supply_mint_tx() -> Transaction {
   Transaction {
     ..signed_mint_tx(1_000),
     outputs: [
+      debited_gs_output(make_gs_input(False), 1_000),
       Output {
         ..make_dest_output(1_000),
         value: merge(
@@ -2478,7 +2577,18 @@ test registry_insert_with_a_register_redeemer_succeeds() {
 /// spent covering node trips the MintBurn no-registry-node-spent guard.
 test registry_insert_with_a_mint_burn_redeemer_is_rejected() fail {
   let base = signed_mint_tx(1_000)
-  run_withdraw(mint_burn_redeemer(1_000), registry_insert_tx(base))
+  // `registry_insert_tx` prepends two outputs, so GlobalState's continuing
+  // output is output 2.
+  run_withdraw(
+    MintBurn {
+      global_state_input_index: 0,
+      global_state_output_index: 2,
+      power_user_node_ref_input_index: 0,
+      minted_amount: 1_000,
+      destination_actions: [clean_dest_action()],
+    },
+    registry_insert_tx(base),
+  )
 }
 
 /// The insert tx under `UpgradeRegistryNode`, aimed at the covering node as
@@ -2963,6 +3073,7 @@ test burn_rejects_an_operator_that_is_the_global_state_logic() {
   !run_withdraw(
     MintBurn {
       global_state_input_index: 0,
+      global_state_output_index: 0,
       power_user_node_ref_input_index: 0,
       minted_amount: amount,
       destination_actions: [],
@@ -3142,6 +3253,7 @@ fn mint_to_frozen_dest(frozen_amount: Option<Int>) -> Bool {
   run_withdraw(
     MintBurn {
       global_state_input_index: 0,
+      global_state_output_index: 0,
       power_user_node_ref_input_index: 0,
       minted_amount: amount,
       destination_actions: [clean_dest_action()],
@@ -3178,6 +3290,7 @@ fn without_gs_nft(input: Input) -> Input {
 fn mint_burn_redeemer(amount: Int) -> MintingAuthorityWithdrawRedeemer {
   MintBurn {
     global_state_input_index: 0,
+    global_state_output_index: 0,
     power_user_node_ref_input_index: 0,
     minted_amount: amount,
     destination_actions: [clean_dest_action()],
@@ -3225,6 +3338,7 @@ test burn_rejects_an_operator_without_can_burn() {
   !run_withdraw(
     MintBurn {
       global_state_input_index: 0,
+      global_state_output_index: 0,
       power_user_node_ref_input_index: 0,
       minted_amount: -1_000,
       destination_actions: [],
@@ -3312,6 +3426,7 @@ fn unsigned_mint_by(key: ByteArray) -> Bool {
   run_withdraw(
     MintBurn {
       global_state_input_index: 0,
+      global_state_output_index: 0,
       power_user_node_ref_input_index: 0,
       minted_amount: amount,
       destination_actions: [clean_dest_action()],
@@ -3351,6 +3466,7 @@ test mint_burn_rejects_a_zero_amount() {
   !run_withdraw(
     MintBurn {
       global_state_input_index: 0,
+      global_state_output_index: 0,
       power_user_node_ref_input_index: 0,
       minted_amount: 0,
       destination_actions: [],
@@ -3422,6 +3538,307 @@ test register_rejects_an_admin_equal_to_the_minting_proxy() {
   )
 }
 
+// ── MintBurn debits mintable_amount (INVARIANT 2) ────────────────────────────
+//
+// Every case is a signed 1 000-unit mint (a `can_mint` operator, one clean
+// destination) or burn (a `can_burn` operator, no destination) of the security
+// token, built by `debit_tx` and run by `run_debit`. Each passes every other
+// `MintBurn` conjunct, so each negative is refused by exactly the one debit
+// check its name gives, and pairs with a positive built from the same helpers.
+// The debit is the last conjunct: no earlier refusal can stand in for it.
+
+/// `make_gs_input(False)`'s datum with `mintable_amount` set.
+fn gs_with_headroom(mintable_amount: Int) -> GlobalStateDatum {
+  expect InlineDatum(raw) = make_gs_input(False).output.datum
+  expect gs_datum: GlobalStateDatum = raw
+  GlobalStateDatum { ..gs_datum, mintable_amount }
+}
+
+/// `datum` with `mintable_amount` lowered by `amount` (raised for a burn).
+fn debited(datum: GlobalStateDatum, amount: Int) -> GlobalStateDatum {
+  GlobalStateDatum { ..datum, mintable_amount: datum.mintable_amount - amount }
+}
+
+/// `datum` as Data, with `extra` appended after its last field.
+fn with_appended(datum: GlobalStateDatum, extra: List<Data>) -> Data {
+  let raw: Data = datum
+  builtin.constr_data(0, list.concat(builtin.unconstr_fields(raw), extra))
+}
+
+/// The GlobalState UTxO (address, NFT, ADA) carrying `datum`.
+fn gs_output_carrying(datum: Data) -> Output {
+  Output { ..make_gs_input(False).output, datum: InlineDatum(datum) }
+}
+
+/// A mint (`amount` > 0) or burn (`amount` < 0) spending GlobalState with
+/// `in_datum` at input 0; `gs_outputs` lead the outputs, followed by the
+/// destination of a mint.
+fn debit_tx(
+  in_datum: Data,
+  gs_outputs: List<Output>,
+  amount: Int,
+) -> Transaction {
+  let destinations = if amount > 0 {
+    [make_dest_output(amount)]
+  } else {
+    []
+  }
+  Transaction {
+    ..make_withdraw_tx(
+      amount,
+      amount > 0,
+      amount < 0,
+      False,
+      make_denylist_root_ref_input(),
+      destinations,
+      [test_pu_credential_hash],
+    ),
+    inputs: [
+      Input { ..make_gs_input(False), output: gs_output_carrying(in_datum) },
+    ],
+    outputs: list.concat(gs_outputs, destinations),
+  }
+}
+
+/// `MintBurn` of `amount` over `tx`, GlobalState spent at input 0, its
+/// continuing output named at `global_state_output_index`.
+fn run_debit(global_state_output_index: Int, amount: Int, tx: Transaction) {
+  run_withdraw(
+    MintBurn {
+      global_state_input_index: 0,
+      global_state_output_index,
+      power_user_node_ref_input_index: 0,
+      minted_amount: amount,
+      destination_actions: if amount > 0 {
+        [clean_dest_action()]
+      } else {
+        []
+      },
+    },
+    tx,
+  )
+}
+
+/// The common shape: GlobalState in with `in_datum`, out (output 0) with
+/// `out_datum`, `amount` minted or burned.
+fn debit_case(in_datum: Data, out_datum: Data, amount: Int) -> Bool {
+  run_debit(
+    0,
+    amount,
+    debit_tx(in_datum, [gs_output_carrying(out_datum)], amount),
+  )
+}
+
+test mint_debits_mintable_amount_by_the_minted_amount() {
+  let d = gs_with_headroom(1_000_000)
+  debit_case(d, debited(d, 1_000), 1_000)
+}
+
+test burn_credits_mintable_amount_by_the_burned_amount() {
+  let d = gs_with_headroom(1_000_000)
+  debit_case(d, debited(d, -1_000), -1_000)
+}
+
+test mint_to_exactly_zero_headroom_succeeds() {
+  let d = gs_with_headroom(1_000)
+  debit_case(d, debited(d, 1_000), 1_000)
+}
+
+/// GlobalState's continuing output carries the input datum unchanged: the
+/// counter is not debited. Only `only_the_counter_moved` refuses.
+test mint_without_the_debit_fails() {
+  let d = gs_with_headroom(1_000_000)
+  !debit_case(d, d, 1_000)
+}
+
+test mint_with_a_wrong_debit_fails() {
+  let d = gs_with_headroom(1_000_000)
+  !debit_case(d, debited(d, 999), 1_000)
+}
+
+/// The output carries exactly the debited value, -1, so only the headroom
+/// check refuses.
+test mint_beyond_the_headroom_fails() {
+  let d = gs_with_headroom(999)
+  !debit_case(d, debited(d, 1_000), 1_000)
+}
+
+test mint_that_changes_another_core_field_fails() {
+  let d = gs_with_headroom(1_000_000)
+  !debit_case(
+    d,
+    GlobalStateDatum {
+      ..debited(d, 1_000),
+      admin_credential_hash: test_admin_hash,
+    },
+    1_000,
+  )
+}
+
+test mint_that_changes_a_tail_field_fails() {
+  let d = gs_with_headroom(1_000_000)
+  !debit_case(
+    d,
+    GlobalStateDatum { ..debited(d, 1_000), transfers_paused: True },
+    1_000,
+  )
+}
+
+test mint_that_changes_an_appended_field_fails() {
+  let d = gs_with_headroom(1_000_000)
+  !debit_case(
+    with_appended(d, [builtin.i_data(42), builtin.b_data(#"cafe")]),
+    with_appended(
+      debited(d, 1_000),
+      [builtin.i_data(43), builtin.b_data(#"cafe")],
+    ),
+    1_000,
+  )
+}
+
+test mint_keeps_appended_fields_unchanged() {
+  let d = gs_with_headroom(1_000_000)
+  debit_case(
+    with_appended(d, [builtin.i_data(42), builtin.b_data(#"cafe")]),
+    with_appended(
+      debited(d, 1_000),
+      [builtin.i_data(42), builtin.b_data(#"cafe")],
+    ),
+    1_000,
+  )
+}
+
+/// The burn direction of `mint_without_the_debit_fails`: 1 000 are burned and
+/// the output datum equals the input datum, so the counter is not credited.
+/// Only `only_the_counter_moved` refuses.
+test burn_without_the_credit_fails() {
+  let d = gs_with_headroom(1_000_000)
+  !debit_case(d, d, -1_000)
+}
+
+test mint_that_moves_global_state_fails() {
+  let d = gs_with_headroom(1_000_000)
+  !run_debit(
+    0,
+    1_000,
+    debit_tx(
+      d,
+      [
+        Output {
+          ..gs_output_carrying(debited(d, 1_000)),
+          address: Address {
+            payment_credential: Script(test_foreign_script_hash),
+            stake_credential: None,
+          },
+        },
+      ],
+      1_000,
+    ),
+  )
+}
+
+test mint_that_changes_global_state_tokens_fails() {
+  let d = gs_with_headroom(1_000_000)
+  let out = gs_output_carrying(debited(d, 1_000))
+  !run_debit(
+    0,
+    1_000,
+    debit_tx(
+      d,
+      [
+        Output {
+          ..out,
+          value: merge(out.value, from_asset(test_foreign_script_hash, "X", 1)),
+        },
+      ],
+      1_000,
+    ),
+  )
+}
+
+test mint_accepts_an_ada_top_up_on_global_state() {
+  let d = gs_with_headroom(1_000_000)
+  let out = gs_output_carrying(debited(d, 1_000))
+  run_debit(
+    0,
+    1_000,
+    debit_tx(
+      d,
+      [Output { ..out, value: merge(out.value, from_lovelace(3_000_000)) }],
+      1_000,
+    ),
+  )
+}
+
+/// The index names a decoy at GlobalState's address, without the NFT, carrying
+/// the exact debit; the real GlobalState output (output 1) is undebited. Only
+/// `same_tokens` refuses.
+test mint_with_the_debit_on_a_decoy_output_fails() {
+  let d = gs_with_headroom(1_000_000)
+  !run_debit(
+    0,
+    1_000,
+    debit_tx(
+      d,
+      [
+        Output {
+          ..gs_output_carrying(debited(d, 1_000)),
+          value: from_lovelace(2_000_000),
+        },
+        gs_output_carrying(d),
+      ],
+      1_000,
+    ),
+  )
+}
+
+/// GlobalState is only a reference input, a plain UTxO sits at
+/// `global_state_input_index`, and the outputs hold a debited copy of
+/// GlobalState. The GlobalState NFT check on the spent input traps.
+test mint_with_global_state_only_referenced_fails() fail {
+  let d = gs_with_headroom(1_000_000)
+  let tx = debit_tx(d, [gs_output_carrying(debited(d, 1_000))], 1_000)
+  run_debit(
+    0,
+    1_000,
+    Transaction {
+      ..tx,
+      inputs: [
+        Input {
+          output_reference: test_out_ref(8),
+          output: Output {
+            ..make_dest_output(0),
+            value: from_lovelace(2_000_000),
+          },
+        },
+      ],
+      reference_inputs: list.concat(
+        tx.reference_inputs,
+        [Input { ..make_gs_input(False), output: gs_output_carrying(d) }],
+      ),
+    },
+  ) || True
+}
+
+/// Whatever GlobalState logic is installed (field 0 names another logic, and
+/// it runs), a mint whose continuing output RAISES the counter by the amount is
+/// refused here.
+test a_raised_counter_is_refused_whatever_global_state_logic_is_installed() {
+  let d = GlobalStateDatum {
+    ..gs_with_headroom(1_000_000),
+    global_state_script_credential_hash: test_foreign_script_hash,
+  }
+  let tx = debit_tx(d, [gs_output_carrying(debited(d, -1_000))], 1_000)
+  !run_debit(
+    0,
+    1_000,
+    Transaction {
+      ..tx,
+      withdrawals: [Pair(Script(test_foreign_script_hash), 0)],
+    },
+  )
+}
+
 // ── Benchmark — the authority's cost by mint destination count ───────────────
 //
 // `aiken bench -m "minting_authority.{..}"`. A `MintBurn` minting 1_000 to
@@ -3444,6 +3861,7 @@ fn t_bench_mint(n: Int) -> (MintingAuthorityWithdrawRedeemer, Transaction) {
   (
     MintBurn {
       global_state_input_index: 0,
+      global_state_output_index: 0,
       power_user_node_ref_input_index: 0,
       minted_amount: amount * n,
       destination_actions: list.repeat(clean_dest_action(), n),
@@ -3490,6 +3908,7 @@ fn a_burn(_size: Int) -> Fuzzer<(MintingAuthorityWithdrawRedeemer, Transaction)>
     (
       MintBurn {
         global_state_input_index: 0,
+        global_state_output_index: 0,
         power_user_node_ref_input_index: 0,
         minted_amount: -1_000,
         destination_actions: [],
