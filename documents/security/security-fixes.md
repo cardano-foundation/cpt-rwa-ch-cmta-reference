@@ -46,7 +46,7 @@ the wrong asset name, a list root that did not link to the node being removed, a
 | [18](#18-scripts-that-always-run-could-sign-for-a-role) | Scripts that always run could sign for a role | Low | Fixed |
 | [19](#19-rotatemintingscript-installs-an-authority-it-never-sees-run) | `RotateMintingScript` installs an authority it never sees run | Low | **Accepted, by decision** |
 | [20](#20-a-cip-68-reference-token-was-never-paired-with-the-security-tokens-name) | A CIP-68 reference token was never paired with the security token's name | — | Fixed |
-| [21](#21-the-supply-cap-is-debited-by-the-permanent-minting-proxy) | The supply cap is debited by the permanent minting proxy | Hardening | Changed 2026-11 |
+| [21](#21-the-supply-cap-is-debited-by-the-minting-authority) | The supply cap is debited by the minting authority | Hardening | Changed 2026-11 |
 
 Findings 12 and 13 come from the 2026-08-28 re-audit; 1–11 from the original review; 14 from the
 2026-10-15 audit (F08) and 15–16 from the review of PR #29, which assigned them no severity; 17 is a
@@ -1411,7 +1411,7 @@ at their date.
 
 ---
 
-## 21. The supply cap is debited by the permanent minting proxy
+## 21. The supply cap is debited by the minting authority
 
 **Severity: hardening.**
 
@@ -1425,14 +1425,18 @@ a debit.
 
 ### Now
 
-The frozen minting proxy (`minting_logic_validator`) debits the cap itself. On every run it derives
-this token's issuance policy ID, P, from the registry node the redeemer locates. The delta is the
-quantity of `security_asset_name` minted under P, negative for a burn. A non-zero delta requires:
+The minting authority's `MintBurn` debits the cap (`debits_mintable_amount`, header invariant 2 of
+`validators/minting_authority.ak`). It spends GlobalState, at `global_state_input_index`. The delta
+is the quantity of `security_asset_name` minted under the authority's compile-time
+`security_policy_id`, read from the transaction's mint and never from the redeemer, negative for a
+burn. GlobalState's continuing output, at the redeemer's `global_state_output_index`, must have:
 
-* GlobalState spent, not referenced;
-* its continuing output at the same address, with the same non-ADA value;
+* the spent GlobalState input's address and non-ADA value;
 * a datum equal to the input datum except field 5, written as `in − delta`;
-* a result of at least 0.
+* a field 5 of at least 0.
+
+The datum is compared as Data, so every other field — core, tail and appended — is pinned. The
+debit is the last conjunct of `MintBurn`, so every other refusal fires first.
 
 `MintSecurity` now only permits that write: it requires a non-zero mint of the security token, and
 field 5 (still an Int) is the only field that may change. It does not count.
@@ -1443,9 +1447,20 @@ logic rotation keeps unchanged.
 The zero-amount refusal lives in the minting authority's `verify_mint_or_burn`
 ([§18](#18-scripts-that-always-run-could-sign-for-a-role)); its behaviour is unchanged.
 
+The minting proxy (`minting_logic_validator`) only delegates. It reads the frozen core of the
+NFT-authenticated GlobalState, refuses a deactivated protocol and requires the withdraw-0 of the
+authority that field 4 names. It counts nothing.
+
+### Why the minting authority
+
+The issuance policy ID is derived from the minting proxy's hash, so a defect in a rule written there
+could never be fixed; the authority can be rotated. Until `LockUpgrades` the admin chooses the
+authority (`RotateMintingScript`) and can already set the cap directly (`SetMintableAmount`); after
+it, `RotateMintingScript` is closed, so the installed authority and its debit are permanent.
+
 ### The exact guarantee
 
-Every mint or burn of the security token is debited from `mintable_amount` in the same transaction, whichever minting authority or GlobalState logic is installed: the permanent minting proxy checks it.
+With this repository's minting authority installed, every mint or burn of the security token is debited from `mintable_amount` in the same transaction, whichever GlobalState logic is installed: the authority's `MintBurn` checks it. A replacement authority must keep the debit; nothing frozen re-checks it.
 
 That is not a promise that no rotation can change the cap. A write of `mintable_amount` outside a mint or burn is a cap amendment, governed by the installed GlobalState logic: this repository's logic allows only `SetMintableAmount`, admin-signed, until `LockUpgrades`, and never beside a mint or burn.
 
@@ -1454,16 +1469,21 @@ See the README's [deployment checklist](../../README.md#deployment-checklist).
 
 ### Accepted residue
 
-Only `security_asset_name` is debited. Which names may be minted under the issuance policy is the minting authority's rule; a replacement authority that drops it can mint other names there, uncapped.
+Only `security_asset_name` is debited. Which names may be minted under the issuance policy is the minting authority's rule (header invariant 3).
 
-Deliberate lock-in: in a transaction that mints or burns the token, no other GlobalState datum field
-may change, appended fields included. A field that must change on every mint, such as a
-circulating-supply counter, is therefore impossible for this token version.
+A replacement authority that drops the debit mints past the cap, and one that drops the names rule can mint other names under the issuance policy, uncapped. Nothing frozen catches either. That is the admin's choice, the same trust as choosing the authority, until `LockUpgrades` closes `RotateMintingScript`.
+
+Deliberate lock-in: under this authority, in a transaction that mints or burns the token, no other
+GlobalState datum field may change, appended fields included. A field that must change on every
+mint, such as a circulating-supply counter, is therefore impossible while this authority is
+installed.
 
 ### Reliance
 
-The permanent minting proxy derives this token's issuance policy ID from its registry node on every run, because it cannot pin it: the ID is derived from the proxy's own hash. That is sound only because the base layer derives a node's key from its field 2 and keeps keys unique. Both are relied on, not re-checked; re-verify them on any change of the CIP-113 version.
-See the first two rows of [the base-layer table](#what-the-cip-113-base-layer-actually-guarantees).
+`issuance_mint` requires the withdraw-0 of the minting logic it is parameterised by on every mint and burn of its policy. So a mint or burn of this token always runs the minting proxy, which requires the named minting authority to run, and that authority's same-transaction debit applies.
+Of the authority's three redeemers, only `MintBurn` approves a supply change. `Register` mints no supply. `UpgradeRegistryNode` cannot mint or burn under the issuance policy, because CIP-113's `registry_spend` refuses a same-transaction mint of the spent node's own policy.
+Both base-layer rules are relied on, not re-checked; re-verify them on any change of the CIP-113 version.
+See the README's [What is delegated to the CIP-113 base layer](../../README.md#what-is-delegated-to-the-cip-113-base-layer) and [the base-layer table](#what-the-cip-113-base-layer-actually-guarantees).
 
 ### Cost
 
@@ -1508,33 +1528,39 @@ The CIP-113 base layer's own scripts in the same transaction are not included, a
 
 ### Tests
 
-In `validators/minting_logic_script.ak`, the debit — `mint_debits_the_counter_by_the_minted_amount`,
-`burn_credits_the_counter_by_the_burned_amount`, `mint_to_exactly_zero_headroom_succeeds`,
+In `validators/minting_authority.ak`, the debit (header invariant 2) —
+`mint_debits_mintable_amount_by_the_minted_amount`,
+`burn_credits_mintable_amount_by_the_burned_amount`, `mint_to_exactly_zero_headroom_succeeds`,
 `mint_without_the_debit_fails`, `mint_with_a_wrong_debit_fails`, `mint_beyond_the_headroom_fails`,
 `mint_that_changes_another_core_field_fails`, `mint_that_changes_a_tail_field_fails`,
 `mint_that_changes_an_appended_field_fails`, `mint_keeps_appended_fields_unchanged`,
-`burn_without_the_credit_fails`, `burn_with_global_state_only_referenced_fails`,
-`mint_with_global_state_only_referenced_fails`, `mint_that_moves_global_state_fails`,
+`burn_without_the_credit_fails`, `mint_that_moves_global_state_fails`,
 `mint_that_changes_global_state_tokens_fails`, `mint_accepts_an_ada_top_up_on_global_state`,
-`rotated_permissive_authority_cannot_skip_the_debit`,
-`rotated_permissive_global_state_logic_cannot_skip_the_debit`,
-`first_mint_in_the_registration_transaction_is_debited`,
-`first_mint_in_the_registration_transaction_without_the_debit_fails`,
-`delta_zero_with_global_state_spent_checks_no_counter` and
-`proxy_traps_on_a_non_int_mintable_amount` — and the registry-node derivation —
-`registration_with_the_node_inserted_and_global_state_referenced_succeeds`,
-`registration_index_at_the_covering_node_fails`, `upgrade_with_the_node_spent_succeeds`,
-`node_naming_another_proxy_fails`, `node_location_at_a_non_node_utxo_fails`,
-`only_the_issuance_policy_counts` and `other_names_under_the_issuance_policy_are_not_counted`.
+`mint_with_the_debit_on_a_decoy_output_fails`, `mint_with_global_state_only_referenced_fails` and
+`a_raised_counter_is_refused_whatever_global_state_logic_is_installed`.
 
-In `validators/global_state_logic_tests.ak`: `mint_security_cannot_smuggle_another_field_change`,
-`mint_security_accepts_a_clean_cap_decrement`,
-`a_cap_that_does_not_decrement_is_refused_by_the_minting_proxy`,
-`mint_security_leaves_the_amount_to_the_minting_proxy`,
-`mint_security_rejects_a_retyped_mintable_amount`,
-`mint_security_allows_security_token_input_and_output`,
-`rotate_gs_logic_fails_when_the_mintable_amount_changes`, `mint_security_requires_a_security_mint`
-and `zero_mint_mint_security_cannot_move_the_counter`.
+In `validators/global_state_logic_tests.ak`:
+
+* the composites, which run the GlobalState logic, the minting proxy and the minting authority on
+  one transaction — `mint_security_accepts_a_clean_cap_decrement`,
+  `a_cap_that_does_not_decrement_is_refused_by_the_minting_authority`,
+  `a_burn_that_does_not_credit_is_refused_by_the_minting_authority`,
+  `live_contract_still_allows_mint`, `burn_succeeds_when_mintable_amount_is_zero`,
+  `mint_rejected_when_mintable_amount_is_zero`, `mint_up_to_burned_headroom_succeeds_after_zero_cap`
+  and `mint_beyond_burned_headroom_rejected_after_zero_cap`;
+* the GlobalState logic's mint branch — `mint_security_cannot_smuggle_another_field_change`,
+  `mint_security_leaves_the_amount_to_the_minting_authority`,
+  `mint_security_rejects_a_retyped_mintable_amount`,
+  `mint_security_allows_security_token_input_and_output`, `mint_security_requires_a_security_mint`
+  and `zero_mint_mint_security_cannot_move_the_counter`;
+* the rotation pin on field 5 — `rotate_gs_logic_fails_when_the_mintable_amount_changes`.
+
+In `validators/minting_logic_script.ak`, the delegation — `succeeds_when_the_named_authority_runs`,
+`succeeds_when_global_state_is_only_referenced`, `fails_without_the_authority_withdrawal`,
+`fails_when_the_authority_is_merely_signed_for`, `fails_when_a_different_script_runs`,
+`fails_when_the_authority_is_this_proxy_itself`, `superseded_authority_stops_working_after_rotation`
+and `rotated_authority_starts_working` — and the frozen-core read of field 5,
+`proxy_traps_on_a_non_int_mintable_amount`.
 
 ---
 
@@ -1726,8 +1752,8 @@ the notes above apply to any redeploy onto current `main`.
 
 | Claim | Verdict | Evidence | Relied upon by |
 |---|---|---|---|
-| Registry field 2 is cryptographically bound to the node's key | **True** | `registry_mint` calls `is_programmable_token_id_valid(key, …, minting_logic_script)` — the key is *derived* from the template parameterised with that credential | `MintBurn`'s registry-node read removal (2026-08-20) — no independent field-2 identity re-check on mint or burn; the permanent minting proxy's issuance-policy derivation, on which the supply debit rests (2026-11) |
-| Registry keys are unique | **True** | `validate_directory_node_output` asserts `key < next` on **both** insert outputs, forcing `covering.key < new.key < covering.next`; in a sorted list a duplicate is unconstructible | Same as above — rules out a duplicate node at this policy's key; the permanent minting proxy's issuance-policy derivation, on which the supply debit rests (2026-11) |
+| Registry field 2 is cryptographically bound to the node's key | **True** | `registry_mint` calls `is_programmable_token_id_valid(key, …, minting_logic_script)` — the key is *derived* from the template parameterised with that credential | `MintBurn`'s registry-node read removal (2026-08-20) — no independent field-2 identity re-check on mint or burn; `Register` and `UpgradeRegistryNode`, which derive the issuance policy ID from the registry node that names the proxy and do not compare it with `security_policy_id` (2026-11) |
+| Registry keys are unique | **True** | `validate_directory_node_output` asserts `key < next` on **both** insert outputs, forcing `covering.key < new.key < covering.next`; in a sorted list a duplicate is unconstructible | Same as above — rules out a duplicate node at this policy's key; `Register` and `UpgradeRegistryNode`'s issuance-policy derivation (2026-11) |
 | Registry fields 3 and 4 are free | **True — confirmed the defect** | `is_inserted_directory_node` only length-checks them | — |
 | A stranger can register a node naming someone else's minting logic | **False** — a protection that was not assumed | `RegistryInsert` requires that credential's own withdraw-0 ("proof of instance") | — |
 | Minted supply is confined to programmable-base addresses | **True** | `no_escape` (in `issuance_mint` up to `9db7e06`; at `95e99ac` in the replaceable `issuance_logic` that `issuance_mint` requires) forbids the policy at any non-base output and requires an inline stake credential on every base output | The mint-path programmable-base payment-credential pin removal (2026-08-20) |
@@ -1774,12 +1800,12 @@ weakens the gate. But nothing works until off-chain moves:
 ### The 2026-11 CIP-68 and supply-accounting changes: a new token
 
 [§20](#20-a-cip-68-reference-token-was-never-paired-with-the-security-tokens-name) and
-[§21](#21-the-supply-cap-is-debited-by-the-permanent-minting-proxy) change parameters, the datum,
+[§21](#21-the-supply-cap-is-debited-by-the-minting-authority) change parameters, the datum,
 redeemers and transaction shapes.
 
-* **Parameters.** `minting_logic_validator` goes from 1 to 3 parameters,
-  `(global_state_policy_id, registry_policy_id, security_asset_name)`. The proxy's hash, and so the
-  issuance policy ID, now depend on the name. The compile-time policy parameter of
+* **Parameters.** `minting_logic_validator` keeps its single parameter, `global_state_policy_id`.
+  Its hash, and so the issuance policy ID, still moves, because the frozen core it decodes now
+  includes field 5. The compile-time policy parameter of
   `minting_authority_validator`, `transfer_logic_validator` and
   `third_party_transfer_logic_validator` is named `security_policy_id`; its position in each list is
   unchanged.
@@ -1789,16 +1815,14 @@ redeemers and transaction shapes.
   * Minting authority: `Register { registry_node_output_index, global_state_ref_input_index }` at
     constructor 1, an index into `reference_inputs` (GlobalState is never spent at registration),
     replaces `RegisterMint` (constructor 1) and `RegisterStructural` (constructor 3).
-    `MintBurn` (0) and `UpgradeRegistryNode` (2) are unchanged.
+    `MintBurn` (constructor 0) gains `global_state_output_index` as its second field, after
+    `global_state_input_index`: breaking. `UpgradeRegistryNode` (constructor 2) is unchanged.
   * `MintSecurity` loses its field, `issuance_policy_redeemer_index`, and is now `Constr 0 []`; the
     other GlobalState action indices are unchanged.
-  * The minting proxy's redeemer is now `MintingLogicScriptWithdrawRedeemer { global_state_location,
-    registry_node_location, global_state_output_index }`, no longer a bare `GlobalStateLocation`. Its
-    `RegistryNodeLocation` is `NodeReferenced`, `NodeInserted` or `NodeSpent`, at constructors 0, 1
-    and 2.
+  * The minting proxy's redeemer is unchanged: a bare `GlobalStateLocation`.
 * **Transaction shapes.**
-  * Every mint and burn references this token's registry node, and its GlobalState output is
-    debited by the minted amount.
+  * Every mint and burn spends GlobalState and writes its continuing output with field 5 debited by
+    the minted amount, checked by the minting authority.
   * Registration mints no supply; first issuance is a separate `MintBurn` transaction.
   * A CIP-68 registration mints its reference NFT.
 * **Hashes.** Every validator hash except `global_state_proxy`'s moves, including the list policies
