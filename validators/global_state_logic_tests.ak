@@ -3600,7 +3600,8 @@ fn t_minter_node() -> Input {
   t_minter_node_with(False)
 }
 
-/// `t_minter_node` that may also burn: the operator of `mint_security_composite`.
+/// `t_minter_node` that may also burn: the operator of
+/// `mint_security_composite`.
 fn t_supply_operator_node() -> Input {
   t_minter_node_with(True)
 }
@@ -3797,9 +3798,9 @@ test zero_amount_mint_burn_composite_control_global_state_and_proxy_pass() {
 /// MintSecurity with NOTHING minted cannot move the counter, even after
 /// `LockUpgrades` and even with a `can_mint` operator running the authority
 /// and the minting proxy beside it. Here the counter is raised by 1_000_000
-/// with no mint at all. The minting proxy checks no amount, so it passes; the honest GlobalState logic (its non-zero-mint conjunct)
-/// and the honest authority (its zero-amount refusal) each refuse on their
-/// own.
+/// with no mint at all. The minting proxy checks no amount, so it passes; the
+/// honest GlobalState logic (its non-zero-mint conjunct) and the honest
+/// authority (its zero-amount refusal) each refuse on their own.
 test zero_mint_mint_security_cannot_move_the_counter() {
   let input_datum = GlobalStateDatum {
     ..t_pause_datum(False),
