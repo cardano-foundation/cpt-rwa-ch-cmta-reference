@@ -1470,17 +1470,20 @@ See the first two rows of [the base-layer table](#what-the-cip-113-base-layer-ac
 Measured with
 `aiken bench -m "minting_authority.{..}" -m "global_state_logic_tests.{..}" --max-size 16 --seed 42`.
 The benches build their transaction in the sampler, so fixture construction is excluded. Before is
-commit `4308bd2`, with the same benches ported onto it; after is this change. Memory / CPU units:
+commit `4308bd2`, with the same benches ported onto it; after is this change. The authority's before
+figures for 1 and 16 destinations are the whole-mint before figures less the proxy and GlobalState
+before figures. Memory / CPU units:
 
 | | before (mem / CPU) | after | change |
 |---|---|---|---|
-| minting proxy, per mint or burn | 81,539 / 30,040,763 | 196,193 / 74,336,399 | +114,654 / +44,295,636 |
+| minting proxy, per mint or burn | 81,539 / 30,040,763 | 86,667 / 31,601,583 | +5,128 / +1,560,820 |
 | GlobalState proxy and logic, `MintSecurity` | 282,590 / 122,858,005 | 271,623 / 117,393,487 | −10,967 / −5,464,518 |
-| minting authority, mint, at every n from 1 to 16 | — | — | −14,297 / −3,149,652 |
-| minting authority, burn | 211,253 / 66,900,365 | 196,260 / 63,463,967 | −14,993 / −3,436,398 |
-| whole mint, 1 destination | 770,428 / 284,814,434 | 859,818 / 320,495,900 | +89,390 (+11.6 %) / +35,681,466 (+12.5 %) |
-| whole mint, 16 destinations | 2,436,103 / 997,557,299 | 2,525,493 / 1,033,238,765 | +89,390 (+3.7 %) / +35,681,466 (+3.6 %) |
-| whole burn | 575,382 / 219,799,133 | 664,076 / 255,193,853 | +88,694 (+15.4 %) / +35,394,720 (+16.1 %) |
+| minting authority, mint, 1 destination | 406,299 / 131,915,666 | 453,428 / 156,081,166 | +47,129 / +24,165,500 |
+| minting authority, mint, 16 destinations | 2,071,974 / 844,658,531 | 2,113,103 / 867,864,031 | +41,129 / +23,205,500 |
+| minting authority, burn | 211,253 / 66,900,365 | 251,595 / 87,910,950 | +40,342 / +21,010,585 |
+| whole mint, 1 destination | 770,428 / 284,814,434 | 811,718 / 305,076,236 | +41,290 (+5.4 %) / +20,261,802 (+7.1 %) |
+| whole mint, 16 destinations | 2,436,103 / 997,557,299 | 2,471,393 / 1,016,859,101 | +35,290 (+1.4 %) / +19,301,802 (+1.9 %) |
+| whole burn | 575,382 / 219,799,133 | 609,885 / 236,906,020 | +34,503 (+6.0 %) / +17,106,887 (+7.8 %) |
 
 A whole mint or burn is the sum of the minting proxy, GlobalState and the authority rows; the
 authority's own mint figures by destination count are in the README's *Mint and burn* table.
@@ -1489,8 +1492,8 @@ Compiled sizes, in bytes, before → after:
 
 | Validator | Before | After |
 |---|---:|---:|
-| `minting_logic_validator` | 780 | 1,779 (+999) |
-| `minting_authority_validator` | 9,350 | 8,992 |
+| `minting_logic_validator` | 780 | 790 (+10) |
+| `minting_authority_validator` | 9,350 | 9,279 |
 | `global_state_logic` | 5,801 | 5,742 |
 | `transfer_logic_validator` | 7,119 | 7,233 |
 | `third_party_transfer_logic_validator` | 7,302 | 7,440 |

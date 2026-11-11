@@ -511,7 +511,7 @@ Five validators are withdraw-0 scripts, i.e. they run as zero-value withdrawals 
 spending or minting script of any UTxO: `global_state_logic` (every GlobalState action — the proxy
 holding the NFT requires it), `transfer_logic_validator` (~7.2 KB, every transfer),
 `third_party_transfer_logic_validator` (~7.4 KB, every seizure), `minting_authority_validator`
-(~9.0 KB, every mint and burn) and the minting proxy `minting_logic_validator` (~1.8 KB, also every
+(~9.3 KB, every mint and burn) and the minting proxy `minting_logic_validator` (~0.8 KB, also every
 mint and burn — the proxy's withdraw-0 is what the CIP-113 registry node invokes, and it in turn
 requires the authority's). The four large ones (`global_state_logic` is ~5.7 KB and runs in every
 mint and burn too) must be published once as reference-script UTxOs and
@@ -787,20 +787,20 @@ with the number of destination actions), and the GlobalState figure assumes Glob
 transaction input (each input before it adds about 11.5 K mem); the transfer and seizure
 benches above build theirs in the bench body, which adds the fixture's cost to their figures.
 
-Per mint or burn, whatever the destination count: the minting proxy 196,193 mem / 74,336,399 CPU,
+Per mint or burn, whatever the destination count: the minting proxy 86,667 mem / 31,601,583 CPU,
 the GlobalState proxy and logic 271,623 mem / 117,393,487 CPU.
 
 | n | authority mem | authority CPU | whole mint mem | whole mint CPU |
 |---:|---:|---:|---:|---:|
-| 1 | 392,002 | 128,766,014 | 859,818 | 320,495,900 |
-| 4 | 672,973 | 234,462,251 | 1,140,789 | 426,192,137 |
-| 8 | 1,088,173 | 404,053,495 | 1,555,989 | 595,783,381 |
-| 16 | 2,057,677 | 841,508,879 | 2,525,493 | 1,033,238,765 |
+| 1 | 453,428 | 156,081,166 | 811,718 | 305,076,236 |
+| 4 | 733,199 | 261,585,403 | 1,091,489 | 410,580,473 |
+| 8 | 1,146,799 | 430,920,647 | 1,505,089 | 579,915,717 |
+| 16 | 2,113,103 | 867,864,031 | 2,471,393 | 1,016,859,101 |
 
 `mint_cost_by_destination_count` is one `MintBurn` to `n` distinct destinations, denylist-only,
 every destination citing the empty denylist root; "whole mint" adds the two constant figures above.
-A burn (`burn_cost`, no destinations): authority 196,260 mem / 63,463,967 CPU, whole burn 664,076
-mem / 255,193,853 CPU. Sixteen destinations use about 18% of the memory budget before redeemer
+A burn (`burn_cost`, no destinations): authority 251,595 mem / 87,910,950 CPU, whole burn 609,885
+mem / 236,906,020 CPU. Sixteen destinations use about 18% of the memory budget before redeemer
 decoding, somewhat more with it; the CIP-113 base layer's own scripts in the same transaction are
 not included.
 
