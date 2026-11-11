@@ -58,15 +58,23 @@ use utils.{must_be_signed_by_credential}
 ///      `third_party_transfer_logic_script` at permissive scripts,
 ///      permanently destroying transfer-side compliance. IRREVERSIBLE.
 ///   2. EVERY SUPPLY CHANGE IS DEBITED HERE — the supply cap, a core
-///      CMTAT/BaFin invariant. `MintBurn` spends GlobalState (its bare
+///      CMTAT/BaFin invariant. Of the three redeemers, only `MintBurn`
+///      approves a mint or burn of `security_asset_name`, and it debits
+///      every one: `MintBurn` spends GlobalState (its bare
 ///      `global_state_input_index`), and GlobalState's continuing output
 ///      (`global_state_output_index`) keeps its address and non-ADA value and
 ///      carries the input datum with field 5 (`mintable_amount`) alone
 ///      rewritten to `in − minted`, never below zero; a burn credits it
-///      (`debits_mintable_amount`). Neither the proxy nor the GlobalState
-///      logic counts anything: `MintSecurity` only permits the write. A
-///      replacement that drops the debit mints past the cap. IRREVERSIBLE
-///      (tokens already exist).
+///      (`debits_mintable_amount`). The other two cannot change supply.
+///      `Register` mints no supply: at most the CIP-68 reference NFT,
+///      quantity 1 (`registration_mint_matches_name`). `UpgradeRegistryNode`
+///      cannot mint or burn under the issuance policy: CIP-113's
+///      `registry_spend` refuses any same-transaction mint of the spent
+///      node's own policy, which is this token's issuance policy (see 3).
+///      That base-layer rule is relied on, not re-checked here. Neither the
+///      proxy nor the GlobalState logic counts anything: `MintSecurity` only
+///      permits the write. A replacement that drops the debit mints past the
+///      cap. IRREVERSIBLE (tokens already exist).
 ///
 ///      Why here and not in the proxy: the proxy's hash is the token's
 ///      issuance policy id, so a defect in a rule written there could never
