@@ -107,16 +107,14 @@ permanent **proxy** hash (README, What the derived parameters must equal), field
 the transfer and third-party logic script credentials the minting authority was built with
 (`transfer_logic_script_hash`, `third_party_transfer_logic_script_hash`; anything else, or the two
 swapped, is rejected — F08), the deployment's GlobalState policy ID, and the disabled unfracking
-credential. The admin signs. GlobalState is referenced (or spent) and must not be deactivated.
+credential. The admin signs. GlobalState is a reference input, never spent, and must not be
+deactivated.
 
 The insert runs two zero-value withdrawals: the minting proxy and the minting authority. The
 authority's redeemer is `Register`, constructor 1 of `MintingAuthorityWithdrawRedeemer`:
 
 ```aiken
-Register {
-  registry_node_output_index,
-  global_state_location: GlobalStateReferenced { global_state_ref_input_index },
-}
+Register { registry_node_output_index, global_state_ref_input_index }
 ```
 
 The proxy's redeemer:
@@ -129,9 +127,10 @@ MintingLogicScriptWithdrawRedeemer {
 }
 ```
 
-If the transaction spends GlobalState instead, use `GlobalStateSpent { global_state_input_index }`
-in both. The proxy's `global_state_output_index` is not read, because nothing of the security token
-is minted, so any value is accepted. Both `registry_node_output_index` values must identify **this
+The authority reads GlobalState only from `self.reference_inputs`, so a registration that spends
+GlobalState is refused; the proxy's `global_state_location` names the same reference input. The
+proxy's `global_state_output_index` is not read, because nothing of the security token is minted,
+so any value is accepted. Both `registry_node_output_index` values must identify **this
 token's new node**, not the covering node that the CIP-113 insert also outputs; the proxy traps on
 the covering node, which names another proxy.
 
@@ -447,7 +446,9 @@ also requires the minting proxy's withdraw-0, with
 registry_node_input_index }, global_state_output_index }`: the same spent node, the same
 `global_state_location` as the authority's, and any `global_state_output_index` (the update cannot
 mint this token). The admin signs. The authority
-pins the node to this issuance policy, retains this deployment's GlobalState and disabled
+requires the spent and continuing nodes to name this deployment's proxy and derive the same
+issuance policy (it relies on CIP-113's key binding for that policy being this token's, and does not
+compare it with `security_policy_id`), retains this deployment's GlobalState and disabled
 unfracking setting, and checks `upgrades_locked == False`. Register replacement logic stake
 credentials before their first use. This transaction cannot change the token supply.
 

@@ -212,6 +212,10 @@ discard it — which is why this defect had exactly one blast radius: the sancti
 
 ## 2. The transfer scripts let the caller choose which token they policed
 
+> **Renamed (2026-11).** The `expected_issuance_policy_id` parameter described below is now called
+> `security_policy_id`, in both transfer scripts and in the minting authority. The rename did not
+> change either transfer script's hash. The text below is kept as written at the time.
+
 **Severity: critical.** Setup cost: one permissionless registry insert, reusable forever, by anyone.
 
 ### What was wrong
@@ -383,6 +387,20 @@ it binds each spend to its own continuation, which must keep the address, the NF
 ---
 
 ## 4. The mint roles rested entirely on external code
+
+> **Superseded in part (2026-11).** The `expected_issuance_policy_id` parameter is now called
+> `security_policy_id`. `MintBurn` reads no registry node and takes its policy from that parameter
+> alone. The comparisons in `UpgradeRegistryNode` (on the spent node) and in
+> `verify_registration_structure` (used by `Register`) were removed: both paths derive the policy
+> from the registry node that names this deployment's proxy, and rely on CIP-113's key binding — a
+> node's key is derived from its field-2 minting logic, and keys are unique — for the pinned
+> base-layer version, as the deployment relies on the base layer's invariants rather than
+> re-creating them (see [below](#what-the-cip-113-base-layer-actually-guarantees)). "The pin stays"
+> therefore no longer holds for those two paths, and a minting authority built with a wrong
+> `security_policy_id` is not refused at `Register`: the deploy script must derive the ID and
+> assert it. None of the three tests named under "Pinned by" below exists any more: the
+> `MintBurn` one went when that branch stopped reading a registry node, the `Register` and
+> `UpgradeRegistryNode` ones with the comparisons they pinned.
 
 **Severity: high**, conditional on base-layer behaviour that this repository does not vendor.
 
@@ -1298,9 +1316,9 @@ the same one.
 * a CIP-68 name needs a body of at least one byte;
 * a plain name must not be empty.
 
-**A single `Register`.** It is admin-signed, takes GlobalState referenced or spent, and refuses a
-deactivated protocol. It runs the registration structure checks (`verify_registration_structure`;
-see [§4](#4-the-mint-roles-rested-entirely-on-external-code) and
+**A single `Register`.** It is admin-signed, reads GlobalState as a reference input only, and
+refuses a deactivated protocol. It runs the registration structure checks
+(`verify_registration_structure`; see [§4](#4-the-mint-roles-rested-entirely-on-external-code) and
 [§14](#14-registry-fields-3-and-4-accepted-any-script-f08)). For a CIP-68 name it
 mints exactly the reference NFT, quantity 1, under the issuance policy, into one well-formed carrier
 (ADA plus that token, with a CIP-68 datum) that has an inline owner stake credential. For a plain
@@ -1354,10 +1372,10 @@ In `validators/minting_authority.ak`:
   `register_rejects_a_reference_nft_holding_security_tokens`;
 * the single variant's gates and structure — `register_fails_when_deactivated`,
   `register_fails_without_admin_signature`, `register_rejects_a_global_state_without_its_nft`,
-  `register_succeeds_when_global_state_is_spent`,
-  `register_gs_spent_still_requires_the_admin_signature`,
+  `register_fails_when_global_state_is_only_spent`,
+  `register_fails_when_ref_index_is_not_global_state`,
   `register_fails_when_node_output_names_another_minting_logic`,
-  `register_fails_when_node_is_keyed_to_a_foreign_policy`, `register_fails_when_unfracking_is_enabled`,
+  `register_fails_when_unfracking_is_enabled`,
   `register_fails_when_transfer_logic_is_not_a_script`,
   `register_fails_when_third_party_logic_is_not_a_script`, `register_rejects_a_foreign_global_state_cs`,
   `register_fails_when_no_registry_nft_is_minted`, `register_cannot_smuggle_a_registry_node_update`
@@ -1758,12 +1776,16 @@ redeemers and transaction shapes.
 
 * **Parameters.** `minting_logic_validator` goes from 1 to 3 parameters,
   `(global_state_policy_id, registry_policy_id, security_asset_name)`. The proxy's hash, and so the
-  issuance policy ID, now depend on the name.
+  issuance policy ID, now depend on the name. The compile-time policy parameter of
+  `minting_authority_validator`, `transfer_logic_validator` and
+  `third_party_transfer_logic_validator` is named `security_policy_id`; its position in each list is
+  unchanged.
 * **Datum, breaking.** `mintable_amount` is field 5 and `transfers_paused` is field 6; they were the
   other way round. An old-layout datum fails closed: the core decoder requires an Int at field 5.
 * **Redeemers.**
-  * Minting authority: `Register { registry_node_output_index, global_state_location }` at
-    constructor 1 replaces `RegisterMint` (constructor 1) and `RegisterStructural` (constructor 3).
+  * Minting authority: `Register { registry_node_output_index, global_state_ref_input_index }` at
+    constructor 1, an index into `reference_inputs` (GlobalState is never spent at registration),
+    replaces `RegisterMint` (constructor 1) and `RegisterStructural` (constructor 3).
     `MintBurn` (0) and `UpgradeRegistryNode` (2) are unchanged.
   * `MintSecurity` loses its field, `issuance_policy_redeemer_index`, and is now `Constr 0 []`; the
     other GlobalState action indices are unchanged.

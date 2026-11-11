@@ -172,7 +172,11 @@ referenced by compact identifiers or hashes.
   **No Critical or High defect.** Two Mediums were found: §12 (dismantling a linked list could
   freeze a live protocol) was fixed; §13 (a seizure operator can move the CIP-68 reference NFT) was
   **accepted by decision**, with its rationale and an implemented-then-reverted fix recorded in the
-  same document. Several further items were reviewed and deliberately left unchanged, with the
+  same document. The current code refuses it: the seizure path cannot move the reference NFT (see
+  [§13](documents/security/security-fixes.md#13-cip-68-metadata-tokens-were-governed-by-an-exact-name-not-by-their-kind)
+  and
+  [§20](documents/security/security-fixes.md#20-a-cip-68-reference-token-was-never-paired-with-the-security-tokens-name)).
+  Several further items were reviewed and deliberately left unchanged, with the
   reasoning under *Acknowledged, and deliberately not changed*. Still not a substitute for the
   third-party audit.
 * **Third-party equivalency assessment** — an independent CMTAT mapping of this codebase is
@@ -460,9 +464,9 @@ on it.
 | 5 | `denylist.denylist_validator` (spend) | `global_state_policy_id`, `denylist_linked_list_policy_id`, `power_user_list_script_hash` | Row 1; the hash of `denylist.mint` (row 4) — this is the **denylist policy ID**; row 3's hash (for `UpdateDenylistEntry`'s `is_admin` check). Same positions as row 4's parameters. |
 | 6 | `minting_logic_script.minting_logic_validator` | `global_state_policy_id`, `registry_policy_id`, `security_asset_name` | Row 1; Prerequisites; operator choice — byte-identical to rows 7–10 (see [Deployment checklist](#deployment-checklist)). |
 | 7 | `global_state_logic.global_state_logic` (withdraw) | `security_asset_name`, `issuance_policy_id`, `global_state_policy_id`, `power_user_list_script_hash`, `max_global_state_datum_bytes` | Operator choice; the **issuance policy ID**, i.e. the security token's policy ID, derived from row 6's hash (see below; **not** row 6's hash itself); row 1; the hash of `power_users_validator` (row 3); the datum-size cap (same value as row 1; a rotated-in logic may choose another). Its hash goes into GlobalState datum **field 0** at genesis. |
-| 8 | `transfer_logic_script.transfer_logic_validator` | `security_asset_name`, `global_state_policy_id`, `expected_issuance_policy_id`, `denylist_script_hash` | Operator choice; row 1; the issuance policy ID (as row 7); the hash of `denylist_validator` (row 5). |
-| 9 | `third_party_transfer_logic_script.third_party_transfer_logic_validator` | `security_asset_name`, `global_state_policy_id`, `expected_issuance_policy_id`, `denylist_script_hash`, `power_user_list_script_hash` | Operator choice; row 1; the issuance policy ID (as row 7); row 5's hash; row 3's hash. (The power-users policy id is read from the GlobalState datum at run time, not compiled in.) |
-| 10 | `minting_authority.minting_authority_validator` | `security_asset_name`, `global_state_policy_id`, `registry_policy_id`, `minting_logic_script_credential_hash`, `expected_issuance_policy_id`, `denylist_script_hash`, `power_user_list_script_hash`, `transfer_logic_script_hash`, `third_party_transfer_logic_script_hash` | Operator choice; row 1; Prerequisites; row 6's hash; the issuance policy ID (as row 7 — it **differs** from row 6's hash, see below); row 5's hash; row 3's hash; row 8's hash; row 9's hash (the scripts registry fields 3 and 4 must name). The power-users policy id is read from the GlobalState datum at run time, not compiled in. |
+| 8 | `transfer_logic_script.transfer_logic_validator` | `security_asset_name`, `global_state_policy_id`, `security_policy_id`, `denylist_script_hash` | Operator choice; row 1; the issuance policy ID (as row 7); the hash of `denylist_validator` (row 5). |
+| 9 | `third_party_transfer_logic_script.third_party_transfer_logic_validator` | `security_asset_name`, `global_state_policy_id`, `security_policy_id`, `denylist_script_hash`, `power_user_list_script_hash` | Operator choice; row 1; the issuance policy ID (as row 7); row 5's hash; row 3's hash. (The power-users policy id is read from the GlobalState datum at run time, not compiled in.) |
+| 10 | `minting_authority.minting_authority_validator` | `security_asset_name`, `global_state_policy_id`, `registry_policy_id`, `minting_logic_script_credential_hash`, `security_policy_id`, `denylist_script_hash`, `power_user_list_script_hash`, `transfer_logic_script_hash`, `third_party_transfer_logic_script_hash` | Operator choice; row 1; Prerequisites; row 6's hash; the issuance policy ID (as row 7 — it **differs** from row 6's hash, see below); row 5's hash; row 3's hash; row 8's hash; row 9's hash (the scripts registry fields 3 and 4 must name). The power-users policy id is read from the GlobalState datum at run time, not compiled in. |
 
 ### What the derived parameters must equal
 
@@ -474,14 +478,16 @@ on it.
   validator hashes (their policy ids).
 * `minting_logic_script_credential_hash` — the hash of `minting_logic_script.minting_logic_validator`
   (row 6), the permanent minting proxy.
-* `issuance_policy_id` (row 7) and `expected_issuance_policy_id` (rows 8–10) — the security token's
+* `issuance_policy_id` (row 7) and `security_policy_id` (rows 8–10) — the security token's
   policy ID, which is the base layer's issuance template applied to the proxy:
   `blake2b_224(0x03 ‖ prefix_cbor_hex ‖ proxy hash ‖ postfix_cbor_hex)`, with the template from
   Prerequisites. It is the key of this token's CIP-113 registry node, and it is **never** the proxy
-  hash itself. A deploy script should derive it this way and assert it differs from
-  `minting_logic_script_credential_hash`: the authority's registration fails closed on a wrong value,
-  but the GlobalState and transfer scripts cannot detect one — a transfer logic built with the wrong
-  policy ID finds no parties and skips the denylist and KYC checks for every transfer.
+  hash itself. No script refuses a wrong value — not the GlobalState logic, not the transfer
+  scripts, and not the minting authority, whose `Register` derives the policy from the registry
+  node rather than comparing it with this parameter — so the deploy script must derive the ID this
+  way and assert it, including that it differs from `minting_logic_script_credential_hash`. A
+  transfer logic built with the wrong policy ID finds no parties and skips the denylist and KYC
+  checks for every transfer.
 * `transfer_logic_script_hash` and `third_party_transfer_logic_script_hash` (row 10) — the hashes of
   rows 8 and 9, in that order. Registration and every `UpgradeRegistryNode` require registry fields 3
   and 4 to name exactly these (F08), and the two must differ. The pin is only as good as row 10's
@@ -602,11 +608,15 @@ The permanent minting proxy derives this token's issuance policy ID from its reg
 because it cannot pin it: the ID is derived from the proxy's own hash. That is sound only because the
 base layer derives a node's key from its field 2 and keeps keys unique. Its supply debit holds only
 because every mint or burn runs the token's minting logic (above). All three are relied on, not
-re-checked; re-verify them on any change of the CIP-113 version.
+re-checked; re-verify them on any change of the CIP-113 version. The minting authority's `Register`
+and `UpgradeRegistryNode` likewise derive the policy from the registry node that names the proxy,
+and rely on the same key binding: neither compares it with the authority's compile-time
+`security_policy_id`.
 
 Because of the registry-dispatch point, this deployment's transfer and seizure logic and the minting
 authority's `MintBurn` read no registry node on those paths — the issuance policy each one polices
-is pinned at compile time instead. The minting proxy does read one, as described above. Because of
+is pinned at compile time instead, in their `security_policy_id` parameter. The minting proxy does
+read one, as described above, and so do `Register` and `UpgradeRegistryNode`. Because of
 the three custody points, none of the mint,
 ordinary-transfer or seizure paths re-check programmable-base custody themselves any more; all three
 rely on the base layer's own guarantees. And because of the no-supply-change point, the upgrade path
@@ -895,9 +905,9 @@ dependent transaction after the preceding output is available.
 4. **Register in the CIP-113 registry.** Insert the node keyed by the issuance policy ID, naming
    the proxy, exactly the transfer and third-party transfer logic scripts the minting authority was
    built with (rows 8 and 9), and the GlobalState policy. The authority's `Register` needs the
-   admin's signature; GlobalState is referenced (or spent) and must not be deactivated. The insert
-   runs the minting proxy and the authority. Under the issuance policy it mints nothing for a plain
-   name and exactly the reference NFT for a CIP-68 name (see
+   admin's signature; GlobalState is a reference input, never spent, and must not be deactivated.
+   The insert runs the minting proxy and the authority. Under the issuance policy it mints nothing
+   for a plain name and exactly the reference NFT for a CIP-68 name (see
    [CIP-68 metadata tokens](#cip-68-metadata-tokens)), and never supply.
 5. **Mint the initial supply.** First issuance is a separate `MintBurn` once the node exists;
    this repository's `Register` refuses any supply, so a registry insert cannot carry one (the base
