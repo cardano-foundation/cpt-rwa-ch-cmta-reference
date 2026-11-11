@@ -61,12 +61,12 @@ pub type MintingAuthorityWithdrawRedeemer {
     /// re-emitted covering node), so the index alone does not identify ours;
     /// the identity assertion against the proxy's hash disambiguates.
     registry_node_output_index: Int,
-    /// WHERE GlobalState is — read for the deactivation flag and the admin
-    /// credential only. A location for the same reason as
-    /// `UpgradeRegistryNode`: no supply changes, so nothing here depends on
-    /// the GS spend validator running, and a registration should not be
-    /// barred from a transaction that also spends GlobalState.
-    global_state_location: GlobalStateLocation,
+    /// Index into `self.reference_inputs` — the GlobalState UTxO, always
+    /// referenced, never spent. GlobalState always exists before a
+    /// registration, and it is read for the deactivation flag and the admin
+    /// credential only: no supply changes, so nothing here needs the GS spend
+    /// validator to run. A wrong index just fails the NFT check.
+    global_state_ref_input_index: Int,
   }
   /// The CIP-113 UPGRADE path for the OTHER logic scripts.
   ///

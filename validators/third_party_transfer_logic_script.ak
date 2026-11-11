@@ -76,7 +76,7 @@ validator third_party_transfer_logic_validator(
   /// whichever registry node invoked this withdraw-0; the old "this node
   /// names me" identity assertion was never load-bearing, since registry
   /// field 4 is a FREE CIP-113 field a decoy node could name too.
-  expected_issuance_policy_id: ByteArray,
+  security_policy_id: ByteArray,
   /// The DENYLIST SPEND VALIDATOR's script hash, which every denylist element
   /// a party cites must sit at. See `absence.with_denylist_element`.
   denylist_script_hash: ByteArray,
@@ -124,7 +124,7 @@ validator third_party_transfer_logic_validator(
         fn(output, result) {
           if value.quantity_of(
             assets.to_value(output.value),
-            expected_issuance_policy_id,
+            security_policy_id,
             security_asset_name,
           ) > 0 {
             // Carry the full `Credential`; the constructor is part of the
@@ -156,7 +156,7 @@ validator third_party_transfer_logic_validator(
       fn(_, _) { True },
       gs_datum.requires_receiver_kyc,
       gs_datum,
-      expected_issuance_policy_id,
+      security_policy_id,
       denylist_script_hash,
       self,
     )
@@ -183,7 +183,7 @@ validator third_party_transfer_logic_validator(
       fn(input) {
         value.quantity_of(
           assets.to_value(input.output.value),
-          expected_issuance_policy_id,
+          security_policy_id,
           security_asset_name,
         ) > 0
       },
@@ -214,7 +214,7 @@ validator third_party_transfer_logic_validator(
           fn(input) {
             cip68.value_has_reference(
               input.output.value,
-              expected_issuance_policy_id,
+              security_policy_id,
               ref_name,
             )
           },

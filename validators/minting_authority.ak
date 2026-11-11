@@ -155,24 +155,21 @@ validator minting_authority_validator(
   // including long after initial deployment — that is the whole point of
   // making this validator swappable.
   minting_logic_script_credential_hash: ByteArray,
-  /// The issuance policy id this deployment mints, pinned at compile
-  /// time.
+  /// The policy this deployment's `MintBurn` mints and burns, pinned at
+  /// compile time. It pairs with `security_asset_name`, and `MintBurn` reads
+  /// it from no registry node.
   ///
-  /// Every derivation below authenticates its registry node by "this node
-  /// names our proxy at field 2". That IS cryptographic under CIP-113 — a
-  /// node's key is derived from the minting-logic hash and the registry
-  /// forbids duplicate keys — but neither guarantee is vendored, pinned or
-  /// re-derived in this repository. If the deployed base
-  /// layer ever fails to hold it, a node naming our proxy but keyed to a
-  /// foreign policy makes `only_permitted_assets_minted` vacuous, reads
-  /// `minted_amount` as 0, demotes the role check from `can_mint` to
-  /// `can_burn` and skips destination vetting entirely — while the
-  /// transaction mints the REAL token to a sanctioned address. This pin makes
-  /// the control local instead of inherited.
+  /// `Register` and `UpgradeRegistryNode` do not compare against it: each
+  /// derives the policy from the registry node that names this deployment's
+  /// proxy at field 2, and relies on CIP-113 for that node being keyed to
+  /// this deployment's policy — the registry binds a node's key to its
+  /// minting logic (`is_programmable_token_id_valid`) and forbids duplicate
+  /// keys. Building the authority with the right value is the deployer's
+  /// duty: one built with a wrong value is not refused at `Register`.
   ///
   /// Not circular: `gs_policy → proxy hash → issuance_policy_id → this
   /// validator`, and this validator is compiled last (it is the swappable one).
-  expected_issuance_policy_id: ByteArray,
+  security_policy_id: ByteArray,
   /// The DENYLIST SPEND VALIDATOR's script hash, which every denylist element
   /// a party cites must sit at. See `absence.with_denylist_element`.
   denylist_script_hash: ByteArray,
@@ -284,11 +281,11 @@ validator minting_authority_validator(
           // live.
           only_permitted_assets_minted(
             self,
-            expected_issuance_policy_id,
+            security_policy_id,
             security_asset_name,
           )?,
           verify_mint_or_burn(
-            expected_issuance_policy_id,
+            security_policy_id,
             minted_amount,
             gs_raw,
             power_user_node_ref_input_index,
@@ -302,7 +299,7 @@ validator minting_authority_validator(
           ),
         }
       }
-      Register { registry_node_output_index, global_state_location } -> {
+      Register { registry_node_output_index, global_state_ref_input_index } -> {
         // The registration's structural invariants are NOT a base-layer
         // duplicate: CIP-113 binds only key <-> minting logic and leaves
         // fields 3-6 free, and it never tells this authority whether an
@@ -315,18 +312,18 @@ validator minting_authority_validator(
           registry_policy_id,
           global_state_policy_id,
           minting_logic_script_credential_hash,
-          expected_issuance_policy_id,
           transfer_logic_script_hash,
           third_party_transfer_logic_script_hash,
           self,
         )
-        // Read for the deactivation flag and the admin only. No supply
-        // changes here, so there is no cap to enforce and either location
-        // will do.
+        // Read for the deactivation flag and the admin only, and always as a
+        // reference input: GlobalState exists before any registration, and no
+        // supply changes here, so nothing needs the GlobalState spend
+        // validator to run.
         let gs_datum = resolve_global_state(
           self.inputs,
           self.reference_inputs,
-          global_state_location,
+          GlobalStateReferenced { global_state_ref_input_index },
           global_state_policy_id,
         )
         and {
@@ -365,9 +362,6 @@ validator minting_authority_validator(
           minting_logic_script_credential_hash,
           constants.minting_logic_script_registry_node_index,
         )
-        // The continuing-node check below already compares against this
-        // id, so pinning the spent node pins both.
-        expect issuance_policy_id == expected_issuance_policy_id
 
         // The continuing node — AUTHENTICATED, not merely indexed. Deriving
         // its policy id the same way as the spent node's asserts three things
@@ -611,7 +605,6 @@ fn verify_registration_structure(
   registry_policy_id: ByteArray,
   global_state_policy_id: ByteArray,
   minting_logic_script_credential_hash: ByteArray,
-  expected_issuance_policy_id: ByteArray,
   transfer_logic_script_hash: ByteArray,
   third_party_transfer_logic_script_hash: ByteArray,
   self: Transaction,
@@ -631,8 +624,6 @@ fn verify_registration_structure(
     minting_logic_script_credential_hash,
     constants.minting_logic_script_registry_node_index,
   )
-  // See the validator parameter's doc comment.
-  expect issuance_policy_id == expected_issuance_policy_id
 
   // INSERT only — and specifically, an insert OF THIS NODE.
   expect [Pair(node_asset_name, _)] = dict.to_pairs(
@@ -1194,28 +1185,6 @@ fn make_registry_node_output_with_vkey_third_party_logic() -> Output {
     third_party_transfer_logic_script: VerificationKey(
       test_third_party_logic_hash,
     ),
-    unfracking_logic_script: VerificationKey(#""),
-    global_state_cs: test_gs_policy_id,
-  }
-  Output { ..make_registry_ref_input().output, datum: InlineDatum(node) }
-}
-
-/// A registry node that NAMES THIS DEPLOYMENT'S PROXY at field 2 — so it
-/// satisfies `derive_issuance_policy_id_from_registry_node`'s identity
-/// assertion — but whose `key` is a foreign policy id.
-///
-/// CIP-113 is supposed to make this unconstructible: a node's key is derived
-/// from the minting-logic hash and the registry forbids duplicate keys. That
-/// That guarantee lives in the BASE LAYER, which this repository neither
-/// vendors nor pins — which is exactly why `expected_issuance_policy_id`
-/// exists. These fixtures model the world where that guarantee fails.
-fn make_registry_node_output_with_foreign_key() -> Output {
-  let node = TestRegistryNode {
-    key: #"9999999999999999999999999999999999999999999999999999999999",
-    next: #"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-    minting_logic_script: Script(test_proxy_hash),
-    transfer_logic_script: Script(test_transfer_logic_hash),
-    third_party_transfer_logic_script: Script(test_third_party_logic_hash),
     unfracking_logic_script: VerificationKey(#""),
     global_state_cs: test_gs_policy_id,
   }
@@ -1871,12 +1840,7 @@ fn make_register_tx(
 }
 
 fn register_redeemer() -> MintingAuthorityWithdrawRedeemer {
-  Register {
-    registry_node_output_index: 0,
-    global_state_location: GlobalStateReferenced {
-      global_state_ref_input_index: 0,
-    },
-  }
+  Register { registry_node_output_index: 0, global_state_ref_input_index: 0 }
 }
 
 /// A registration of a CIP-68-named token: its reference NFT minted once and
@@ -2248,6 +2212,34 @@ test register_rejects_a_global_state_without_its_nft() fail {
   )
 }
 
+/// `Register` reads GlobalState as a reference input only. Here it is spent
+/// instead — at input 0, carrying the admin, with the admin signing — and
+/// `reference_inputs` is empty, so index 0 does not exist. Trap-only
+/// (`|| True`): the empty-list index traps, and a False return must not pass.
+test register_fails_when_global_state_is_only_spent() fail {
+  run_withdraw(
+    register_redeemer(),
+    Transaction {
+      ..make_register_tx(zero, [], [test_admin_hash]),
+      inputs: [make_gs_ref_input()],
+      reference_inputs: [],
+    },
+  ) || True
+}
+
+/// The reference index points at reference input 0, the registry node, while
+/// the real GlobalState sits at index 1. The GlobalState NFT check traps on the
+/// registry node. Trap-only (`|| True`), as above.
+test register_fails_when_ref_index_is_not_global_state() fail {
+  run_withdraw(
+    register_redeemer(),
+    Transaction {
+      ..make_register_tx(zero, [], [test_admin_hash]),
+      reference_inputs: [make_registry_ref_input(), make_gs_ref_input()],
+    },
+  ) || True
+}
+
 // ── Register: registration structure (INVARIANT 5) ───────────────────────────
 
 /// The decoy node is a genuine registry node for a DIFFERENT token, so it
@@ -2259,22 +2251,6 @@ test register_fails_when_node_output_names_another_minting_logic() fail {
   run_withdraw(
     register_redeemer(),
     Transaction { ..base, outputs: [make_decoy_registry_ref_input().output] },
-  )
-}
-
-/// Issuance-policy pin. `validators/regression.ak` covers the `MintBurn`
-/// branch; this covers the pin inside `verify_registration_structure`. The
-/// node names this deployment's proxy, so the pre-existing identity assertion
-/// PASSES — only `expected_issuance_policy_id` rejects it. `expect`, so
-/// `fail`.
-test register_fails_when_node_is_keyed_to_a_foreign_policy() fail {
-  let base = make_register_tx(zero, [], [test_admin_hash])
-  run_withdraw(
-    register_redeemer(),
-    Transaction {
-      ..base,
-      outputs: [make_registry_node_output_with_foreign_key()],
-    },
   )
 }
 
@@ -2592,32 +2568,17 @@ fn upgrade_redeemer() -> MintingAuthorityWithdrawRedeemer {
 const test_new_transfer_logic_hash: ByteArray =
   #"0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e"
 
-/// Issuance-policy pin, `UpgradeRegistryNode`. The SPENT node is what the pin
-/// guards here — the continuing node is then compared against it, so pinning
-/// the spent node pins both. Node names this proxy, so only the new assertion
-/// rejects it. `expect`, so `fail`.
-test upgrade_fails_when_spent_node_is_keyed_to_a_foreign_policy() fail {
-  let foreign = make_registry_node_output_with_foreign_key()
-  run_withdraw(
-    upgrade_redeemer(),
-    Transaction {
-      ..make_upgrade_tx(foreign, make_gs_ref_input(), [test_admin_hash]),
-      inputs: [Input { output_reference: test_out_ref(7), output: foreign }],
-    },
-  )
-}
-
-// ── GlobalState may be spent instead of referenced ──────────────────────────
+// ── UpgradeRegistryNode: GlobalState may be spent instead of referenced ─────
 //
-// `UpgradeRegistryNode` and `Register` both read GlobalState for the admin
-// credential (and the deactivation flag, and for the upgrade the lock) and
-// nothing else, so both take a `GlobalStateLocation` rather than a fixed
-// reference index. These tests exercise the SPENT branch, which the platform
-// does not build today — an unverified branch of shared, security-relevant
-// code is exactly what a future caller trips over. Contrast `MintBurn`, which
-// keeps a bare index because it MUST spend.
+// `UpgradeRegistryNode` reads GlobalState for the admin credential, the
+// deactivation flag and the upgrade lock and nothing else, so it takes a
+// `GlobalStateLocation` rather than a fixed reference index. These tests
+// exercise the SPENT branch, which the platform does not build today — an
+// unverified branch of shared, security-relevant code is exactly what a future
+// caller trips over. Contrast `MintBurn`, which keeps a bare index because it
+// MUST spend, and `Register`, which only ever references it.
 //
-// GlobalState is absent from `reference_inputs` in both fixtures, as it would
+// GlobalState is absent from `reference_inputs` in the fixture, as it would
 // be in a real transaction that spends it (Conway rejects the overlap). The
 // spent input reuses `make_gs_ref_input`'s output so it carries the admin.
 
@@ -2680,34 +2641,6 @@ test upgrade_gs_spent_fails_when_index_is_not_global_state() fail {
       global_state_location: GlobalStateSpent { global_state_input_index: 0 },
     },
     make_upgrade_tx_gs_spent(upgraded_node()),
-  )
-}
-
-test register_succeeds_when_global_state_is_spent() {
-  run_withdraw(
-    Register {
-      registry_node_output_index: 0,
-      global_state_location: GlobalStateSpent { global_state_input_index: 0 },
-    },
-    Transaction {
-      ..make_register_tx(zero, [], [test_admin_hash]),
-      inputs: [make_gs_ref_input()],
-      reference_inputs: [],
-    },
-  )
-}
-
-test register_gs_spent_still_requires_the_admin_signature() {
-  !run_withdraw(
-    Register {
-      registry_node_output_index: 0,
-      global_state_location: GlobalStateSpent { global_state_input_index: 0 },
-    },
-    Transaction {
-      ..make_register_tx(zero, [], []),
-      inputs: [make_gs_ref_input()],
-      reference_inputs: [],
-    },
   )
 }
 

@@ -1627,7 +1627,7 @@ test transfer_rejects_one_action_covering_both_credential_forms() fail {
 // The mint-path "registry node keyed to a foreign policy" test formerly here
 // is gone: `MintBurn` no longer reads a registry node at all, so a decoy
 // node has nothing left to name. The policy this branch mints/burns is
-// pinned at compile time (`expected_issuance_policy_id`), and the base layer
+// pinned at compile time (`security_policy_id`), and the base layer
 // already authenticates whichever registry node invoked this withdraw-0.
 
 /// on the MINT path, which uses a DIFFERENT dedup implementation — the
@@ -1787,7 +1787,7 @@ test the_same_transfer_succeeds_once_unpaused() {
 // `derive_issuance_policy_id_from_registry_node`'s identity assertion was
 // the single binding the decoy-node bypass had to satisfy, and the whole
 // derivation is gone from this handler now — there is no node identity left
-// to assert. The compile-time policy pin (`expected_issuance_policy_id`) is
+// to assert. The compile-time policy pin (`security_policy_id`) is
 // the sole remaining authentication of which policy this script polices.
 
 // ============================================================================

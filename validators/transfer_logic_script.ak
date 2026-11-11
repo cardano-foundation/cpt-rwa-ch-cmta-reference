@@ -69,7 +69,7 @@ validator transfer_logic_validator(
   /// foreign policy made every scan below vacuous. The compile-time pin is
   /// what closes that; nothing about "did some node name me" was ever
   /// load-bearing.
-  expected_issuance_policy_id: ByteArray,
+  security_policy_id: ByteArray,
   /// The DENYLIST SPEND VALIDATOR's script hash, which every denylist element
   /// a party cites must sit at. See `absence.with_denylist_element`.
   denylist_script_hash: ByteArray,
@@ -123,7 +123,7 @@ validator transfer_logic_validator(
         fn(input, acc_stake_credentials) {
           if value.quantity_of(
             assets.to_value(input.output.value),
-            expected_issuance_policy_id,
+            security_policy_id,
             security_asset_name,
           ) > 0 {
             // Senders must also sit INSIDE the programmable-logic base.
@@ -158,10 +158,7 @@ validator transfer_logic_validator(
           // ONE lookup of this policy's tokens per output, answering both
           // questions this fold has: is the output a destination, and does it
           // carry this token's CIP-68 reference NFT, whose shape must hold?
-          let policy_tokens = assets.tokens(
-            output.value,
-            expected_issuance_policy_id,
-          )
+          let policy_tokens = assets.tokens(output.value, security_policy_id)
 
           // The reference NFT's shape is an INVARIANT, not a posture at
           // genesis. `minting_authority` pins it when it is minted; this is
@@ -179,7 +176,7 @@ validator transfer_logic_validator(
                 cip68.enforce_if_reference(
                   policy_tokens,
                   output,
-                  expected_issuance_policy_id,
+                  security_policy_id,
                   ref_name,
                 )
               None -> True
@@ -244,7 +241,7 @@ validator transfer_logic_validator(
       fn(holder_hash, frozen_amount) {
         let paid_back = paid_back_to_holder(
           self.outputs,
-          expected_issuance_policy_id,
+          security_policy_id,
           security_asset_name,
           holder_hash,
         )
@@ -259,14 +256,14 @@ validator transfer_logic_validator(
         // credential.
         paid_back >= frozen_amount || paid_back >= paid_back_to_holder(
           list.map(self.inputs, fn(input) { input.output }),
-          expected_issuance_policy_id,
+          security_policy_id,
           security_asset_name,
           holder_hash,
         )
       },
       gs_datum.requires_sender_kyc,
       gs_datum,
-      expected_issuance_policy_id,
+      security_policy_id,
       denylist_script_hash,
       self,
     )
@@ -277,7 +274,7 @@ validator transfer_logic_validator(
       fn(_, _) { True },
       gs_datum.requires_receiver_kyc,
       gs_datum,
-      expected_issuance_policy_id,
+      security_policy_id,
       denylist_script_hash,
       self,
     )
