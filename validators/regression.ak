@@ -58,16 +58,12 @@ use types/denylist.{
 }
 use types/global_state.{GlobalStateDatum, GlobalStateReferenced}
 use types/kyc_proof.{Cip30Attestation, Cip30AttestationProof, KycProof}
-use types/minting_authority.{
-  MintBurn, MintingAuthorityWithdrawRedeemer, MintingLogicDestinationAction,
-}
+use types/minting_authority.{MintBurn, MintingAuthorityWithdrawRedeemer}
+use types/party_action.{PartyAction}
 use types/power_users.{
   AddPowerUser, PowerUser, RemovePowerUser, StateTransition as PuStateTransition,
 }
-use types/transfer_logic_script.{
-  TransferLogicScriptAction, TransferLogicScriptDestinationAction,
-  TransferLogicScriptWithdrawRedeemer,
-}
+use types/transfer_logic_script.{TransferLogicScriptWithdrawRedeemer}
 
 // ============================================================================
 // The world
@@ -655,25 +651,16 @@ fn dummy_proof() -> KycProof {
   }
 }
 
-fn src_action(covering_ix: Int) -> TransferLogicScriptAction {
-  TransferLogicScriptAction {
-    source_proof: dummy_proof(),
-    source_denylist_ref_input_index: covering_ix,
-  }
+fn src_action(covering_ix: Int) -> PartyAction {
+  PartyAction { proof: dummy_proof(), denylist_ref_input_index: covering_ix }
 }
 
-fn dst_action(covering_ix: Int) -> TransferLogicScriptDestinationAction {
-  TransferLogicScriptDestinationAction {
-    destination_proof: dummy_proof(),
-    destination_denylist_ref_input_index: covering_ix,
-  }
+fn dst_action(covering_ix: Int) -> PartyAction {
+  PartyAction { proof: dummy_proof(), denylist_ref_input_index: covering_ix }
 }
 
-fn mint_dst_action(covering_ix: Int) -> MintingLogicDestinationAction {
-  MintingLogicDestinationAction {
-    destination_proof: dummy_proof(),
-    destination_denylist_ref_input_index: covering_ix,
-  }
+fn mint_dst_action(covering_ix: Int) -> PartyAction {
+  PartyAction { proof: dummy_proof(), denylist_ref_input_index: covering_ix }
 }
 
 // ── Handler runners ─────────────────────────────────────────────────────────

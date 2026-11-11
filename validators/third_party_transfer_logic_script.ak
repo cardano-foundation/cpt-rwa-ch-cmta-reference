@@ -14,6 +14,7 @@ use cardano/certificate.{Certificate, RegisterCredential}
 use cardano/transaction.{
   InlineDatum, Input, NoDatum, Output, OutputReference, Transaction,
 }
+use cardano/value
 use cip68
 use compliance
 use constants
@@ -21,16 +22,17 @@ use kyc/verify.{membership_leaf_key, membership_leaf_value}
 use types/denylist.{Denylist}
 use types/global_state.{
   GlobalStateDatum, GlobalStateLocation, GlobalStateReferenced, GlobalStateSpent,
-  gs_datum_from_location,
+  resolve_global_state,
 }
 use types/kyc_proof.{
   Cip30Attestation, Cip30AttestationProof, KycProof, Membership, MembershipProof,
 }
+use types/party_action.{PartyAction}
 use types/power_users.{PowerUser}
 use types/third_party_transfer_logic_script.{
-  ThirdPartyDestinationAction, ThirdPartyTransferLogicScriptWithdrawRedeemer,
+  ThirdPartyTransferLogicScriptWithdrawRedeemer,
 }
-use utils.{must_be_signed_by_credential, quantity_of}
+use utils.{must_be_signed_by_credential}
 
 /// Third-party (force) transfer logic for emergency regulatory flows.
 ///
@@ -104,7 +106,7 @@ validator third_party_transfer_logic_validator(
     // reader would only add a second NFT scan and a second decode. It also
     // keeps authentication and read inseparable: a bare
     // `expect gs: GlobalStateDatum` proves only that the bytes parse.
-    let gs_datum: GlobalStateDatum = gs_datum_from_location(
+    let gs_datum: GlobalStateDatum = resolve_global_state(
       self.inputs,
       self.reference_inputs,
       redeemer.global_state_location,
@@ -120,8 +122,8 @@ validator third_party_transfer_logic_validator(
         self.outputs,
         [],
         fn(output, result) {
-          if quantity_of(
-            output.value,
+          if value.quantity_of(
+            assets.to_value(output.value),
             expected_issuance_policy_id,
             security_asset_name,
           ) > 0 {
@@ -149,8 +151,6 @@ validator third_party_transfer_logic_validator(
     let all_destinations_ok = compliance.verify_parties(
       outputs_user_credentials,
       redeemer.destination_actions,
-      fn(action) { action.destination_proof },
-      fn(action) { action.destination_denylist_ref_input_index },
       // A partially frozen holder may receive — including the residual a
       // partial seizure returns to them. A fully frozen one still may not.
       fn(_, _) { True },
@@ -181,8 +181,8 @@ validator third_party_transfer_logic_validator(
     let at_least_one_seized_input = list.any(
       self.inputs,
       fn(input) {
-        quantity_of(
-          input.output.value,
+        value.quantity_of(
+          assets.to_value(input.output.value),
           expected_issuance_policy_id,
           security_asset_name,
         ) > 0
@@ -517,11 +517,8 @@ fn p_dummy_proof() -> KycProof {
   }
 }
 
-fn p_dest_action() -> ThirdPartyDestinationAction {
-  ThirdPartyDestinationAction {
-    destination_proof: p_dummy_proof(),
-    destination_denylist_ref_input_index: 2,
-  }
+fn p_dest_action() -> PartyAction {
+  PartyAction { proof: p_dummy_proof(), denylist_ref_input_index: 2 }
 }
 
 fn p_redeemer() -> ThirdPartyTransferLogicScriptWithdrawRedeemer {
@@ -624,10 +621,7 @@ test seizure_succeeds_without_any_registry_reference_input() {
       },
       power_user_node_ref_input_index: 2,
       destination_actions: [
-        ThirdPartyDestinationAction {
-          destination_proof: p_dummy_proof(),
-          destination_denylist_ref_input_index: 1,
-        },
+        PartyAction { proof: p_dummy_proof(), denylist_ref_input_index: 1 },
       ],
     },
     tx,
@@ -684,10 +678,7 @@ fn p_spent_gs_redeemer(
     global_state_location: location,
     power_user_node_ref_input_index: 2,
     destination_actions: [
-      ThirdPartyDestinationAction {
-        destination_proof: p_dummy_proof(),
-        destination_denylist_ref_input_index: 1,
-      },
+      PartyAction { proof: p_dummy_proof(), denylist_ref_input_index: 1 },
     ],
   }
 }
@@ -1038,12 +1029,9 @@ test force_transfer_succeeds_when_destination_membership_proof_is_genuine() {
     VerificationKey(p_dest_stake),
     p_membership_valid_until_ms,
   )
-  let dest_action = ThirdPartyDestinationAction {
-    destination_proof: p_membership_proof(
-      p_dest_stake,
-      p_membership_valid_until_ms,
-    ),
-    destination_denylist_ref_input_index: 2,
+  let dest_action = PartyAction {
+    proof: p_membership_proof(p_dest_stake, p_membership_valid_until_ms),
+    denylist_ref_input_index: 2,
   }
   run_third_party(
     ThirdPartyTransferLogicScriptWithdrawRedeemer {
@@ -1064,12 +1052,9 @@ test force_transfer_rejected_when_destination_membership_root_is_for_another_cre
     VerificationKey(p_source_stake),
     p_membership_valid_until_ms,
   )
-  let dest_action = ThirdPartyDestinationAction {
-    destination_proof: p_membership_proof(
-      p_dest_stake,
-      p_membership_valid_until_ms,
-    ),
-    destination_denylist_ref_input_index: 2,
+  let dest_action = PartyAction {
+    proof: p_membership_proof(p_dest_stake, p_membership_valid_until_ms),
+    denylist_ref_input_index: 2,
   }
   !run_third_party(
     ThirdPartyTransferLogicScriptWithdrawRedeemer {

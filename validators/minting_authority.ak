@@ -10,6 +10,7 @@ use cardano/certificate.{Certificate, RegisterCredential, UnregisterCredential}
 use cardano/transaction.{
   InlineDatum, Input, NoDatum, Output, OutputReference, Transaction,
 }
+use cardano/value
 use cip68
 use constants
 use denylist/absence.{verify_denylist_permits}
@@ -18,15 +19,16 @@ use types/cip68.{Cip68Datum} as types_cip68
 use types/denylist.{Denylist}
 use types/global_state.{
   GlobalStateDatum, GlobalStateReferenced, GlobalStateSpent, decode_global_state,
-  gs_datum_from_location,
+  resolve_global_state,
 }
 use types/kyc_proof.{Cip30Attestation, Cip30AttestationProof}
 use types/minting_authority.{
-  MintBurn, MintingAuthorityWithdrawRedeemer, MintingLogicDestinationAction,
-  RegisterMint, RegisterStructural, UpgradeRegistryNode,
+  MintBurn, MintingAuthorityWithdrawRedeemer, RegisterMint, RegisterStructural,
+  UpgradeRegistryNode,
 }
+use types/party_action.{PartyAction}
 use types/power_users.{PowerUser}
-use utils.{must_be_signed_by_credential, quantity_of}
+use utils.{must_be_signed_by_credential}
 
 /// The swappable minting authority — see the redeemer type's doc comment for
 /// the trust model. This validator's OWN logic (KYC, denylist, power-user
@@ -234,8 +236,8 @@ validator minting_authority_validator(
         // callers — this one and `RegisterMint` below — read it once.
         let gs_input = utils.safe_list_at(self.inputs, global_state_input_index)
         expect
-          quantity_of(
-            gs_input.output.value,
+          value.quantity_of(
+            assets.to_value(gs_input.output.value),
             global_state_policy_id,
             constants.global_state_asset_name,
           ) == 1
@@ -311,8 +313,8 @@ validator minting_authority_validator(
         // `verify_mint_or_burn`.
         let gs_input = utils.safe_list_at(self.inputs, global_state_input_index)
         expect
-          quantity_of(
-            gs_input.output.value,
+          value.quantity_of(
+            assets.to_value(gs_input.output.value),
             global_state_policy_id,
             constants.global_state_asset_name,
           ) == 1
@@ -467,7 +469,7 @@ validator minting_authority_validator(
         expect out_gs_cs: ByteArray = out_gs_cs_data
         expect out_gs_cs == global_state_policy_id
 
-        let gs_datum = gs_datum_from_location(
+        let gs_datum = resolve_global_state(
           self.inputs,
           self.reference_inputs,
           global_state_location,
@@ -495,7 +497,7 @@ validator minting_authority_validator(
           third_party_transfer_logic_script_hash,
           self,
         )
-        let gs_datum = gs_datum_from_location(
+        let gs_datum = resolve_global_state(
           self.inputs,
           self.reference_inputs,
           global_state_location,
@@ -710,7 +712,12 @@ fn verify_registration_structure(
   expect [Pair(node_asset_name, _)] = dict.to_pairs(
     assets.tokens(node_output.value, registry_policy_id),
   )
-  expect quantity_of(self.mint, registry_policy_id, node_asset_name) == 1
+  expect
+    value.quantity_of(
+      assets.to_value(self.mint),
+      registry_policy_id,
+      node_asset_name,
+    ) == 1
 
   // F08: registry fields 3 and 4 must name exactly this deployment's
   // transfer and seizure scripts. See `names_pinned_transfer_scripts`.
@@ -793,7 +800,7 @@ fn verify_mint_or_burn(
   expected_minted_amount: Int,
   gs_raw: Data,
   power_user_node_ref_input_index: Int,
-  destination_actions: List<MintingLogicDestinationAction>,
+  destination_actions: List<PartyAction>,
   security_asset_name: ByteArray,
   power_user_linked_list_policy_id: ByteArray,
   denylist_script_hash: ByteArray,
@@ -806,8 +813,8 @@ fn verify_mint_or_burn(
   // Ledger truth, derived here rather than accepted from a caller so the
   // "actual vs claimed" comparison below cannot be defeated by passing a
   // matched-but-wrong pair.
-  let minted_amount = quantity_of(
-    self.mint,
+  let minted_amount = value.quantity_of(
+    assets.to_value(self.mint),
     issuance_policy_id,
     security_asset_name,
   )
@@ -903,7 +910,7 @@ fn verify_mint_or_burn(
 /// attestation — is documented at the call site in `verify_mint_or_burn`.
 fn verify_mint_destinations(
   outputs: List<Output>,
-  actions: List<MintingLogicDestinationAction>,
+  actions: List<PartyAction>,
   seen: List<Credential>,
   issuance_policy_id: ByteArray,
   security_asset_name: ByteArray,
@@ -915,7 +922,11 @@ fn verify_mint_destinations(
   when outputs is {
     [] -> True
     [output, ..rest_outputs] ->
-      if quantity_of(output.value, issuance_policy_id, security_asset_name) > 0 {
+      if value.quantity_of(
+        assets.to_value(output.value),
+        issuance_policy_id,
+        security_asset_name,
+      ) > 0 {
         // The base layer's `no_escape` already forbids any token of this
         // policy at a non-programmable-base output, so only the inline
         // STAKE credential — the owner identity — needs reading here. An
@@ -959,7 +970,7 @@ fn verify_mint_destinations(
                 dest_pkh == power_user_node_key,
                 // …or a valid KYC proof is presented for the receiver.
                 verify_kyc_proof(
-                  action.destination_proof,
+                  action.proof,
                   dest_credential,
                   gs_datum,
                   issuance_policy_id,
@@ -975,7 +986,7 @@ fn verify_mint_destinations(
             // such a holder. A fully frozen (`None`) holder is still refused.
             verify_denylist_permits(
               dest_pkh,
-              action.destination_denylist_ref_input_index,
+              action.denylist_ref_input_index,
               self.reference_inputs,
               gs_datum.denylist_linked_list_policy_id,
               denylist_script_hash,
@@ -1541,11 +1552,8 @@ fn dummy_proof() {
   }
 }
 
-fn clean_dest_action() -> MintingLogicDestinationAction {
-  MintingLogicDestinationAction {
-    destination_proof: dummy_proof(),
-    destination_denylist_ref_input_index: 2,
-  }
+fn clean_dest_action() -> PartyAction {
+  PartyAction { proof: dummy_proof(), denylist_ref_input_index: 2 }
 }
 
 fn run_withdraw(redeemer: MintingAuthorityWithdrawRedeemer, tx: Transaction) {
@@ -1858,10 +1866,7 @@ test mint_succeeds_without_any_registry_reference_input() {
     power_user_node_ref_input_index: 0,
     minted_amount: amount,
     destination_actions: [
-      MintingLogicDestinationAction {
-        destination_proof: dummy_proof(),
-        destination_denylist_ref_input_index: 1,
-      },
+      PartyAction { proof: dummy_proof(), denylist_ref_input_index: 1 },
     ],
   }
   run_withdraw(
@@ -1932,10 +1937,7 @@ fn register_mint_redeemer(amount: Int) -> MintingAuthorityWithdrawRedeemer {
     power_user_node_ref_input_index: 0,
     minted_amount: amount,
     destination_actions: [
-      MintingLogicDestinationAction {
-        destination_proof: dummy_proof(),
-        destination_denylist_ref_input_index: 1,
-      },
+      PartyAction { proof: dummy_proof(), denylist_ref_input_index: 1 },
     ],
   }
 }

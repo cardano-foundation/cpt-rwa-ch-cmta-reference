@@ -1,18 +1,5 @@
 use types/global_state.{GlobalStateLocation}
-use types/kyc_proof.{KycProof}
-
-/// One entry per unique destination (unique stake-credential among outputs
-/// carrying the security token). Admin provides a KYC proof for each
-/// destination + a denylist element reference index (a covering node, or the
-/// destination's own node when only partially frozen).
-///
-/// Source is NOT checked — force transfer is an admin override: the source
-/// may be denylisted (fully, or below a partial freeze's floor) or its KYC may
-/// have expired. That's the point.
-pub type ThirdPartyDestinationAction {
-  destination_proof: KycProof,
-  destination_denylist_ref_input_index: Int,
-}
+use types/party_action.{PartyAction}
 
 pub type ThirdPartyTransferLogicScriptWithdrawRedeemer {
   /// WHERE GlobalState is, not just which reference input it is.
@@ -29,5 +16,11 @@ pub type ThirdPartyTransferLogicScriptWithdrawRedeemer {
   /// rejects a transaction that both spends and references one UTxO.
   global_state_location: GlobalStateLocation,
   power_user_node_ref_input_index: Int,
-  destination_actions: List<ThirdPartyDestinationAction>,
+  /// One entry per unique destination (unique stake credential among outputs
+  /// carrying the security token).
+  ///
+  /// Source is NOT checked — force transfer is an admin override: the source
+  /// may be denylisted (fully, or below a partial freeze's floor) or its KYC
+  /// may have expired. That's the point.
+  destination_actions: List<PartyAction>,
 }

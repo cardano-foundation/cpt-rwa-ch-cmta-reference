@@ -17,6 +17,7 @@
 //// proxy hash) → logic (takes the mint policy id); field 0 names the logic.
 
 use aiken/builtin
+use aiken/collection/dict
 use aiken/collection/list
 use aiken/primitive/bytearray
 use cardano/address.{Address, Credential, Inline, Script, VerificationKey}
@@ -33,7 +34,7 @@ use tests/global_state_fixtures.{
   t_security_info_len_at_cap, t_security_info_len_over_cap, t_tx, t_vkey_10,
 }
 use types/global_state.{GlobalStateDatum, TrustedEntityMetadata}
-use utils.{must_run_script_withdrawal, quantity_of, quantity_of_policy_id}
+use utils.{must_run_script_withdrawal, quantity_of_policy_id}
 
 // ============================================================================
 // Sanitisation helpers (used by mint validator at genesis)
@@ -194,14 +195,19 @@ validator global_state_mint_validator(
     expect output_datum: GlobalStateDatum = output_datum_raw
 
     and {
-      // No other asset names under this policy are minted alongside the NFT.
-      quantity_of_policy_id(self.mint, policy_id) == 1,
-      // Exactly one global_state NFT is minted.
-      quantity_of(self.mint, policy_id, constants.global_state_asset_name) == 1,
+      // Under this policy exactly one token is minted: one GlobalState NFT,
+      // and no other asset name.
+      when dict.to_pairs(assets.tokens(self.mint, policy_id)) is {
+        [Pair(asset_name, 1)] -> asset_name == constants.global_state_asset_name
+        _ -> False
+      },
       // GlobalState is state, not script storage.
       output_parameters.reference_script == None,
-      // Born at the proxy — the SCRIPT, never a key with the same bytes. Every
-      // logic action keeps it there afterwards.
+      // The NFT's output must be locked by the proxy SCRIPT. Comparing the
+      // whole credential, not just its 28 bytes, rejects a key address
+      // `VerificationKey(global_state_proxy_hash)` that has the same bytes but
+      // is not the proxy. Every later logic action preserves the full address,
+      // so the NFT stays at the proxy.
       output_parameters.address.payment_credential == Script(
         global_state_proxy_hash,
       ),
@@ -517,11 +523,35 @@ test global_state_mint_fails_without_nonce_input() fail {
   run_mint(t_gs_policy, t_mint_tx([], [t_mint_output(datum)], mint))
 }
 
+test global_state_mint_rejects_a_foreign_token_on_the_nft_output() fail {
+  // The GlobalState must be born as exactly ADA + the NFT, so that
+  // `value_preserved` in the logic keeps it that way and no token can ever be
+  // stuffed into it. A foreign token beside the NFT fails `has_nft_strict`, so
+  // no output qualifies and `list.expect_find` traps.
+  let datum = sanitise_datum(#"", 1)
+  let mint = merge(
+    from_asset(t_gs_policy, constants.global_state_asset_name, 1),
+    sanitise_mint(),
+  )
+  let stuffed = Output {
+    ..t_mint_output(datum),
+    value: merge(
+      t_mint_output(datum).value,
+      from_asset(
+        #"ffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "X",
+        1,
+      ),
+    ),
+  }
+  run_mint(t_gs_policy, t_mint_tx([t_nonce_input()], [stuffed], mint))
+}
+
 test global_state_mint_rejects_second_asset_name_under_policy() {
   // A second asset name minted under the same policy, carried by a SEPARATE
   // output — the primary NFT output is untouched, so `list.expect_find`
-  // still locates it without trapping; `quantity_of_policy_id(self.mint,
-  // policy_id) == 1` is the only assertion this violates.
+  // still locates it without trapping; the exact single-token mint check
+  // (`[Pair(global_state_asset_name, 1)]`) is the only assertion this violates.
   let datum = sanitise_datum(#"", 1)
   let mint = merge(
     merge(
@@ -543,8 +573,8 @@ test global_state_mint_rejects_second_asset_name_under_policy() {
 test global_state_mint_rejects_nft_quantity_of_two() {
   // The NFT-carrying output still holds exactly 1 unit (so `list.expect_find`
   // does not trap), but `self.mint` carries 2 units of the same asset name —
-  // `quantity_of(self.mint, policy_id, asset_name) == 1` is the check this
-  // violates.
+  // the exact single-token mint check (`[Pair(global_state_asset_name, 1)]`)
+  // is the check this violates.
   let datum = sanitise_datum(#"", 1)
   let mint = merge(
     from_asset(t_gs_policy, constants.global_state_asset_name, 2),

@@ -16,6 +16,7 @@ use cardano/certificate.{Certificate, RegisterCredential}
 use cardano/transaction.{
   InlineDatum, Input, Mint, Output, Transaction, Withdraw,
 }
+use cardano/value
 use constants
 use types/global_state.{
   AddTrustedEntity, DeactivateContract, GlobalStateDatum,
@@ -32,9 +33,7 @@ use types/global_state.{
   set_transfers_paused, set_trusted_entity_vkeys, set_upgrades_locked,
 }
 use types/power_users.{PowerUser}
-use utils.{
-  must_be_signed_by_credential, must_run_script_withdrawal, quantity_of,
-}
+use utils.{must_be_signed_by_credential, must_run_script_withdrawal}
 
 // ============================================================================
 // GlobalState logic (withdraw-0, named by datum field 0)
@@ -61,7 +60,12 @@ use utils.{
 // INVARIANTS ANY REPLACEMENT GS LOGIC MUST PRESERVE (installed through
 // `RotateGlobalStateScript`; nothing on chain re-checks them afterwards):
 //   1. The NFT stays at the proxy with its full address; non-ADA value is
-//      preserved; no reference script on the output.
+//      preserved; no reference script on the output. Genesis creates the UTxO
+//      as exactly ADA + the NFT (`has_nft_strict`), so by induction it stays
+//      exactly that: no token can be stuffed into it. The readers
+//      (`gs_datum_from_output`, `gs_core_from_output`) rely on this but do not
+//      re-check it, on purpose: a strict reader in the permanent scripts
+//      would turn a successor that breaks this rule into a brick.
 //   2. `deactivated` is terminal (no action once set) and `upgrades_locked`
 //      is one-way and closes rotation, minting-script rotation and
 //      `SetMintableAmount`.
@@ -143,8 +147,11 @@ validator global_state_logic(
     // burned again — so outside genesis this logic's withdrawal still proves
     // nothing without a spent GlobalState. The redeemer's action is ignored;
     // its `global_state_output_index` names the GlobalState output.
-    if quantity_of(
-      self.mint,
+    // Converted once: every path reads it twice (the genesis test below, then
+    // the security-token mint check or `MintSecurity`'s minted amount).
+    let mint = assets.to_value(self.mint)
+    if value.quantity_of(
+      mint,
       global_state_policy_id,
       constants.global_state_asset_name,
     ) == 1 {
@@ -155,8 +162,8 @@ validator global_state_logic(
       expect InlineDatum(genesis_datum) = genesis_output.datum
       and {
         // The output the genesis mint checked: the only one carrying the NFT.
-        quantity_of(
-          genesis_output.value,
+        value.quantity_of(
+          assets.to_value(genesis_output.value),
           global_state_policy_id,
           constants.global_state_asset_name,
         ) == 1,
@@ -173,8 +180,8 @@ validator global_state_logic(
       expect Some(own_input) = list.find(
         self.inputs,
         fn(input) {
-          quantity_of(
-            input.output.value,
+          value.quantity_of(
+            assets.to_value(input.output.value),
             global_state_policy_id,
             constants.global_state_asset_name,
           ) == 1
@@ -240,8 +247,8 @@ validator global_state_logic(
       // The GlobalState UTxO checks every action is held to (hoisted below).
       let address_preserved = global_state_output.address == own_input.output.address
       // ensuring the nft is preserved is what enforces that the same global state UTxO is carried forward after the spend.
-      let nft_preserved = quantity_of(
-        global_state_output.value,
+      let nft_preserved = value.quantity_of(
+        assets.to_value(global_state_output.value),
         global_state_policy_id,
         constants.global_state_asset_name,
       ) == 1
@@ -281,12 +288,12 @@ validator global_state_logic(
       // needs it — does not pay for the input scan.
       let security_token_untouched = fn() {
         and {
-          quantity_of(self.mint, issuance_policy_id, security_asset_name) == 0,
+          value.quantity_of(mint, issuance_policy_id, security_asset_name) == 0,
           list.all(
             self.inputs,
             fn(input) {
-              quantity_of(
-                input.output.value,
+              value.quantity_of(
+                assets.to_value(input.output.value),
                 issuance_policy_id,
                 security_asset_name,
               ) == 0
@@ -403,8 +410,8 @@ validator global_state_logic(
                   issuance_policy_redeemer_index,
                 )
                 expect issuance_policy_redeemer.1st == Mint(issuance_policy_id)
-                let minted_amount = quantity_of(
-                  self.mint,
+                let minted_amount = value.quantity_of(
+                  mint,
                   issuance_policy_id,
                   security_asset_name,
                 )

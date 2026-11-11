@@ -53,7 +53,7 @@ validator minting_logic_validator(global_state_policy_id: ByteArray) {
     expect Script(own_hash) = credential
 
     // Resolved INLINE rather than through a shared location helper such as
-    // `gs_datum_from_location` (which also decodes the full v1 layout, where
+    // `resolve_global_state` (which also decodes the full v1 layout, where
     // this script must read only the frozen core).
     //
     // This one file may not change its compiled bytes. Its hash is frozen into

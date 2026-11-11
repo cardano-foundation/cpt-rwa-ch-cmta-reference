@@ -4,10 +4,8 @@ use aiken/collection/list
 use aiken/collection/pairs
 use aiken_design_patterns/linked_list.{get_node_element_info, run_node_with}
 use cardano/address.{Address, Credential, Script, VerificationKey}
-use cardano/assets.{AssetName, Assets, PolicyId, tokens}
-use cardano/assets as cardano_assets
+use cardano/assets.{Assets, PolicyId, tokens}
 use cardano/transaction.{InlineDatum, Input, Output, Transaction}
-use cardano/value
 use constants
 use types/kyc_proof
 use types/power_users.{PowerUser}
@@ -100,25 +98,6 @@ pub fn safe_list_at(self: List<a>, index: Int) -> a {
   // returns `[]`, and `head_list` traps — the same failure as before.
   expect index >= 0
   head_list(drop_list(index, self))
-}
-
-/// The quantity of one asset in a ledger value, via the builtin `Value`
-/// (`unValueData` + `lookupCoin`, Plutus batch 6, live since protocol version
-/// 11). Several times cheaper than walking the `Data` map, even with the
-/// conversion (measured: ~0.3K mem / 0.1M cpu vs ~15K mem / 3.3M cpu for a
-/// typical UTxO).
-///
-/// The conversion TRAPS on a non-canonical value (unsorted or duplicate keys,
-/// an empty token map, a zero quantity, a key over 32 bytes, a quantity
-/// outside the signed 128-bit range). Every value the ledger puts in the
-/// script context is canonical, so this only changes behaviour for values a
-/// script builds itself — never pass it one.
-pub fn quantity_of(
-  self: Assets,
-  policy_id: PolicyId,
-  asset_name: AssetName,
-) -> Int {
-  value.quantity_of(cardano_assets.to_value(self), policy_id, asset_name)
 }
 
 /// Returns the quantity of all tokens with the policyId

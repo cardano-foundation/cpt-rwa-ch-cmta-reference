@@ -2386,6 +2386,21 @@ fn incoming(tx: Transaction) -> Bool {
   run_logic(t_new_gs_logic, rotate_gs_redeemer(t_new_gs_logic), tx)
 }
 
+// The rotation is the handover to code nothing on chain re-checks, so the
+// outgoing side must hand over a clean UTxO: a foreign asset on the continuing
+// output fails `value_preserved` on both sides. (Positive control:
+// `rotate_gs_logic_succeeds_when_admin_signs`, the same tx without the asset.)
+test rotate_gs_logic_rejects_a_foreign_asset_added_to_the_continuing_output() {
+  let tx = with_gs_output_value(
+    t_rotate_tx(t_rotated_datum()),
+    fn(v) { merge(v, from_asset(t_foreign_policy, "X", 1)) },
+  )
+  and {
+    !outgoing(t_new_gs_logic, tx),
+    !incoming(tx),
+  }
+}
+
 test rotate_gs_logic_succeeds_when_admin_signs() {
   let tx = t_rotate_tx(t_rotated_datum())
   let input_data: Data = t_datum(False, False)
