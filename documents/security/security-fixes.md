@@ -1590,7 +1590,7 @@ core).
 
 ## 22. A rotation could rewrite the datum, and a list could never be replaced
 
-**Severity: hardening.** Four gaps in how GlobalState and the two lists were tied together, changed
+**Severity: hardening.** Five gaps in how GlobalState and the two lists were tied together, changed
 2026-11. Every validator hash except `global_state_proxy`'s moves, so this is a new token (see
 [what this changes for off-chain](#the-2026-11-append-only-datum-and-self-pinning-lists-a-new-token)).
 
@@ -1671,9 +1671,10 @@ checked the element's address against a compile-time copy of the list spend hash
 * Each list mint takes its spend validator's hash, `list_script_hash`, after `init_input_out_ref`.
   `Init` requires the root's whole payment credential to be `Script(list_script_hash)`, so a key
   credential with the same hash is refused; the stake part stays free.
-* Every mint branch (`Init`, `Add…`, `Remove…`, `Deinit`) checks, in one fold over the outputs, that
-  every output carrying a token of the policy pays to `Script(list_script_hash)`
-  (`utils.policy_only_at_script`), as defence in depth on top of the library's own checks.
+* Every mint branch (`Init`, `InitAfterGenesis` (e), `Add…`, `Remove…`, `Deinit`) checks, in one
+  fold over the outputs, that every output carrying a token of the policy pays to
+  `Script(list_script_hash)` (`utils.policy_only_at_script`), as defence in depth on top of the
+  library's own checks.
 * There is no cycle: list spend (GlobalState policy) → list mint (GlobalState policy, one-shot
   input, list spend hash) → list policy id → GlobalState genesis datum.
 * Readers authenticate an element by its policy id alone, read from field 3 or 7. The
@@ -1772,6 +1773,59 @@ in the [integration guide](../integration-guide.md#migrating-the-lists).
 `migrate_lists_fails_with_a_concurrent_security_mint` and
 `migrate_lists_fails_on_a_deactivated_protocol` (`validators/global_state_logic_tests.ak`).
 
+### (e) No list built from this repository could be created after genesis
+
+**Before.** Each list mint's only creation branch, `Init`, requires the GlobalState minted in the
+same transaction to name the new policy (`genesis_global_state`). After genesis only `MigrateLists`
+writes fields 3 and 7, and it needs the new root to exist first, so no new instance of this
+repository's list code could ever be initialised and switched to. The only reachable targets were
+foreign list code or any policy with a root-shaped UTxO, which the root check in (d) cannot tell
+apart from a list built here.
+
+**The fix.**
+
+* Each list mint gains `InitAfterGenesis { root_output_index, global_state_ref_input_index }`,
+  appended last to its `MintRedeemer` (constructor 4; no index moves). It requires the instance's
+  one-shot nonce to be spent, exactly one token of the policy minted (the root), no input carrying
+  the policy, GlobalState as a reference input read through the core reader and not deactivated,
+  the admin's signature, and the root pinned exactly as in `Init` with the per-branch outputs check;
+  the two branches share that code. Each instance is the mint applied with its own nonce, so it has
+  its own policy ID even with identical code, and one root. `Init` is unchanged.
+* It does not read the upgrade lock: the list scripts can never be redeployed and read only the
+  GlobalState core. A list created after `LockUpgrades` is inert, because `MigrateLists` is closed
+  then.
+* `MigrateLists` gains two guards. Each presented root's payment credential must be a script's: a
+  list built from this repository roots at its spend script, so a root held by a key is a mistake.
+  And no swap: the new power-users id must differ from the current denylist id, and the new denylist
+  id from the current power-users id.
+
+**The limit.** The root check catches a mistyped id or an uninitialised list. It does not prove the
+target is a list built from this repository; that is not provable on chain without a hash pin, so
+the runbook re-derives each new policy ID off-chain before the switch. Accepted.
+
+**Pinned by** `power_users_init_after_genesis_succeeds_for_the_admin`,
+`power_users_init_after_genesis_fails_without_the_admin_signature`,
+`power_users_init_after_genesis_fails_on_a_deactivated_protocol`,
+`power_users_init_after_genesis_fails_without_the_nonce`,
+`power_users_init_after_genesis_refuses_a_root_at_a_wallet`,
+`power_users_init_after_genesis_fails_with_a_list_input`,
+`power_users_init_after_genesis_fails_with_a_second_token_minted` and
+`power_users_init_after_genesis_fails_without_a_genuine_global_state`
+(`validators/power_users.ak`); the same eight for the denylist,
+`denylist_init_after_genesis_succeeds_for_the_admin`,
+`denylist_init_after_genesis_fails_without_the_admin_signature`,
+`denylist_init_after_genesis_fails_on_a_deactivated_protocol`,
+`denylist_init_after_genesis_fails_without_the_nonce`,
+`denylist_init_after_genesis_refuses_a_root_at_a_wallet`,
+`denylist_init_after_genesis_fails_with_a_list_input`,
+`denylist_init_after_genesis_fails_with_a_second_token_minted` and
+`denylist_init_after_genesis_fails_without_a_genuine_global_state` (`validators/regression.ak`);
+and `migrate_lists_fails_when_a_root_sits_at_a_key_address`, `migrate_lists_fails_as_a_swap`,
+`migrate_lists_fails_when_the_new_power_users_id_is_the_current_denylist_id`,
+`migrate_lists_fails_when_the_new_denylist_id_is_the_current_power_users_id` and, end to end,
+`migrate_lists_switches_to_a_list_created_after_genesis`, which creates a power-users instance with
+this repository's list mint and switches to it (`validators/global_state_logic_tests.ak`).
+
 ### Accepted residue
 
 * **The per-branch outputs check has no isolating test.** No fixture is refused by
@@ -1807,13 +1861,13 @@ after is this change. Memory / CPU units:
 | transfer bench, `n = 1` (`transfer_cost_by_party_count`) | 647,956 / 197,895,933 | 638,140 / 194,503,128 | −9,816 / −3,392,805 |
 | seizure bench, `n = 1` (`seizure_cost_by_destination_count`) | 617,609 / 192,233,904 | 608,725 / 189,066,762 | −8,884 / −3,167,142 |
 | minting proxy, per mint or burn | 86,667 / 31,601,583 | 81,539 / 30,040,763 | −5,128 / −1,560,820 |
-| GlobalState proxy and logic, `MintSecurity` | 271,623 / 117,393,487 | 275,823 / 118,518,209 | +4,200 / +1,124,722 |
+| GlobalState proxy and logic, `MintSecurity` | 271,623 / 117,393,487 | 276,223 / 118,582,209 | +4,600 / +1,188,722 |
 | minting authority, mint, 1 destination | 453,428 / 156,081,166 | 447,744 / 153,878,746 | −5,684 / −2,202,420 |
 | minting authority, mint, 16 destinations | 2,113,103 / 867,864,031 | 2,041,539 / 842,028,046 | −71,564 / −25,835,985 |
 | minting authority, burn | 251,595 / 87,910,950 | 250,303 / 87,284,101 | −1,292 / −626,849 |
-| whole mint, 1 destination | 811,718 / 305,076,236 | 805,106 / 302,437,718 | −6,612 / −2,638,518 |
-| whole mint, 16 destinations | 2,471,393 / 1,016,859,101 | 2,398,901 / 990,587,018 | −72,492 / −26,272,083 |
-| whole burn | 609,885 / 236,906,020 | 607,665 / 235,843,073 | −2,220 / −1,062,947 |
+| whole mint, 1 destination | 811,718 / 305,076,236 | 805,506 / 302,501,718 | −6,212 / −2,574,518 |
+| whole mint, 16 destinations | 2,471,393 / 1,016,859,101 | 2,399,301 / 990,651,018 | −72,092 / −26,208,083 |
+| whole burn | 609,885 / 236,906,020 | 608,065 / 235,907,073 | −1,820 / −998,947 |
 
 The transfer and seizure savings are the same at every `n` on those benches, which authenticate one
 denylist element; each further element authenticated saves about 4.6 K mem more.
@@ -1824,18 +1878,18 @@ Compiled sizes, in bytes, before → after:
 |---|---:|---:|
 | `minting_logic_validator` | 790 | 780 (−10) |
 | `minting_authority_validator` | 9,279 | 9,186 (−93) |
-| `global_state_logic` | 5,742 | 6,413 (+671) |
+| `global_state_logic` | 5,742 | 6,526 (+784) |
 | `transfer_logic_validator` | 7,233 | 7,175 (−58) |
 | `third_party_transfer_logic_validator` | 7,440 | 7,341 (−99) |
-| `denylist.mint` | 5,772 | 5,924 (+152) |
+| `denylist.mint` | 5,772 | 6,176 (+404) |
 | `denylist_validator` | 2,907 | 2,857 (−50) |
-| `power_users.mint` | 5,105 | 5,306 (+201) |
+| `power_users.mint` | 5,105 | 5,558 (+453) |
 | `power_users_validator` | 2,311 | 2,304 (−7) |
 | `global_state_mint_validator` | 2,335 | 2,335 |
 | `global_state_proxy` | 424 | 424 |
 
 The genesis transaction's scripts (both list mints, the GlobalState mint and `global_state_logic`)
-grow from ≈ 19.0 KB to ≈ 20.0 KB; they are still published as reference scripts before genesis.
+grow from ≈ 19.0 KB to ≈ 20.6 KB; they are still published as reference scripts before genesis.
 
 ---
 
@@ -2109,7 +2163,9 @@ the datum order and one redeemer.
   and may only append.
 * **Redeemers.** `GlobalStateSpendAction` gains `MigrateLists { new_power_user_linked_list_policy_id,
   new_denylist_linked_list_policy_id, power_user_root_ref_input_index,
-  denylist_root_ref_input_index }` at constructor 15; no other index moves.
+  denylist_root_ref_input_index }` at constructor 15, and both list `MintRedeemer` types gain
+  `InitAfterGenesis { root_output_index, global_state_ref_input_index }` at constructor 4; no other
+  index moves.
 * **Transaction shapes.** Mints and burns write `mintable_amount` at field 6. Each list root must
   sit at `Script(list_script_hash)` at genesis, which the mints now enforce.
 * **Hashes.** Every validator hash except `global_state_proxy`'s moves, including both list policies

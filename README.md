@@ -388,10 +388,13 @@ The GlobalState admin has four distinct upgrade paths, plus control over the sup
   it rewrites fields 3 and 7 together, and nothing else. Readers authenticate list elements by these
   two policy ids alone, so this is the only way to replace a list with a bug. Admin-signed. Both
   ids must be 28 bytes, differ from each other and from the issuance and GlobalState policies, and
-  at least one must differ from its current value. The reference input at each index must hold the
-  genuine root of that list (an unchanged list cites its current root), so an id with no
-  initialised list behind it is refused. It does not check what the new lists contain: copying the
-  operators and the sanctions over is the operator's job (see the
+  at least one must differ from its current value; neither may be the other list's current id (no
+  swap). The reference input at each index must hold a root of that list at a script address (an
+  unchanged list cites its current root), which catches a mistyped id or an uninitialised list. It
+  does not prove the new list is built from this repository: that is checked off-chain, by
+  re-deriving its policy ID. A list built from this repository is created after genesis with its
+  mint's `InitAfterGenesis`. It does not check what the new lists contain: copying the operators
+  and the sanctions over is the operator's job (see the
   [list-migration runbook](documents/integration-guide.md#migrating-the-lists)).
 
 `LockUpgrades` is an admin-signed, one-way GlobalState action that closes **all five** for later
@@ -546,12 +549,12 @@ holding the NFT requires it), `transfer_logic_validator` (~7.2 KB, every transfe
 `third_party_transfer_logic_validator` (~7.3 KB, every seizure), `minting_authority_validator`
 (~9.2 KB, every mint and burn) and the minting proxy `minting_logic_validator` (~0.8 KB, also every
 mint and burn — the proxy's withdraw-0 is what the CIP-113 registry node invokes, and it in turn
-requires the authority's). The four large ones (`global_state_logic` is ~6.4 KB and runs in every
+requires the authority's). The four large ones (`global_state_logic` is ~6.5 KB and runs in every
 mint and burn too) must be published once as reference-script UTxOs and
 supplied via reference inputs — not inlined (a transaction is capped at 16 KiB); the proxy is small
 enough to inline but is simplest to publish alongside them. The two list `mint` validators
-(~5.3–5.9 KB) must be treated the same way: the genesis transaction runs both, the GlobalState
-mint and `global_state_logic` — ≈ 20.0 KB of scripts against the 16 KiB limit — so publish them
+(~5.6–6.2 KB) must be treated the same way: the genesis transaction runs both, the GlobalState
+mint and `global_state_logic` — ≈ 20.6 KB of scripts against the 16 KiB limit — so publish them
 and `global_state_logic` before genesis (step 0 of [Initialising a token](#initialising-a-token)).
 
 All five withdraw-0 scripts need their **stake credential registered** on chain before the first
@@ -950,7 +953,7 @@ dependent transaction after the preceding output is available.
 0. **Prepare.** Register the stake credential of `global_state_logic`, applied with this
    deployment's parameters (its `publish` handler accepts `RegisterCredential`), and publish it
    and both list `mint` validators as reference-script UTxOs: the genesis transaction runs those
-   three and the GlobalState mint, ≈ 20.0 KB of scripts, which cannot all be inlined under the
+   three and the GlobalState mint, ≈ 20.6 KB of scripts, which cannot all be inlined under the
    16 KiB transaction limit. No transaction before genesis may spend one of the three reserved
    one-shot inputs, so exclude them from coin selection: they are baked into the mint parameters,
    and spending one means choosing a new input and re-applying every parameter that depends on it.
@@ -966,7 +969,10 @@ dependent transaction after the preceding output is available.
    14 `upgrades_locked = False`. Put each root at its own list
    spend validator. Each list's `Init` rejects a GlobalState datum that does not name it, and a root
    whose payment credential is not `Script(list_script_hash)`, the spend hash that list's mint was
-   applied with. The
+   applied with. A new instance of either list after genesis, for `MigrateLists` to switch to, is
+   created with that list mint's `InitAfterGenesis` instead, applied with its own fresh one-shot
+   input, admin-signed and citing GlobalState as a reference input (see the
+   [list-migration runbook](documents/integration-guide.md#migrating-the-lists)). The
    GlobalState mint also requires the withdraw-0 of the logic field 0 names: add it with a
    `GlobalStateSpendRedeemer` whose `global_state_output_index` points at the GlobalState output
    (its action is ignored at genesis); the logic accepts only a datum that names it and fits its

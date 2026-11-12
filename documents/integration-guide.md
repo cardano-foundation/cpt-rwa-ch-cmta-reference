@@ -47,7 +47,7 @@ Register the applied stake credential of `global_state_logic` (its `publish` han
 `RegisterCredential`): the genesis transaction runs its withdraw-0, and a withdrawal from an
 unregistered credential fails at ledger phase 1. Publish `global_state_logic` and both list `mint`
 validators as reference-script UTxOs too. Genesis runs those three and the GlobalState mint,
-≈ 20.0 KB of scripts, so they cannot all be inlined under the 16 KiB transaction limit. No
+≈ 20.6 KB of scripts, so they cannot all be inlined under the 16 KiB transaction limit. No
 transaction before genesis may spend one of the three reserved one-shot inputs, so exclude them
 from coin selection: their output references are baked into the mint parameters, and spending one
 means choosing a new input and re-applying every parameter that depends on it.
@@ -59,7 +59,8 @@ Spend the three reserved inputs in **one transaction**. Mint exactly one GlobalS
 redeemer from their respective [`MintRedeemer` types](../lib/types/power_users.ak) and
 [`denylist` type](../lib/types/denylist.ak). Each `Init { root_output_index }` points to its own
 root output. The GlobalState mint validator checks that both root policies mint in this same
-transaction; a later transaction for either root is rejected.
+transaction; a later `Init` for either root is rejected. A new instance of either list after genesis
+is created with `InitAfterGenesis` instead (see [Migrating the lists](#migrating-the-lists)).
 
 Output the GlobalState NFT with an inline `GlobalStateDatum` at `global_state_proxy.global_state_proxy`
 (unparameterised; the GlobalState mint takes its hash as `global_state_proxy_hash` and rejects any
@@ -518,13 +519,22 @@ does not check what the new lists contain. In order:
 1. **Pause transfers** (`PauseTransfers`, a `can_pause` operator), so no transfer runs while the
    lists are copied. Mints, burns and seizures stay available during a pause, and the old lists stay
    writable: make no list change until step 6, or repeat steps 3 and 4 after any change.
-2. **Deploy the new list code with its own `Init`.** This repository's list `Init` binds the root
-   to the genesis GlobalState and its one-shot input, so it cannot initialise a list later.
-   Register and publish whatever the new code needs.
-3. **Initialise and populate the new lists**: copy every operator node into the new power-users
-   list and every entry into the new denylist.
-4. **Verify off-chain** that the new denylist has every entry of the old, each with the same
+2. **Create each new list with `InitAfterGenesis`.** `Init` binds the root to the genesis
+   GlobalState, so it cannot initialise a list later. Reserve a fresh one-shot nonce UTxO and apply
+   the list mint with it as `init_input_out_ref`, with the same `global_state_policy_id` and its
+   spend validator's hash as `list_script_hash` (unchanged list code reuses the current spend
+   validator); the new nonce gives the new instance its own policy ID even with identical code.
+   Register and publish whatever new code needs. Then submit the mint with `InitAfterGenesis {
+   root_output_index, global_state_ref_input_index }` (constructor index 4 in both `MintRedeemer`
+   types): spend the nonce, cite GlobalState as a reference input, have the admin sign, and mint the
+   root alone to `Script(list_script_hash)`. A deactivated GlobalState refuses it.
+3. **Populate the new lists**: copy every operator node into the new power-users list and every
+   entry into the new denylist, with the new instance's mint.
+4. **Verify off-chain** that each new policy ID equals the hash of the list mint applied with its
+   new nonce, that the new denylist has every entry of the old, each with the same
    `frozen_amount`, and that the new power-users list grants exactly the intended roles.
+   `MigrateLists` checks only that each id has a root at a script address, which catches a
+   mistyped id or an uninitialised list, not which code the policy runs.
 5. **Submit `MigrateLists`**, admin-signed: spend GlobalState with `GlobalStateSpendRedeemer {
    global_state_output_index, action: MigrateLists { new_power_user_linked_list_policy_id,
    new_denylist_linked_list_policy_id, power_user_root_ref_input_index,
@@ -532,7 +542,8 @@ does not check what the new lists contain. In order:
    reference inputs at those indices. An unchanged list cites its current root. The continuing
    output is the input datum with fields 3 and 7 replaced, nothing else changed or appended. Both
    ids must be 28 bytes, differ from each other and from the issuance and GlobalState policies, and
-   at least one must change. No security token may be minted, burned or spent in the same
+   at least one must change; neither may be the other list's current id (no swap). Each root must
+   sit at a script address. No security token may be minted, burned or spent in the same
    transaction.
 6. **Unpause** (`PauseTransfers`, under an operator node of the list now in field 3).
 
@@ -541,5 +552,9 @@ IDs, so a transaction citing an old node is refused, and before it a new node is
 failure is closed. Switching only the power-users list leaves the permanent denylist code reading
 operators under field 3, so the new power-users list must keep the `PowerUser` datum shape (and
 the library's `"Node"` key layout). The old lists stay on chain, still mutable under their own
-rules but read by nothing. Their roots can be deinitialised only after `DeactivateContract`. Do not
-mix old-list and new-list spends in one transaction: each list mint checks only its own policy.
+rules but read by nothing. Their roots can be deinitialised only after `DeactivateContract`. A new
+instance built from the same code shares its spend address with the old list. Do not mix old-list
+and new-list spends in one transaction: each list mint checks only its own policy.
+`InitAfterGenesis` does not read the upgrade lock, so a list can still be created after
+`LockUpgrades`, but it stays inert: `MigrateLists` is closed then, so no reader ever authenticates
+under its policy.

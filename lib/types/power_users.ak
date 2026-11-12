@@ -48,4 +48,9 @@ pub type MintRedeemer {
     anchor_node_output_index: Int,
     global_state_ref_input_index: Int,
   }
+  /// A new instance of this list after genesis, for `MigrateLists` to switch
+  /// to: spends that instance's one-shot UTxO and needs the GlobalState admin's
+  /// signature, read from the GlobalState reference input. Appended last: the
+  /// constructor index is the redeemer encoding.
+  InitAfterGenesis { root_output_index: Int, global_state_ref_input_index: Int }
 }

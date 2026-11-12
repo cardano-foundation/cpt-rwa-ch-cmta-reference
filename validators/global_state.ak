@@ -126,10 +126,10 @@ fn sanitise_initial_datum(datum: GlobalStateDatum, self_mint: Assets) -> Bool {
     // The two lists must not be the same list. If the ids were equal,
     // every power-user node would double as a denylist node — and since a
     // power-user node's link is unconstrained by the denylist's ordering, the
-    // sanctions list would be satisfiable from day one and never bind. No v1
-    // action changes either field (the power-users id is also pinned across
-    // logic rotations; the denylist id is the new logic's to keep), so this is
-    // the only chance to catch it.
+    // sanctions list would be satisfiable from day one and never bind. Both
+    // fields change afterwards only through `MigrateLists`, admin-signed and
+    // before `LockUpgrades`, which refuses equal ids too; a rotation keeps
+    // both. So this is the check for the ids genesis writes.
     //
     // The length checks are the same defence one step earlier: a malformed id
     // can never name a real minting policy, so the corresponding list would be
@@ -602,7 +602,8 @@ test global_state_mint_fails_when_no_output_carries_the_nft() fail {
 /// One list must not double as the other. `sanitise_mint()` mints both
 /// roots under distinct policies, so with the datum ids made equal the mint
 /// check still passes and the new inequality assertion is what rejects it.
-/// Both fields are immutable after genesis, so this is the only chance.
+/// Afterwards both fields change only through `MigrateLists`, before the
+/// lock, which refuses equal ids as well.
 test sanitise_rejects_identical_list_policies() {
   let d = sanitise_datum(#"", 1)
   !sanitise_initial_datum(

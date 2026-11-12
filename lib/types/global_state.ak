@@ -776,10 +776,13 @@ pub type GlobalStateSpendAction {
   ///
   /// Admin-signed and closed by `LockUpgrades`. Both new ids are 28 bytes,
   /// differ from each other and from the issuance and GlobalState policies,
-  /// and at least one differs from its current value. Each reference input
-  /// named here must hold the genuine root element of its new list (an
-  /// unchanged list cites its current root), so an id with no initialised
-  /// list behind it is refused.
+  /// and at least one differs from its current value. Neither is the other
+  /// list's current id (no swap). Each reference input named here must hold a
+  /// root element of its new list, at a script address (an unchanged list
+  /// cites its current root). That catches a mistyped id or an uninitialised
+  /// list; it does not prove the new list is built from this repository,
+  /// which is verified off-chain. A list built from this repository is
+  /// created after genesis with its mint's `InitAfterGenesis`.
   ///
   /// It does not check what the new lists contain: copying the operators and
   /// the sanctions over is the off-chain migration's duty. Appended last: the

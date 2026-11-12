@@ -60,7 +60,8 @@ pub type SpendRedeemer {
 }
 
 /// Mint redeemer. Add/Remove are gated by a power user holding `is_admin`;
-/// Deinit by the GS admin credential; Init is nonce-gated. Each gated action
+/// Deinit and InitAfterGenesis by the GS admin credential; Init and
+/// InitAfterGenesis are nonce-gated. Each gated action
 /// carries a reference-input index to the GS UTxO. Add/Remove additionally
 /// carry `power_user_node_ref_input_index`, pointing at the power-user linked-
 /// list node (a reference input) whose `is_admin` flag + signature authorise
@@ -82,6 +83,11 @@ pub type MintRedeemer {
     global_state_ref_input_index: Int,
     power_user_node_ref_input_index: Int,
   }
+  /// A new instance of this list after genesis, for `MigrateLists` to switch
+  /// to: spends that instance's one-shot UTxO and needs the GlobalState admin's
+  /// signature, read from the GlobalState reference input. Appended last: the
+  /// constructor index is the redeemer encoding.
+  InitAfterGenesis { root_output_index: Int, global_state_ref_input_index: Int }
 }
 
 /// The one well-formedness rule on a frozen amount, applied at every WRITE of

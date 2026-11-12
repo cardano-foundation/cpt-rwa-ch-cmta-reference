@@ -128,22 +128,31 @@ use utils.{must_be_signed_by_credential, must_run_script_withdrawal}
 //      requires both withdrawals to carry the same one.
 //  11. Field 3 (`power_user_linked_list_policy_id`) and field 7
 //      (`denylist_linked_list_policy_id`) change only through `MigrateLists`:
-//      admin-signed, closed by `LockUpgrades`, and only to the policy of a
-//      genuine initialised list root — invariant 4 pins their values across a
-//      rotation. They are the sole anchors for which list's nodes are power
+//      admin-signed, closed by `LockUpgrades`, and only to the policy of an
+//      initialised list root held at a script address — invariant 4 pins
+//      their values across a rotation. They are the sole anchors for which list's nodes are power
 //      users and which are sanctions: the minting authority, the denylist, the
 //      third-party transfer logic and PauseTransfers here all authenticate
 //      operators under field 3, and the readers authenticate denylist entries
 //      under field 7, with no compile-time copy to check against.
 
-// `element` is the genuine root element of the list minted under `policy_id`,
+// `element` is a root element of the list minted under `policy_id`,
 // authenticated by the library: ADA plus exactly the one root NFT
 // (`constants.linked_list_root_key`), an inline `Root` datum and no reference
-// script. Traps otherwise. The address is not checked: each list mint keeps
-// every NFT of its policy at its own spend script.
+// script. Traps otherwise. The address is not checked here: `MigrateLists`
+// checks only that it is a script's (`at_a_script`).
 fn holds_list_root(element: Output, policy_id: ByteArray) -> Bool {
   get_root_element_info(element, fn(_address, _lovelace, _data, _link) { True })
     |> run_root_with(policy_id, constants.linked_list_root_key)
+}
+
+// The payment credential is a script's. A list built from this repository
+// always roots at its spend script, so a root held by a key is a mistake.
+fn at_a_script(element: Output) -> Bool {
+  when element.address.payment_credential is {
+    Script(_) -> True
+    _ -> False
+  }
 }
 
 validator global_state_logic(
@@ -785,6 +794,14 @@ validator global_state_logic(
                   new_power_user_linked_list_policy_id,
                   new_denylist_linked_list_policy_id,
                 )
+                let power_user_root = utils.safe_list_at(
+                  self.reference_inputs,
+                  power_user_root_ref_input_index,
+                ).output
+                let denylist_root = utils.safe_list_at(
+                  self.reference_inputs,
+                  denylist_root_ref_input_index,
+                ).output
                 // Never a no-op (as PauseTransfers): at least one list switches.
                 let switches_a_list = or {
                   new_power_user_linked_list_policy_id != input_datum.power_user_linked_list_policy_id,
@@ -807,23 +824,30 @@ validator global_state_logic(
                   (new_denylist_linked_list_policy_id != issuance_policy_id)?,
                   (new_denylist_linked_list_policy_id != global_state_policy_id)?,
                   switches_a_list?,
-                  // Each new id names an initialised list: the reference input
-                  // holds its genuine root (an unchanged list cites its current
-                  // root). A mistyped id has no root and traps here.
+                  // No swap: neither new id is the other list's current id.
+                  // Read under the other field, operators would count as
+                  // sanctions and sanctions would not decode as operators.
+                  (new_power_user_linked_list_policy_id != input_datum.denylist_linked_list_policy_id)?,
+                  (new_denylist_linked_list_policy_id != input_datum.power_user_linked_list_policy_id)?,
+                  // The reference input holds a root of the list each new id
+                  // names (an unchanged list cites its current root), which
+                  // catches a mistyped id or an uninitialised list: neither has
+                  // a root, so the check traps. It does not prove the target is
+                  // a list built from this repository: any policy that put a
+                  // root-shaped UTxO at a script passes. Which code a new id
+                  // runs is verified off-chain.
                   holds_list_root(
-                    utils.safe_list_at(
-                      self.reference_inputs,
-                      power_user_root_ref_input_index,
-                    ).output,
+                    power_user_root,
                     new_power_user_linked_list_policy_id,
                   )?,
                   holds_list_root(
-                    utils.safe_list_at(
-                      self.reference_inputs,
-                      denylist_root_ref_input_index,
-                    ).output,
+                    denylist_root,
                     new_denylist_linked_list_policy_id,
                   )?,
+                  // Each root sits at a script, as every list built from this
+                  // repository does: a root held by a key is a mistake.
+                  at_a_script(power_user_root)?,
+                  at_a_script(denylist_root)?,
                   // Fields 3 and 7 replaced, nothing else changed or appended.
                   builtin.equals_data(
                     expected_output_datum,

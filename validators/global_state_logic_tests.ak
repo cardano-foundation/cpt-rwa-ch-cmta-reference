@@ -21,6 +21,7 @@ use global_state_logic as v_logic
 use global_state_proxy as v_proxy
 use minting_authority as v_authority
 use minting_logic_script as v_minting_proxy
+use power_users as v_power_users
 use tests/global_state_fixtures.{
   rotated, t_admin, t_data_of_raw_length, t_datum, t_datum_size, t_dl_ll_policy,
   t_gs_logic, t_gs_policy, t_input, t_many_entities, t_max_datum_bytes,
@@ -39,7 +40,7 @@ use types/global_state.{
   idx_deactivated, idx_mintable_amount, idx_transfers_paused, set_security_info,
 }
 use types/minting_authority.{MintBurn}
-use types/power_users.{PowerUser}
+use types/power_users.{InitAfterGenesis, PowerUser}
 use utils
 
 // ============================================================================
@@ -2644,6 +2645,159 @@ test migrate_lists_fails_on_a_deactivated_protocol() fail {
     t_new_dl_ll_policy,
     t_migrate_tx(d, t_new_pu_ll_policy, t_new_dl_ll_policy),
   )
+}
+
+/// `root` moved to a key address: the list script's hash under a key
+/// credential, so only the credential's kind differs.
+fn t_at_a_key(root: Input) -> Input {
+  Input {
+    ..root,
+    output: Output {
+      ..root.output,
+      address: Address {
+        payment_credential: VerificationKey(t_list_script_hash),
+        stake_credential: None,
+      },
+    },
+  }
+}
+
+// Each root is otherwise genuine, so the root check passes and only the
+// key-address guard refuses: once for each list.
+test migrate_lists_fails_when_a_root_sits_at_a_key_address() {
+  let d = t_migrate_datum()
+  let tx = t_migrate_tx(d, t_new_pu_ll_policy, t_new_dl_ll_policy)
+  and {
+    !migrate(
+      d,
+      t_new_pu_ll_policy,
+      t_new_dl_ll_policy,
+      Transaction {
+        ..tx,
+        reference_inputs: [
+          t_at_a_key(t_list_root(t_new_pu_ll_policy)),
+          t_list_root(t_new_dl_ll_policy),
+        ],
+      },
+    ),
+    !migrate(
+      d,
+      t_new_pu_ll_policy,
+      t_new_dl_ll_policy,
+      Transaction {
+        ..tx,
+        reference_inputs: [
+          t_list_root(t_new_pu_ll_policy),
+          t_at_a_key(t_list_root(t_new_dl_ll_policy)),
+        ],
+      },
+    ),
+  }
+}
+
+// Each list moves to the other's field, each citing its current root. Both
+// no-swap guards refuse it.
+test migrate_lists_fails_as_a_swap() {
+  let d = t_migrate_datum()
+  !migrate(
+    d,
+    t_dl_ll_policy,
+    t_pu_ll_policy,
+    t_migrate_tx(d, t_dl_ll_policy, t_pu_ll_policy),
+  )
+}
+
+// One half of a swap at a time: the other id is new, so only one no-swap
+// guard refuses.
+test migrate_lists_fails_when_the_new_power_users_id_is_the_current_denylist_id() {
+  let d = t_migrate_datum()
+  !migrate(
+    d,
+    t_dl_ll_policy,
+    t_new_dl_ll_policy,
+    t_migrate_tx(d, t_dl_ll_policy, t_new_dl_ll_policy),
+  )
+}
+
+test migrate_lists_fails_when_the_new_denylist_id_is_the_current_power_users_id() {
+  let d = t_migrate_datum()
+  !migrate(
+    d,
+    t_new_pu_ll_policy,
+    t_pu_ll_policy,
+    t_migrate_tx(d, t_new_pu_ll_policy, t_pu_ll_policy),
+  )
+}
+
+// End to end, this proves a target built from this repository is reachable.
+// A new power-users instance, under `t_new_pu_ll_policy`, is created after
+// genesis by this repository's list mint (`InitAfterGenesis`, built as in
+// `power_users_init_after_genesis_succeeds_for_the_admin`: its nonce spent,
+// GlobalState as a reference input, the admin signing), which accepts. The
+// root it produced is then the reference input of a `MigrateLists` switching
+// the power-users list to it, which accepts too.
+test migrate_lists_switches_to_a_list_created_after_genesis() {
+  let d = t_migrate_datum()
+  let nonce = Input {
+    output_reference: t_out_ref(50),
+    output: Output {
+      address: Address {
+        payment_credential: VerificationKey(t_admin),
+        stake_credential: None,
+      },
+      value: from_lovelace(5_000_000),
+      datum: NoDatum,
+      reference_script: None,
+    },
+  }
+  let creation = Transaction {
+    ..t_tx(d, d, [t_admin]),
+    inputs: [nonce],
+    reference_inputs: [t_input(d)],
+    mint: from_asset(t_new_pu_ll_policy, constants.linked_list_root_key, 1),
+    outputs: [
+      Output {
+        address: Address {
+          payment_credential: Script(t_list_script_hash),
+          stake_credential: None,
+        },
+        value: merge(
+          from_lovelace(2_000_000),
+          from_asset(t_new_pu_ll_policy, constants.linked_list_root_key, 1),
+        ),
+        datum: InlineDatum(
+          Element {
+            data: Root { data: builtin.constr_data(0, []) },
+            link: None,
+          },
+        ),
+        reference_script: None,
+      },
+    ],
+  }
+  expect [new_root] = creation.outputs
+  and {
+    v_power_users.mint.mint(
+      t_gs_policy,
+      t_out_ref(50),
+      t_list_script_hash,
+      InitAfterGenesis { root_output_index: 0, global_state_ref_input_index: 0 },
+      t_new_pu_ll_policy,
+      creation,
+    ),
+    migrate(
+      d,
+      t_new_pu_ll_policy,
+      t_dl_ll_policy,
+      Transaction {
+        ..t_migrate_tx(d, t_new_pu_ll_policy, t_dl_ll_policy),
+        reference_inputs: [
+          Input { output_reference: t_out_ref(7), output: new_root },
+          t_list_root(t_dl_ll_policy),
+        ],
+      },
+    ),
+  }
 }
 
 // ── Burns after SetMintableAmount — headroom semantics ───────────────────────
