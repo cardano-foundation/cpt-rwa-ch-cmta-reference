@@ -1161,6 +1161,27 @@ test denylist_init_rejects_a_missing_nonce() fail {
   )
 }
 
+// A UTxO is spent, but not the nonce: `expect nonce_validated` traps, so
+// only a trap passes this `… || True` body.
+test denylist_init_fails_with_another_utxo_spent_instead_of_the_nonce() fail {
+  v_denylist.mint.mint(
+    gs_policy,
+    oref(50),
+    denylist_spend_hash,
+    DenylistInit { root_output_index: 0 },
+    denylist_policy,
+    Transaction {
+      ..base_tx(),
+      inputs: [nonce_input(51)],
+      mint: from_asset(denylist_policy, constants.linked_list_root_key, 1),
+      outputs: [
+        dl_root_output(None),
+        gs_output(2_000_000, gs_datum(False, False, False, False)),
+      ],
+    },
+  ) || True
+}
+
 // ============================================================================
 // PROPERTY: the sanctions list can only be dismantled AFTER the token has been
 // decommissioned.
@@ -2106,6 +2127,13 @@ test denylist_init_after_genesis_fails_without_the_admin_signature() {
   !run_denylist_iag(Transaction { ..dl_iag_tx(), extra_signatories: [] })
 }
 
+// Signed, but by a key that is not the admin: a False return, hence `!`.
+test denylist_init_after_genesis_fails_when_signed_by_a_stranger_only() {
+  !run_denylist_iag(
+    Transaction { ..dl_iag_tx(), extra_signatories: [attacker_wallet] },
+  )
+}
+
 // A decommissioned protocol gets no new list.
 test denylist_init_after_genesis_fails_on_a_deactivated_protocol() {
   !run_denylist_iag(
@@ -2121,6 +2149,11 @@ test denylist_init_after_genesis_fails_on_a_deactivated_protocol() {
 // The library's `expect nonce_validated` traps.
 test denylist_init_after_genesis_fails_without_the_nonce() fail {
   run_denylist_iag(Transaction { ..dl_iag_tx(), inputs: [] }) || True
+}
+
+// A UTxO is spent, but not the nonce: the same trap.
+test denylist_init_after_genesis_fails_with_another_utxo_spent_instead_of_the_nonce() fail {
+  run_denylist_iag(Transaction { ..dl_iag_tx(), inputs: [nonce_input(51)] }) || True
 }
 
 // The root pin traps, as in `Init`.
