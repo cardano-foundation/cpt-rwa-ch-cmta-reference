@@ -524,6 +524,8 @@ not feed the issuance policy ID, because the minting proxy (row 6) does not take
   way and assert it, including that it differs from `minting_logic_script_credential_hash`. A
   transfer logic built with the wrong policy ID finds no parties and skips the denylist and KYC
   checks for every transfer.
+  A minting authority built with the wrong `security_policy_id` still passes `Register`, but every
+  `MintBurn` is refused until `RotateMintingScript` installs a corrected one (fails closed).
 * `transfer_logic_script_hash` and `third_party_transfer_logic_script_hash` (row 10) — the hashes of
   rows 8 and 9, in that order. Registration and every `UpgradeRegistryNode` require registry fields 3
   and 4 to name exactly these (F08), and the two must differ. The pin is only as good as row 10's
@@ -594,8 +596,10 @@ runs, so forgetting the proxy's registration makes every mint and burn fail from
 1. **One name, byte-identical, in rows 7–10.** Each script polices only the `security_asset_name`
    it was built with. Transfer or seizure scripts built with a name other than the authority's find
    no parties, so the minted token goes unpoliced. A GlobalState logic built with another name
-   refuses every mint, which fails closed. Check by rebuilding each script from source and comparing
-   hashes. After deployment, smoke-test that a mint whose GlobalState output is not debited is
+   refuses every `MintSecurity`, but its name-scoped security-token guard then misses the real
+   token, so before `LockUpgrades` an admin-signed `SetMintableAmount` (in − n) can carry a mint of
+   n that is still debited from the cap, with role, KYC and denylist still applying. Check by
+   rebuilding each script from source and comparing hashes. After deployment, smoke-test that a mint whose GlobalState output is not debited is
    rejected, and that a transfer of the minted token without a denylist proof is rejected.
 2. **The name passes the registration rules** (see `security_asset_name` under
    [What the derived parameters must equal](#what-the-derived-parameters-must-equal)). Check it
@@ -605,8 +609,8 @@ runs, so forgetting the proxy's registration makes every mint and burn fail from
    [CIP-68 metadata tokens](#cip-68-metadata-tokens)), and keep the reference NFT's datum within the
    base layer's `max_inline_datum_bytes`.
 4. **Before `LockUpgrades`.** Rebuild `global_state_logic` and `minting_authority` from source at
-   the audited commit with every parameter, and check their hashes against datum fields 0 and 4
-   respectively. The lock is enforced by the installed GlobalState logic itself, so after it the cap
+   the commit being deployed (or its tagged release) with every parameter, and check their hashes
+   against datum fields 0 and 4 respectively. The lock is enforced by the installed GlobalState logic itself, so after it the cap
    is final only if that logic is a reviewed build of this repository (see
    [Upgrading and locking the rules](#upgrading-and-locking-the-rules)). The lock makes the
    installed authority permanent too: it cannot be rotated afterwards, and it enforces the
@@ -699,7 +703,8 @@ changes the guarantees above:
 Both lists keep every NFT of their policy at their own spend script, and the readers rely on it.
 The guarantee has three parts: the linked-list library's usage guideline
 (`anastasia-labs/aiken-design-patterns` v1.9.0, whose insert and remove count the list's inputs since
-v1.8.0 and keep each node and continuation at its anchor's address); this repository's `Init` pin,
+v1.8.0 and keep each continuation at its anchor's exact address and each new node at its anchor's
+payment credential, its stake part being free); this repository's `Init` pin,
 which requires the root's payment credential to be `Script(list_script_hash)`; and a check on every
 list mint branch that every output carrying the list's NFT pays to that script
 (`utils.policy_only_at_script`). So the readers — the minting authority, the transfer and seizure

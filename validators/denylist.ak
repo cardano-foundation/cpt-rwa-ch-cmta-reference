@@ -1059,8 +1059,9 @@ test denylist_insert_accepts_a_global_state_with_trailing_fields() {
   )
 }
 
-// Frozen core: the sanctions path keeps working when a later logic reshapes
-// every field after 0–4.
+// Frozen core: the sanctions path's GlobalState read is permanent and tolerates
+// any tail after fields 0–4. A rotation is append-only, so such a tail only
+// arises from a successor logic's own later actions.
 test denylist_insert_accepts_a_global_state_with_a_reshaped_tail() {
   t_run_denylist_add(
     t_key_28,

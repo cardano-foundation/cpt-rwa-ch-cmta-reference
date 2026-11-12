@@ -271,8 +271,8 @@ The misleading reasoning in `lib/utils.ak` was rewritten to say explicitly that 
 index 2 only, and that every caller passing index 3 or 4 must compare the derived id against a
 compile-time expectation.
 
-**Pinned by** `transfer_rejects_a_foreign_registry_node`, `seizure_rejects_a_foreign_registry_node`,
-and — as the control that proves the pin did not simply break the path —
+**Pinned by** `transfer_rejects_a_foreign_registry_node` and `seizure_rejects_a_foreign_registry_node`
+(both historical, retired as described below), and — as the control that proves the pin did not simply break the path —
 `transfer_rejects_a_sanctioned_sender_via_the_genuine_node`.
 
 **Later hardening (2026-08-20):** the registry node is no longer consulted at all on the transfer,
@@ -367,7 +367,8 @@ gone (§22). In its place, each list keeps every NFT of its policy at its own sp
 list mint takes its spend validator's hash (`list_script_hash`) and pins the root's payment
 credential to `Script(list_script_hash)` at `Init`; every mint branch checks that every output
 carrying the policy pays there (`utils.policy_only_at_script`); the library's induction keeps each
-node and continuation at its anchor's address from that root on; and tests on every list path
+continuation at its anchor's exact address and each new node at its anchor's payment credential (its
+stake part is free) from that root on; and tests on every list path
 refuse moving a list NFT off its list script. Readers now authenticate an element by its policy id
 alone. The reason is identity: with the pin, a list was named twice — by its policy id in the
 GlobalState datum and by its spend hash compiled into every reader — so replacing a list meant
@@ -388,13 +389,13 @@ defence rather than a belt-and-braces one: that validator cannot be rotated late
 
 **Pinned by** `denylist_insert_rejects_a_smuggled_extra_node_input` and
 `power_user_insert_rejects_a_smuggled_extra_node_input` (each built from a proven-valid insert plus
-exactly one extra input, so they isolate the count). The reader-side pin was pinned by
+exactly one extra input, so they isolate the count). The reader-side pin was pinned by (all five
+historical, removed in 2026-11 with the pin itself; the tests that replace them are listed in §22)
 `absence_proof_rejects_a_covering_node_in_a_wallet`,
 `wallet_held_power_user_node_cannot_authorise_a_sanction`,
 `misplaced_power_user_node_cannot_authorise_a_sanction`, and — in
 `validators/global_state_logic_tests.ak` — `pause_fails_when_the_power_user_node_is_in_a_wallet` and
-`pause_fails_when_the_power_user_node_is_at_the_wrong_script` (historical: removed in 2026-11 with
-the pin itself; the tests that replace them are listed in §22).
+`pause_fails_when_the_power_user_node_is_at_the_wrong_script`.
 
 The two `*_spend_handler_is_pure_delegation` tests are deliberate records that the `spend` handlers'
 `StateTransition` path was **not** changed — the constraint lives in the mint validators, which must
@@ -536,7 +537,8 @@ code reads the stake credential *as if* the payment credential were the base scr
 makes that true by construction.
 
 **Pinned by** `mint_rejects_a_destination_outside_the_programmable_logic_base` and
-`transfer_rejects_a_destination_outside_the_programmable_logic_base`.
+`transfer_rejects_a_destination_outside_the_programmable_logic_base` (both historical, retired as
+described below).
 
 **Later hardening (2026-08-20):** the programmable-base payment-credential pin described above was
 removed from the mint path (`verify_mint_destinations`, `reference_nft_output_is_pinned`) and from
@@ -673,10 +675,10 @@ Deduplication now runs over the full `Credential`, so `VerificationKey(H)` and `
 Constructing such a pair is computationally infeasible, so in practice nothing changes — but the
 rule is stated because it decides which key an integrator deduplicates on.
 
-**Pinned by** `attestation_fails_when_credential_type_mismatches` and
-`attestation_fails_when_script_payload_used_for_a_key`, both using genuine signatures so the
-credential-form mismatch is isolated (both directions — a one-directional check would still let one
-form impersonate the other), `membership_leaf_key_separates_credential_forms`, and four tests
+**Pinned by** `cip30_rejects_signed_wrong_credential_type`, which uses a genuine signature over a
+payload carrying the other credential-type byte, so the credential-form mismatch is isolated;
+`membership_leaf_key_separates_credential_forms` and `membership_genuine_root_rejects_other_credential`,
+which show that a leaf built for one form does not satisfy the other; and four tests
 covering the two *separate* dedup implementations:
 `transfer_treats_key_and_script_forms_of_one_hash_as_two_parties` /
 `transfer_rejects_one_action_covering_both_credential_forms` for `list.unique`, and
@@ -1111,7 +1113,7 @@ address has that many tokens frozen; which ones does not matter".
    `f`, and one below `f` cannot lower its balance. The guarantee is net per transaction — tokens
    paid to `h` in the same transaction count — where CMTAT checks each gross transfer. The only
    ways below `min(pre, f)` are a seizure (`can_force_transfer`) or an `is_admin` Remove/Update,
-   which change `f` and move nothing. The second arm reuses `paid_back_to_holder` over the inputs'
+   which change `f` and move nothing. The second arm reuses `held_by` over the inputs'
    outputs and runs only when the first fails. Reusing it rather than a dedicated early-exit walk
    keeps the script at +81 B instead of +190 B, which every transfer pays as reference-script fee.
    A send that pays back `f` costs a constant +2 201 mem / +428 049 cpu over the old rule, however
@@ -1291,8 +1293,10 @@ weakened to a plain signature check, is caught by its own test (16 mutants, 16 k
 unless it equals the admin, the current authority or the GlobalState logic. A typo blocks every
 mint, burn and registry update until the admin rotates again; an unregistered credential blocks
 them until it is registered. Worse, any other script of this deployment can be installed. The worst is the transfer logic: its
-withdraw-0 passes for anyone when no token moves, so anyone could then mint up to the cap with no
-KYC, denylist or operator check. An earlier authority build can be installed again too, and brings
+withdraw-0 passes for anyone when no token moves, so anyone could then mint with no KYC,
+denylist or operator check. The supply debit lives only in the authority's `MintBurn`
+([§21](#21-the-supply-cap-is-debited-by-the-minting-authority)), so such an authority mints
+uncapped. An earlier authority build can be installed again too, and brings
 back whatever it lacked, such as the fixes in [§18](#18-scripts-that-always-run-could-sign-for-a-role).
 
 **Accepted by decision, and not checked on chain.** The rotation is admin-signed, and the admin
@@ -2110,7 +2114,8 @@ the notes above apply to any redeploy onto current `main`.
 | This deployment's transfer logic runs on every spend of its token | **True** | `has_withdrawal(transfer_logic_script)` is required for every input policy proved to exist | `transfer_logic_validator`/`third_party_transfer_logic_validator`'s registry-node read removal (2026-08-20) — no independent registry lookup on transfer or seizure |
 | A registry-node spend can never mint or burn that node's own token | **True** | `registry_spend` hoists `!mint_has_policy(self.mint, spent_node.key)` above its `when`, so it covers both the in-place update and the covering-node spend | `UpgradeRegistryNode`'s belt-and-braces no-mint re-check removal (2026-08-21) |
 | The seizure path is the only one that skips owner consent | **True** | the third-party path never calls `authorised_stake_cred`; the transfer path always does | — |
-| Every list NFT stays at its list spend script (a linked-list library guarantee, not the base layer's) | **Relied on** — re-verify on any library change | `anastasia-labs/aiken-design-patterns` v1.9.0 keeps each node and continuation at its anchor's address, and its insert and remove count the list's inputs (since v1.8.0; [the linked-list dependency](#the-linked-list-dependency)); this repository's list mints pin the root to `Script(list_script_hash)` at `Init` and check every output carrying the policy on every branch (`utils.policy_only_at_script`) | The readers' list-element address check removal (2026-11, [§22](#22-a-rotation-could-rewrite-the-datum-and-a-list-could-never-be-replaced)): power-user nodes and denylist elements are authenticated by policy id alone |
+| `issuance_mint` requires the minting logic's withdraw-0 on every mint or burn | **True** | `issuance_mint` (`validators/issuance_mint.ak`, `95e99ac`) requires `has_key_or_fail(withdrawals, minting_logic_cred)`, the credential it is parameterised by, on every mint or burn of its policy | [§21](#21-the-supply-cap-is-debited-by-the-minting-authority)'s reliance: the minting proxy, and through it the authority's same-transaction debit, runs on every mint or burn |
+| Every list NFT stays at its list spend script (a linked-list library guarantee, not the base layer's) | **Relied on** — re-verify on any library change | `anastasia-labs/aiken-design-patterns` v1.9.0 keeps each continuation at its anchor's exact address and each new node at its anchor's payment credential (its stake part is free), and its insert and remove count the list's inputs (since v1.8.0; [the linked-list dependency](#the-linked-list-dependency)); this repository's list mints pin the root to `Script(list_script_hash)` at `Init` and check every output carrying the policy on every branch (`utils.policy_only_at_script`) | The readers' list-element address check removal (2026-11, [§22](#22-a-rotation-could-rewrite-the-datum-and-a-list-could-never-be-replaced)): power-user nodes and denylist elements are authenticated by policy id alone |
 
 Two things this settled:
 
@@ -2376,10 +2381,13 @@ Grant the two roles together to whoever is expected to perform court- or regulat
 
 **Three deployment properties that no code here can check:**
 
-- **The GlobalState NFT must actually land at `global_state_spend_validator`'s address at genesis.**
-  The genesis mint validator cannot verify this — the circularity is real, and it says so. Verify
-  the NFT's address on chain immediately after genesis. If it is wrong, the protocol's entire state
-  is forgeable and destructible by whoever holds that UTxO, with no exploit needed.
+- **The GlobalState mint must be built with the hash of the real `global_state_proxy`.** The
+  GlobalState mint pins the NFT's output to the script credential it is parameterised with
+  (`global_state_proxy_hash`), but it cannot check that this parameter is the hash of the real,
+  unparameterised proxy. Rebuild the proxy from source and compare its hash before genesis, and
+  verify the NFT's address on chain immediately after. If the parameter is wrong, the protocol's
+  entire state is forgeable and destructible by whoever controls that credential, with no exploit
+  needed.
 - **Every role credential must name something that genuinely decides.** Run the smoke test described
   in defect 11, for all five roles, after every grant and rotation, and compare the credential
   against every script hash of this deployment, current and superseded, and of the base layer: [§18](#18-scripts-that-always-run-could-sign-for-a-role) refuses

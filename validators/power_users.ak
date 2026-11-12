@@ -1294,8 +1294,9 @@ test power_users_init_after_genesis_fails_without_a_genuine_global_state() fail 
   ) || True
 }
 
-// Frozen core: both GlobalState read paths (the admin read and Deinit's) keep
-// working when a later logic reshapes every field after 0–4.
+// Frozen core: both GlobalState read paths (the admin read and Deinit's) are
+// permanent and tolerate any tail after fields 0–4. A rotation is append-only,
+// so such a tail only arises from a successor logic's own later actions.
 test power_users_insert_accepts_a_global_state_with_a_reshaped_tail() {
   t_run_pu_add(
     t_key_28,

@@ -236,7 +236,7 @@ validator transfer_logic_validator(
       inputs_user_credentials,
       redeemer.actions_for_each_input,
       fn(holder_hash, frozen_amount) {
-        let paid_back = paid_back_to_holder(
+        let kept = held_by(
           self.outputs,
           security_policy_id,
           security_asset_name,
@@ -251,7 +251,7 @@ validator transfer_logic_validator(
         // Its `expect` cannot trap here: the sender fold above has already
         // trapped on any input holding the token without an inline stake
         // credential.
-        paid_back >= frozen_amount || paid_back >= paid_back_to_holder(
+        kept >= frozen_amount || kept >= held_by(
           list.map(self.inputs, fn(input) { input.output }),
           security_policy_id,
           security_asset_name,
@@ -299,10 +299,11 @@ validator transfer_logic_validator(
   }
 }
 
-/// How much of the security token this transaction pays to outputs whose
-/// inline stake credential hash is `holder_hash` — the holder's holdings that
-/// this transaction creates, and therefore a lower bound on what the holder
-/// holds once it lands.
+/// How much of the security token `outputs` hold under the inline stake
+/// credential hash `holder_hash`. Over the transaction's outputs this is the
+/// holder's holdings that the transaction creates, and therefore a lower bound
+/// on what the holder holds once it lands; over the spent inputs' outputs it is
+/// what the holder spends.
 ///
 /// Counted by BARE HASH, as the denylist keys: a node freezes the hash, so an
 /// output to either credential form of it counts towards the floor.
@@ -312,7 +313,7 @@ validator transfer_logic_validator(
 /// already demands of them, so an ADA-only output with no stake credential is
 /// skipped, never trapped on. Other asset names and other policies count for
 /// nothing.
-fn paid_back_to_holder(
+fn held_by(
   outputs: List<Output>,
   issuance_policy_id: ByteArray,
   security_asset_name: ByteArray,
@@ -321,7 +322,7 @@ fn paid_back_to_holder(
   list.foldl(
     outputs,
     0,
-    fn(output, paid_back) {
+    fn(output, kept) {
       let quantity = value.quantity_of(
         assets.to_value(output.value),
         issuance_policy_id,
@@ -330,12 +331,12 @@ fn paid_back_to_holder(
       if quantity > 0 {
         expect Some(Inline(stake_cred)) = output.address.stake_credential
         if utils.credential_hash(stake_cred) == holder_hash {
-          paid_back + quantity
+          kept + quantity
         } else {
-          paid_back
+          kept
         }
       } else {
-        paid_back
+        kept
       }
     },
   )
@@ -1724,7 +1725,7 @@ test paid_back_to_a_different_hash_does_not_count() {
 }
 
 // Both credential forms of A as senders share A's node through the memo and
-// the one paid-back sum: kept floor → pass.
+// the one `held_by` sum: kept floor → pass.
 test both_credential_forms_of_a_partially_frozen_hash_pass_together() {
   pf_run(
     pf_list_a(Some(400)),
@@ -2278,7 +2279,7 @@ test partially_frozen_sender_below_the_floor_with_f_above_its_balance_may_consol
 
 // Hot-path cost pin: above the floor with A's balance over eight inputs. Its
 // cost delta against the one-input `..._may_send_above_the_floor` shows the
-// inputs are not counted when `paid_back ≥ f`.
+// inputs are not counted when `kept ≥ f`.
 test partially_frozen_sender_above_the_floor_with_eight_inputs() {
   pf_run(
     pf_list_a(Some(400)),

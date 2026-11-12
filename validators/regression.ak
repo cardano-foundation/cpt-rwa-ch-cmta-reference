@@ -1168,10 +1168,11 @@ test denylist_init_rejects_a_missing_nonce() fail {
 //
 // THE DEFECT. `Deinit` used to require only the admin's signature on an empty
 // list. Burning the root is irreversible — `Init` is nonce-gated to a UTxO
-// spent at genesis, and the GlobalState datum's denylist policy id is
-// immutable — while EVERY movement of the security token needs a covering node
-// of this list as a reference input. So one admin signature could permanently
-// freeze the register with the token still reporting itself active.
+// spent at genesis, and the GlobalState datum's denylist policy id changes only
+// through `MigrateLists`, before the lock — while EVERY movement of the
+// security token needs a covering node of this list as a reference input. So
+// one admin signature could permanently freeze the register with the token
+// still reporting itself active.
 //
 // THE GUARD. `gs.deactivated?` is now the first conjunct of the branch, read
 // via `gs_core_from_ref_input` (`active_admin_from_ref_input` traps on exactly
@@ -1269,7 +1270,10 @@ test denylist_deinit_rejects_a_missing_admin_signature() {
 
 /// The `spend` handler's `StateTransition` path, kept as an explicit record
 /// that the input-count fix did NOT change it. It still delegates wholesale to
-/// the mint validator, so on its own it accepts. (The separate
+/// the mint validator, so on its own it accepts. The one thing it now does
+/// first is derive the list policy from its own spent input, which must hold
+/// lovelace plus exactly one NFT (`utils.sole_nft_policy_id`); here that input
+/// is a genuine list node, so the derivation succeeds. (The separate
 /// `UpdateDenylistEntry` path runs no mint and is pinned in
 /// `validators/denylist.ak`.) That is fine — it is no longer
 /// reachable with an unconstrained extra element, because the mint validator
@@ -1491,7 +1495,8 @@ test power_user_remove_rejects_a_missing_admin_signature() {
 }
 
 /// As for the denylist, the power-users `spend` handler is unchanged by
-/// the input-count fix and still delegates wholesale.
+/// the input-count fix and still delegates wholesale, after deriving the list
+/// policy from its own spent input (a genuine list node here, so it succeeds).
 test power_user_spend_handler_is_pure_delegation() {
   let no_datum: Option<Data> = None
   v_power_users.power_users_validator.spend(
@@ -2003,8 +2008,9 @@ test negative_covering_index_traps_on_a_later_party() fail {
 
 // ── denylist Init — bound to the genesis GlobalState ─────────────────────────
 //
-// The GlobalState minted alongside must name THIS denylist; its id is
-// immutable afterwards, so a mismatch would leave sanctions unenforceable.
+// The GlobalState minted alongside must name THIS denylist; its id changes
+// afterwards only through `MigrateLists`, before the lock, so a mismatch would
+// leave sanctions unenforceable until then (and for good after the lock).
 
 fn run_denylist_init(outputs: List<Output>) -> Bool {
   v_denylist.mint.mint(

@@ -1107,31 +1107,30 @@ test decode_global_state_core_rejects_a_short_core() fail {
 
 test decode_global_state_core_rejects_another_constructor() fail {
   let raw: Data = test_layout_datum()
-  decode_global_state_core(builtin.constr_data(1, builtin.unconstr_fields(raw))) == test_layout_core()
+  let x = builtin.constr_data(1, builtin.unconstr_fields(raw))
+  decode_global_state_core(x) == decode_global_state_core(x)
 }
 
 // `deactivated` must be a real Bool: an Int — or a constructor that is neither
 // False (0) nor True (1) — traps rather than reading as "not deactivated".
 test decode_global_state_core_rejects_deactivated_as_an_int() fail {
-  decode_global_state_core(core_with_field(idx_deactivated, builtin.i_data(0))) == test_layout_core()
+  let x = core_with_field(idx_deactivated, builtin.i_data(0))
+  decode_global_state_core(x) == decode_global_state_core(x)
 }
 
 test decode_global_state_core_rejects_deactivated_as_another_constructor() fail {
-  decode_global_state_core(
-    core_with_field(idx_deactivated, builtin.constr_data(2, [])),
-  ) == test_layout_core()
+  let x = core_with_field(idx_deactivated, builtin.constr_data(2, []))
+  decode_global_state_core(x) == decode_global_state_core(x)
 }
 
 test decode_global_state_core_rejects_a_retyped_admin() fail {
-  decode_global_state_core(
-    core_with_field(idx_admin_credential_hash, builtin.i_data(1)),
-  ) == test_layout_core()
+  let x = core_with_field(idx_admin_credential_hash, builtin.i_data(1))
+  decode_global_state_core(x) == decode_global_state_core(x)
 }
 
 test decode_global_state_core_rejects_a_retyped_minting_authority() fail {
-  decode_global_state_core(
-    core_with_field(idx_minting_script_credential_hash, builtin.i_data(1)),
-  ) == test_layout_core()
+  let x = core_with_field(idx_minting_script_credential_hash, builtin.i_data(1))
+  decode_global_state_core(x) == decode_global_state_core(x)
 }
 
 // The core resolver is the authentication choke point of the permanent

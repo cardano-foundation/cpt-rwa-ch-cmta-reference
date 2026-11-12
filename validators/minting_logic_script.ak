@@ -35,9 +35,10 @@ use utils.{must_run_script_withdrawal}
 /// thing that can never be fixed is this file, so this file decides as little
 /// as possible.
 ///
-/// WHY THE SUPPLY DEBIT IS DELIBERATELY NOT HERE. This file's hash is the
-/// token's issuance policy id, so a defect in a rule written here could never
-/// be fixed. The authority can be rotated. Until `LockUpgrades` the admin can
+/// WHY THE SUPPLY DEBIT IS DELIBERATELY NOT HERE. The token's issuance policy
+/// id is derived from this file's hash (the CIP-113 issuance template applied
+/// to it; see the README's "What the derived parameters must equal"), so a
+/// defect in a rule written here could never be fixed. The authority can be rotated. Until `LockUpgrades` the admin can
 /// already set the cap with `SetMintableAmount`; after `LockUpgrades`,
 /// `RotateMintingScript` is closed and the installed authority, its debit
 /// included, is permanent too.
@@ -61,7 +62,7 @@ validator minting_logic_validator(global_state_policy_id: ByteArray) {
 
     // Resolved INLINE rather than through a shared location helper such as
     // `resolve_global_state` (which also decodes the full v1 layout, where
-    // this script must read only the frozen core).
+    // this script must read only core fields 0–4).
     //
     // This one file may not change its compiled bytes after launch. Its hash
     // is frozen into this token's registry node, and the token's issuance
@@ -88,9 +89,9 @@ validator minting_logic_validator(global_state_policy_id: ByteArray) {
         utils.safe_list_at(self.reference_inputs, global_state_ref_input_index).output
     }
     // NFT presence is what makes this the real GlobalState rather than a
-    // datum an attacker fabricated to name an authority they control. Only the
-    // frozen core is read: this script can never be redeployed, so it must not
-    // depend on the part of the datum a later GlobalState logic may reshape.
+    // datum an attacker fabricated to name an authority they control. Only core
+    // fields 0–4 are read: this script can never be redeployed, and the datum
+    // is append-only across a rotation, so it depends on nothing after them.
     let gs_datum: GlobalStateCore = gs_core_from_output(
       gs_output,
       global_state_policy_id,

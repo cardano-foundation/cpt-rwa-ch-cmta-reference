@@ -435,9 +435,8 @@ minting proxy and the transfer and seizure scripts it pins; the seizure logic re
 
 Before granting a role, rotating the admin or rotating the authority, compare the credential
 against every script hash of this deployment, current and superseded, and of the base layer. A
-match is never legitimate. A
-behavioural smoke test misses some of these (a seizure test that mints nothing never runs the
-proxy), so do the comparison as well as the smoke test.
+match is never legitimate. A behavioural smoke test misses some of these (a seizure test that
+mints nothing never runs the proxy), so do the comparison as well as the smoke test.
 
 To change transfer or third-party logic, first `RotateMintingScript` to a minting authority built
 with the new script hash (register its stake credential), because the continuing node must name

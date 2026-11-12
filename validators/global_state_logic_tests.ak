@@ -2806,10 +2806,10 @@ test migrate_lists_switches_to_a_list_created_after_genesis() {
 // requires the GlobalState output to carry `mintable_amount - minted`, never
 // below zero, and a burn mints a NEGATIVE quantity. The GlobalState logic
 // accepts each of these (it checks only that field 6 alone changed) and the
-// minting proxy checks no amount; the authority decides. So a cap of 0, or
-// one set below what is already in
-// circulation (indistinguishable on chain), never blocks a burn — and every
-// burn hands its quantity back as headroom that can be minted again.
+// minting proxy checks no amount; the authority decides. So a cap of 0, or one
+// set below what is already in circulation (indistinguishable on chain), never
+// blocks a burn — and every burn hands its quantity back as headroom that can
+// be minted again.
 
 test burn_succeeds_when_mintable_amount_is_zero() {
   let input_datum = GlobalStateDatum {
