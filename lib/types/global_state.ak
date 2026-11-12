@@ -44,9 +44,10 @@ pub type GlobalStateLocation {
 /// addresses the datum positionally through the shared `idx_*` constants, and
 /// `global_state_logic` rewrites exactly one field by index on every branch
 /// (the outgoing side of `RotateGlobalStateScript` rewrites field 0 and may
-/// append; `MigrateLists` rewrites fields 3 and 7 together). Reordering, inserting or removing a
-/// field silently reads or writes the wrong one — the tripwire test
-/// `gs_getters_read_correct_fields` exists to turn that into a build failure.
+/// append; `MigrateLists` rewrites fields 3 and 7 together). Reordering,
+/// inserting or removing a field silently reads or writes the wrong one — the
+/// tripwire test `gs_getters_read_correct_fields` exists to turn that into a
+/// build failure.
 ///
 /// CORE. Fields 0–4 are the `GlobalStateCore`: what the permanent scripts,
 /// which can never be redeployed (the GlobalState proxy, the minting proxy,
@@ -860,11 +861,12 @@ test active_admin_returns_admin_when_not_deactivated() {
 
 // …and traps (blocking all admin-gated list actions) once deactivated.
 test active_admin_traps_when_deactivated() fail {
-  active_admin_from_ref_input(
+  let admin = active_admin_from_ref_input(
     [test_gs_input_with(True, True)],
     0,
     test_gs_policy_id,
-  ) == test_admin_pkh
+  )
+  admin == admin
 }
 
 // Shared fixture with a distinct value per field, so a mis-indexed read/write

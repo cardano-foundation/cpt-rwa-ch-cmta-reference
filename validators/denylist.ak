@@ -1572,11 +1572,12 @@ test denylist_remove_refuses_burning_another_node_in_place_of_the_removed_one() 
   ) || True
 }
 
-// UpdateDenylistEntry: control `denylist_update_relaxes_a_full_freeze_to_a_partial_one`,
-// the same transaction with the continuation at the list script. The wallet
-// case is `denylist_update_rejects_a_continuation_at_another_address`; here
-// the continuation sits at the power-users spend script. The library requires
-// the continuation to keep the spent element's address, so it traps.
+// UpdateDenylistEntry: control
+// `denylist_update_relaxes_a_full_freeze_to_a_partial_one`, the same
+// transaction with the continuation at the list script. The wallet case is
+// `denylist_update_rejects_a_continuation_at_another_address`; here the
+// continuation sits at the power-users spend script. The library requires the
+// continuation to keep the spent element's address, so it traps.
 test denylist_update_refuses_a_continuation_at_another_script() fail {
   let out = t_entry_input(0, t_key_28, t_entry(Some(10)), 2_000_000).output
   t_run_update(

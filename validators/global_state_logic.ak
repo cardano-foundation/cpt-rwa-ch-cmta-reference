@@ -129,12 +129,13 @@ use utils.{must_be_signed_by_credential, must_run_script_withdrawal}
 //  11. Field 3 (`power_user_linked_list_policy_id`) and field 7
 //      (`denylist_linked_list_policy_id`) change only through `MigrateLists`:
 //      admin-signed, closed by `LockUpgrades`, and only to the policy of an
-//      initialised list root held at a script address — invariant 4 pins
-//      their values across a rotation. They are the sole anchors for which list's nodes are power
-//      users and which are sanctions: the minting authority, the denylist, the
-//      third-party transfer logic and PauseTransfers here all authenticate
-//      operators under field 3, and the readers authenticate denylist entries
-//      under field 7, with no compile-time copy to check against.
+//      initialised list root held at a script address — invariant 4 pins their
+//      values across a rotation. They are the sole anchors for which list's
+//      nodes are power users and which are sanctions: the minting authority,
+//      the denylist, the third-party transfer logic and PauseTransfers here all
+//      authenticate operators under field 3, and the readers authenticate
+//      denylist entries under field 7, with no compile-time copy to check
+//      against.
 
 // `element` is a root element of the list minted under `policy_id`,
 // authenticated by the library: ADA plus exactly the one root NFT
@@ -263,8 +264,9 @@ validator global_state_logic(
       // Raw Data field list of the input datum — taken from the RAW datum, so
       // fields a later logic appended survive every write below. Each branch
       // proves the output datum equals this with exactly one field replaced
-      // (`MigrateLists`: the two list policy ids), sharing every unchanged field as opaque Data —
-      // no unwrap/rewrap, and no full-datum re-validation of the output.
+      // (`MigrateLists`: the two list policy ids), sharing every unchanged
+      // field as opaque Data — no unwrap/rewrap, and no full-datum
+      // re-validation of the output.
       let input_fields = builtin.unconstr_fields(input_datum_data)
 
       // Aggregate datum cap (F09), for EVERY action: the output fits
@@ -802,7 +804,8 @@ validator global_state_logic(
                   self.reference_inputs,
                   denylist_root_ref_input_index,
                 ).output
-                // Never a no-op (as PauseTransfers): at least one list switches.
+                // Never a no-op (as PauseTransfers): at least one list
+                // switches.
                 let switches_a_list = or {
                   new_power_user_linked_list_policy_id != input_datum.power_user_linked_list_policy_id,
                   new_denylist_linked_list_policy_id != input_datum.denylist_linked_list_policy_id,

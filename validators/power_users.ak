@@ -1550,7 +1550,8 @@ test power_users_remove_refuses_burning_another_node_in_place_of_the_removed_one
   ) || True
 }
 
-// Deinit: control `power_users_deinit_succeeds_for_the_admin_after_deactivation`.
+// Deinit: control
+// `power_users_deinit_succeeds_for_the_admin_after_deactivation`.
 fn t_pu_deinit_tx() -> Transaction {
   Transaction {
     ..t_base_tx(),

@@ -851,10 +851,11 @@ fn verify_mint_or_burn(
     // beside ANY GlobalState action (this repository's logic lets only
     // MintSecurity carry a mint or burn, provided it was built with this
     // token's name: that is an assumption about the installed logic, not
-    // something checked here), where their withdrawals count as signatures. No legitimate flow
-    // needs it: `MintBurn` mints or burns only `security_asset_name`, so a
-    // zero delta means nothing is minted at all. Applied to the ledger-derived
-    // `minted_amount`, which the next conjunct binds to the redeemer's.
+    // something checked here), where their withdrawals count as signatures. No
+    // legitimate flow needs it: `MintBurn` mints or burns only
+    // `security_asset_name`, so a zero delta means nothing is minted at all.
+    // Applied to the ledger-derived `minted_amount`, which the next conjunct
+    // binds to the redeemer's.
     (minted_amount != 0)?,
     //Redeemer contains the amount just for easy reference for eventual other contracts
     (minted_amount == expected_minted_amount)?,
