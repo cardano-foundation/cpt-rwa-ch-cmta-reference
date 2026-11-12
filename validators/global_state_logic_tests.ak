@@ -2672,10 +2672,13 @@ test rotate_gs_logic_succeeds_with_the_consistent_fixture() {
   outgoing(t_new_gs_logic, t_consistent_rotate_tx(t_new_gs_logic))
 }
 
+// The output is the input unchanged: rotated to itself, field 0 keeps its
+// value, so the append-only comparison passes and only the self-rotation
+// guard refuses.
 test rotate_to_the_current_logic_fails_with_its_own_redeemer() {
   let r: Data = rotate_gs_redeemer(t_gs_logic)
   let tx = Transaction {
-    ..t_rotate_tx(GlobalStateDatum { ..t_datum(False, False), network_id: 999 }),
+    ..t_rotate_tx(t_datum(False, False)),
     withdrawals: [Pair(Script(t_gs_logic), 0)],
     redeemers: [Pair(Withdraw(Script(t_gs_logic)), r)],
   }
