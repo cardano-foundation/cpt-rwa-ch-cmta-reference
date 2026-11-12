@@ -1308,3 +1308,129 @@ test dl_remove_rejects_a_missing_signature() {
     Transaction { ..t_dl_remove_tx(t_key_28), extra_signatories: [] },
   )
 }
+
+// ── A list NFT never leaves the list script ─────────────────────────────────
+//
+// One refusal per path through which a denylist NFT is minted, moved or kept
+// in this file's fixtures (Deinit and the spend gate are in
+// `validators/regression.ak`; `Init` has none, since where genesis places the
+// root is verified off-chain, see the comment on the `Init` branch). Each is an accepted fixture above with only the
+// NFT's destination changed; its accepted control is named in its comment. A
+// `fail` test here is written `… || True`, so a validator that merely returns
+// False cannot pass it — only a trap can.
+
+/// A key (wallet) address outside the list.
+const t_wallet: ByteArray =
+  #"0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e"
+
+fn t_at_wallet(output: Output) -> Output {
+  Output {
+    ..output,
+    address: Address {
+      payment_credential: VerificationKey(t_wallet),
+      stake_credential: None,
+    },
+  }
+}
+
+// AddToDenylist: control `denylist_insert_accepts_a_28_byte_key`. The new node
+// must share the anchor's payment credential (the library's insert check), so
+// it traps.
+test denylist_insert_refuses_a_new_node_at_a_wallet() fail {
+  let tx = t_dl_insert_tx(t_key_28)
+  t_run_denylist_add(
+    t_key_28,
+    Transaction {
+      ..tx,
+      outputs: [
+        t_dl_root_output(Some(t_key_28)),
+        t_at_wallet(t_dl_sanction_node_output(t_key_28)),
+      ],
+    },
+  ) || True
+}
+
+// The continued anchor must keep the anchor's full address (library), so it
+// traps.
+test denylist_insert_refuses_an_anchor_continuation_at_a_wallet() fail {
+  let tx = t_dl_insert_tx(t_key_28)
+  t_run_denylist_add(
+    t_key_28,
+    Transaction {
+      ..tx,
+      outputs: [
+        t_at_wallet(t_dl_root_output(Some(t_key_28))),
+        t_dl_sanction_node_output(t_key_28),
+      ],
+    },
+  ) || True
+}
+
+// RemoveFromDenylist: control `denylist_remove_accepts_a_28_byte_key`. The
+// continued anchor must keep the anchor's address (library), so it traps.
+test denylist_remove_refuses_an_anchor_continuation_at_a_wallet() fail {
+  t_run_denylist_remove(
+    t_key_28,
+    Transaction {
+      ..t_dl_remove_tx(t_key_28),
+      outputs: [t_at_wallet(t_dl_root_output(None))],
+    },
+  ) || True
+}
+
+// The removed node's NFT is paid to a wallet instead of burnt, so nothing of
+// this policy is minted and the branch's one-asset mint conjunct returns
+// False, hence `!`.
+test denylist_remove_refuses_a_removed_node_kept_in_a_wallet() {
+  !t_run_denylist_remove(
+    t_key_28,
+    Transaction {
+      ..t_dl_remove_tx(t_key_28),
+      mint: zero,
+      outputs: [
+        t_dl_root_output(None),
+        t_at_wallet(t_dl_sanction_node_output(t_key_28)),
+      ],
+    },
+  )
+}
+
+// The same, with another node NFT minted in place of the burn so that this
+// policy still runs. The library requires the removal to burn exactly the
+// removed node's NFT, so it traps.
+test denylist_remove_refuses_a_removed_node_kept_under_another_list_mint() fail {
+  t_run_denylist_remove(
+    t_key_28,
+    Transaction {
+      ..t_dl_remove_tx(t_key_28),
+      mint: from_asset(t_dl_policy, t_ll_asset_name(t_other_key), 1),
+      outputs: [
+        t_dl_root_output(None),
+        t_at_wallet(t_dl_sanction_node_output(t_key_28)),
+      ],
+    },
+  ) || True
+}
+
+// UpdateDenylistEntry: control `denylist_update_relaxes_a_full_freeze_to_a_partial_one`,
+// the same transaction with the continuation at the list script. The wallet
+// case is `denylist_update_rejects_a_continuation_at_another_address`; here
+// the continuation sits at the power-users spend script. The library requires
+// the continuation to keep the spent element's address, so it traps.
+test denylist_update_refuses_a_continuation_at_another_script() fail {
+  let out = t_entry_input(0, t_key_28, t_entry(Some(10)), 2_000_000).output
+  t_run_update(
+    Transaction {
+      ..t_update_tx(t_entry(None), t_entry(Some(10)), 2_000_000),
+      outputs: [
+        Output {
+          ..out,
+          address: Address {
+            payment_credential: Script(t_pu_script_hash),
+            stake_credential: None,
+          },
+        },
+      ],
+    },
+  ) || True
+}

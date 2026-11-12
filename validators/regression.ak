@@ -2022,3 +2022,112 @@ test denylist_insert_rejects_an_operator_that_is_the_global_state_logic() fail {
     },
   )
 }
+
+// ── A list NFT never leaves the list script ─────────────────────────────────
+//
+// The denylist's Deinit path and both lists' `StateTransition` spend gate
+// (`Init` has none: where genesis places the root is verified off-chain, see
+// the comment on the `Init` branch of each list's mint); the other paths are pinned beside their fixtures in
+// `validators/denylist.ak` and `validators/power_users.ak`. Each is an
+// accepted fixture above with only the NFT's destination changed; its
+// accepted control is named in its comment. A `fail` test here is written
+// `… || True`, so a validator that merely returns False cannot pass it — only
+// a trap can.
+
+fn at_wallet(output: Output) -> Output {
+  Output {
+    ..output,
+    address: Address {
+      payment_credential: VerificationKey(attacker_wallet),
+      stake_credential: None,
+    },
+  }
+}
+
+// Deinit: control `denylist_deinit_succeeds_for_the_admin_after_deactivation`.
+fn dl_deinit_tx() -> Transaction {
+  Transaction {
+    ..base_tx(),
+    inputs: [dl_root_input(0)],
+    reference_inputs: [
+      gs_utxo(0, 2_000_000, gs_datum(False, True, False, False)),
+    ],
+    mint: from_asset(denylist_policy, constants.linked_list_root_key, -1),
+    extra_signatories: [admin],
+  }
+}
+
+fn run_denylist_deinit(tx: Transaction) -> Bool {
+  v_denylist.mint.mint(
+    gs_policy,
+    oref(99),
+    pu_script_hash,
+    DenylistDeinit { global_state_ref_input_index: 0 },
+    denylist_policy,
+    tx,
+  )
+}
+
+// The root is paid to a wallet instead of burnt: nothing of this policy is
+// minted, so the one-asset mint conjunct returns False, hence `!`.
+test denylist_deinit_refuses_a_root_kept_in_a_wallet() {
+  !run_denylist_deinit(
+    Transaction {
+      ..dl_deinit_tx(),
+      mint: zero,
+      outputs: [at_wallet(dl_root_input(0).output)],
+    },
+  )
+}
+
+// The same, with a node NFT minted in place of the burn. The library requires
+// deinit to burn exactly the root NFT, so it traps.
+test denylist_deinit_refuses_a_root_kept_under_another_list_mint() fail {
+  run_denylist_deinit(
+    Transaction {
+      ..dl_deinit_tx(),
+      mint: from_asset(denylist_policy, ll_asset_name(dl_pred_key), 1),
+      outputs: [at_wallet(dl_root_input(0).output)],
+    },
+  ) || True
+}
+
+// StateTransition: control `denylist_spend_handler_is_pure_delegation`, the
+// same spend with a denylist mint present. With no list-policy mint at all the
+// library's structural gate returns False, hence `!`. (With a mint present the
+// NFT's destination is the mint branch's to refuse:
+// `denylist_insert_rejects_a_smuggled_extra_node_input`.)
+test denylist_spend_refuses_a_node_to_a_wallet_without_a_list_mint() {
+  let no_datum: Option<Data> = None
+  !v_denylist.denylist_validator.spend(
+    gs_policy,
+    denylist_policy,
+    pu_script_hash,
+    no_datum,
+    DenylistStateTransition,
+    oref(0),
+    Transaction {
+      ..base_tx(),
+      inputs: [dl_node_input(0, dl_sanctioned_key, None)],
+      outputs: [attacker_held_ll_nft(denylist_policy, dl_sanctioned_key)],
+    },
+  )
+}
+
+// Control `power_user_spend_handler_is_pure_delegation`; same reasoning
+// (`power_user_insert_rejects_a_smuggled_extra_node_input` with a mint).
+test power_users_spend_refuses_a_node_to_a_wallet_without_a_list_mint() {
+  let no_datum: Option<Data> = None
+  !v_power_users.power_users_validator.spend(
+    gs_policy,
+    pu_policy,
+    no_datum,
+    PuStateTransition,
+    oref(0),
+    Transaction {
+      ..base_tx(),
+      inputs: [pu_node_input(0, power_user(True, True, True, True, True))],
+      outputs: [attacker_held_ll_nft(pu_policy, pu_cred)],
+    },
+  )
+}

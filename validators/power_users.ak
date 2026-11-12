@@ -1028,3 +1028,271 @@ const t_other_key: ByteArray =
 test pu_add_rejects_a_node_keyed_other_than_the_redeemer() fail {
   t_run_pu_add(t_key_28, t_pu_insert_tx(t_other_key))
 }
+
+// ── A list NFT never leaves the list script ─────────────────────────────────
+//
+// One refusal per path through which a power-users NFT is minted, moved or
+// kept, except `Init`: where genesis places the root is verified off-chain
+// (see the comment on the `Init` branch). Each is an accepted fixture above with only the NFT's destination
+// changed; its accepted control is named in its comment. A `fail` test here
+// is written `… || True`, so a validator that merely returns False cannot
+// pass it — only a trap can.
+
+/// A key (wallet) address outside the list.
+const t_wallet: ByteArray =
+  #"0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e"
+
+fn t_at_wallet(output: Output) -> Output {
+  Output {
+    ..output,
+    address: Address {
+      payment_credential: VerificationKey(t_wallet),
+      stake_credential: None,
+    },
+  }
+}
+
+fn t_at_script(output: Output, script_hash: ByteArray) -> Output {
+  Output {
+    ..output,
+    address: Address {
+      payment_credential: Script(script_hash),
+      stake_credential: None,
+    },
+  }
+}
+
+// AddPowerUser: control `power_users_insert_accepts_a_28_byte_key`. The new
+// node must share the anchor's payment credential (the library's insert
+// check), so it traps.
+test power_users_insert_refuses_a_new_node_at_a_wallet() fail {
+  let tx = t_pu_insert_tx(t_key_28)
+  t_run_pu_add(
+    t_key_28,
+    Transaction {
+      ..tx,
+      outputs: [
+        t_pu_root_output(Some(t_key_28)),
+        t_at_wallet(t_pu_new_node_output(t_key_28)),
+      ],
+    },
+  ) || True
+}
+
+// The continued anchor must keep the anchor's full address (library), so it
+// traps.
+test power_users_insert_refuses_an_anchor_continuation_at_a_wallet() fail {
+  let tx = t_pu_insert_tx(t_key_28)
+  t_run_pu_add(
+    t_key_28,
+    Transaction {
+      ..tx,
+      outputs: [
+        t_at_wallet(t_pu_root_output(Some(t_key_28))),
+        t_pu_new_node_output(t_key_28),
+      ],
+    },
+  ) || True
+}
+
+// RemovePowerUser: control `power_users_remove_accepts_a_28_byte_key`. The
+// continued anchor must keep the anchor's address (library), so it traps.
+test power_users_remove_refuses_an_anchor_continuation_at_a_wallet() fail {
+  t_run_pu_remove(
+    t_key_28,
+    Transaction {
+      ..t_pu_remove_tx(t_key_28),
+      outputs: [t_at_wallet(t_pu_root_output(None))],
+    },
+  ) || True
+}
+
+// The removed node's NFT is paid to a wallet instead of burnt, so nothing of
+// this policy is minted and the branch's one-asset mint conjunct returns
+// False, hence `!`.
+test power_users_remove_refuses_a_removed_node_kept_in_a_wallet() {
+  !t_run_pu_remove(
+    t_key_28,
+    Transaction {
+      ..t_pu_remove_tx(t_key_28),
+      mint: zero,
+      outputs: [
+        t_pu_root_output(None),
+        t_at_wallet(t_pu_new_node_output(t_key_28)),
+      ],
+    },
+  )
+}
+
+// The same, with another node NFT minted in place of the burn so that this
+// policy still runs. The library requires the removal to burn exactly the
+// removed node's NFT, so it traps.
+test power_users_remove_refuses_a_removed_node_kept_under_another_list_mint() fail {
+  t_run_pu_remove(
+    t_key_28,
+    Transaction {
+      ..t_pu_remove_tx(t_key_28),
+      mint: from_asset(t_pu_policy, t_ll_asset_name(t_other_key), 1),
+      outputs: [
+        t_pu_root_output(None),
+        t_at_wallet(t_pu_new_node_output(t_key_28)),
+      ],
+    },
+  ) || True
+}
+
+// Deinit: control `power_users_deinit_succeeds_for_the_admin_after_deactivation`.
+fn t_pu_deinit_tx() -> Transaction {
+  Transaction {
+    ..t_base_tx(),
+    inputs: [t_pu_root_input(0)],
+    reference_inputs: [t_gs_utxo(0, t_gs_datum(True))],
+    mint: from_asset(t_pu_policy, constants.linked_list_root_key, -1),
+    extra_signatories: [t_admin],
+  }
+}
+
+fn t_run_pu_deinit(tx: Transaction) -> Bool {
+  mint.mint(
+    t_gs_policy,
+    t_oref(99),
+    Deinit { global_state_ref_input_index: 0 },
+    t_pu_policy,
+    tx,
+  )
+}
+
+// The root is paid to a wallet instead of burnt: nothing of this policy is
+// minted, so the one-asset mint conjunct returns False, hence `!`.
+test power_users_deinit_refuses_a_root_kept_in_a_wallet() {
+  !t_run_pu_deinit(
+    Transaction {
+      ..t_pu_deinit_tx(),
+      mint: zero,
+      outputs: [t_at_wallet(t_pu_root_input(0).output)],
+    },
+  )
+}
+
+// The same, with a node NFT minted in place of the burn. The library requires
+// deinit to burn exactly the root NFT, so it traps.
+test power_users_deinit_refuses_a_root_kept_under_another_list_mint() fail {
+  t_run_pu_deinit(
+    Transaction {
+      ..t_pu_deinit_tx(),
+      mint: from_asset(t_pu_policy, t_ll_asset_name(t_other_key), 1),
+      outputs: [t_at_wallet(t_pu_root_input(0).output)],
+    },
+  ) || True
+}
+
+// ModifyPowerUser: control
+// `power_user_modify_accepts_an_admin_signed_change_matching_the_wanted_state`.
+// The library requires the continuation to keep the spent element's address,
+// so both trap.
+test power_users_modify_refuses_a_continuation_at_a_wallet() fail {
+  let old_pu = t_power_user(False, False, False, False, False)
+  let new_pu = PowerUser { ..old_pu, can_mint: True }
+  t_run_pu_modify(
+    new_pu,
+    Transaction {
+      ..t_pu_modify_tx(old_pu, new_pu),
+      outputs: [t_at_wallet(t_pu_node_output(new_pu))],
+    },
+  ) || True
+}
+
+test power_users_modify_refuses_a_continuation_at_another_script() fail {
+  let old_pu = t_power_user(False, False, False, False, False)
+  let new_pu = PowerUser { ..old_pu, can_mint: True }
+  t_run_pu_modify(
+    new_pu,
+    Transaction {
+      ..t_pu_modify_tx(old_pu, new_pu),
+      outputs: [t_at_script(t_pu_node_output(new_pu), t_gs_script_hash)],
+    },
+  ) || True
+}
+
+// Two node spends sharing one continuation. Input 0 is the node keyed
+// `t_pu_cred`, input 1 the node keyed `t_key_28`; the spend under test is
+// input 1's, citing output 0.
+fn t_pu_two_node_modify_tx(outputs: List<Output>) -> Transaction {
+  Transaction {
+    ..t_base_tx(),
+    inputs: [
+      t_pu_node_input(0, t_power_user(False, False, False, False, False)),
+      Input {
+        output_reference: t_oref(1),
+        output: t_pu_new_node_output(t_key_28),
+      },
+    ],
+    outputs,
+    reference_inputs: [t_gs_utxo(0, t_gs_datum(False))],
+    extra_signatories: [t_admin],
+  }
+}
+
+/// The state input 1 is changed to: its own key, `can_mint` granted.
+fn t_pu_second_wanted() -> PowerUser {
+  PowerUser {
+    credential_hash: t_key_28,
+    is_admin: False,
+    can_mint: True,
+    can_burn: False,
+    can_pause: False,
+    can_force_transfer: False,
+  }
+}
+
+/// A node output carrying the NFT keyed `nft_key` and the datum
+/// `t_pu_second_wanted()`.
+fn t_pu_second_wanted_output(nft_key: ByteArray) -> Output {
+  let element: Element<Data, PowerUser> = Element {
+    data: Node { data: t_pu_second_wanted() },
+    link: None,
+  }
+  Output { ..t_pu_new_node_output(nft_key), datum: InlineDatum(element) }
+}
+
+fn t_run_pu_modify_second(tx: Transaction) -> Bool {
+  let no_datum: Option<Data> = None
+  power_users_validator.spend(
+    t_gs_policy,
+    t_pu_policy,
+    no_datum,
+    ModifyPowerUser {
+      own_input_index: 1,
+      own_output_index: 0,
+      wanted_user_state: t_pu_second_wanted(),
+      global_state_ref_input_index: 0,
+    },
+    t_oref(1),
+    tx,
+  )
+}
+
+/// POSITIVE control: input 1's own continuation at the list script, with its
+/// own NFT.
+test power_users_modify_accepts_a_second_spend_with_its_own_continuation() {
+  t_run_pu_modify_second(
+    t_pu_two_node_modify_tx([t_pu_second_wanted_output(t_key_28)]),
+  )
+}
+
+/// Output 0 carries input 0's NFT (`t_pu_cred`), so both spends would cite
+/// it, and input 1's NFT goes to a wallet. Output 0's datum is input 1's
+/// wanted state, keyed `t_key_28`, so this spend's own credential check
+/// passes and only the library's NFT-preservation check refuses it, by
+/// trapping. (In a full attack, output 0 would also have to satisfy input 0's
+/// spend, whose credential check refuses this datum as well.)
+test power_users_modify_refuses_two_spends_sharing_one_continuation() fail {
+  t_run_pu_modify_second(
+    t_pu_two_node_modify_tx(
+      [
+        t_pu_second_wanted_output(t_pu_cred),
+        t_at_wallet(t_pu_second_wanted_output(t_key_28)),
+      ],
+    ),
+  ) || True
+}
