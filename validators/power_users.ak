@@ -985,7 +985,7 @@ test power_users_init_rejects_without_a_genesis_global_state() fail {
 }
 
 // Frozen core: both GlobalState read paths (the admin read and Deinit's) keep
-// working when a later logic reshapes every field after 0–5.
+// working when a later logic reshapes every field after 0–4.
 test power_users_insert_accepts_a_global_state_with_a_reshaped_tail() {
   t_run_pu_add(
     t_key_28,

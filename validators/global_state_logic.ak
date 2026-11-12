@@ -23,8 +23,6 @@ use types/global_state.{
   RotateMintingScript, SetMintableAmount, SetRequiresReceiverKyc,
   SetRequiresSenderKyc, UpdateMemberRootHash, UpdateTrustedEntity,
   decode_global_state, decode_global_state_core, get_mintable_amount,
-  idx_admin_credential_hash, idx_deactivated, idx_mintable_amount,
-  idx_minting_script_credential_hash, idx_power_user_linked_list_policy_id,
   set_admin_credential_hash, set_deactivated,
   set_global_state_script_credential_hash, set_member_root_hash,
   set_mintable_amount, set_minting_script_credential_hash,
@@ -45,7 +43,7 @@ use utils.{must_be_signed_by_credential, must_run_script_withdrawal}
 //
 // INVARIANT (security-token guard and supply cap): every action except
 // MintSecurity rejects security-token mints, burns and movements, also checked
-// once before the dispatch. MintSecurity may write only field 5
+// once before the dispatch. MintSecurity may write only field 6
 // (`mintable_amount`, which must stay an Int), and only in a transaction that
 // mints or burns the security token under the issuance policy. It does not
 // count, bound or compute the amount: HOW MUCH the field moves is the
@@ -83,17 +81,23 @@ use utils.{must_be_signed_by_credential, must_run_script_withdrawal}
 //      is one-way and closes rotation, minting-script rotation and
 //      `SetMintableAmount`.
 //   3. Every action except MintSecurity rejects security-token mints, burns
-//      and movements. MintSecurity writes only field 5, and only in a
+//      and movements. MintSecurity writes only field 6, and only in a
 //      transaction that mints or burns the security token; the amount is the
 //      minting authority's debit. A counter write outside a mint is a cap
 //      amendment (`SetMintableAmount`: admin-only, closed by `LockUpgrades`,
 //      never beside a security-token mint, burn or movement).
-//   4. The frozen core (fields 0–5, `GlobalStateCore`) keeps its order, types
-//      and constructor 0, inline: the proxy, the minting proxy and the
-//      power-users and denylist lists read it and can never be redeployed.
-//      Fields 6+ are the installed logic's to reshape. The outgoing side of a
-//      rotation keeps core fields 1–5 unchanged, so only field 0 is the
-//      rotation's to change.
+//   4. The datum is append-only, constructor 0, inline. The core (fields 0–4,
+//      `GlobalStateCore`) is what the proxy, the minting proxy and the
+//      power-users and denylist lists read; they can never be redeployed, so
+//      its position and type are fixed forever. Every field keeps its
+//      position, its type and, across a rotation, its value; a new version
+//      may only append, and sets a field that falls out of use to its type's
+//      empty value. The outgoing side of a rotation enforces this in that
+//      transaction only: the output's first N fields (N = the input's field
+//      count) equal the input's except field 0, so only field 0 is the
+//      rotation's to change. After that, the installed logic governs, so a
+//      successor must carry this check into its own rotation; it is absolute
+//      only after `LockUpgrades`.
 //   5. The logic's own hash is never accepted as the admin, the minting
 //      authority or an operator: every GlobalState transaction carries this
 //      withdrawal, and `must_be_signed_by_credential` accepts a withdrawal as
@@ -122,7 +126,7 @@ use utils.{must_be_signed_by_credential, must_run_script_withdrawal}
 //      `RotateGlobalStateScript` at constructor 14 — since the outgoing side
 //      requires both withdrawals to carry the same one.
 //  11. Field 3's VALUE (`power_user_linked_list_policy_id`) never changes after
-//      genesis — invariant 4 freezes only its position and type. It is the
+//      genesis — invariant 4 pins its value only across a rotation. It is the
 //      sole anchor for which list's nodes are power users: the minting
 //      authority, the denylist, the third-party transfer logic and
 //      PauseTransfers here all authenticate operators under it with no
@@ -345,23 +349,17 @@ validator global_state_logic(
             // INPUT's field 0, never from the redeemer: the redeemer is the
             // caller's to choose.
             if input_datum.global_state_script_credential_hash == own_hash {
-              // OUTGOING — the current logic hands over.
-              let output_fields = builtin.unconstr_fields(
+              // OUTGOING — the current logic hands over. The datum is
+              // append-only: the output's first N fields, N the input's field
+              // count, are the input's with only field 0 rewritten to the new
+              // logic, so no field is dropped, reordered, retyped or changed.
+              // Fields after those N are the new logic's to append. This holds
+              // in this transaction only; the new logic must carry the rule
+              // into its own rotation.
+              let output_constr = builtin.un_constr_data(
                 global_state_output_datum,
               )
-              // The permanent readers (minting proxy, power-users and denylist
-              // lists) read only the frozen core, fields 0–5, with their types;
-              // whatever layout the new logic gives the rest, they must still be
-              // able to read it. Everything after the core is the new logic's.
-              let output_datum = decode_global_state_core(
-                global_state_output_datum,
-              )
-              let unchanged = fn(idx) {
-                utils.safe_list_at(output_fields, idx) == utils.safe_list_at(
-                  input_fields,
-                  idx,
-                )
-              }
+              let output_fields = builtin.snd_pair(output_constr)
               and {
                 // The one-way upgrade lock closes this path too.
                 !input_datum.upgrades_locked,
@@ -378,17 +376,22 @@ validator global_state_logic(
                 // alone would then satisfy the minting proxy) or as the admin.
                 new_global_state_script_hash != input_datum.minting_script_credential_hash,
                 new_global_state_script_hash != input_datum.admin_credential_hash,
-                output_datum.global_state_script_credential_hash == new_global_state_script_hash,
-                // The rest of the core is not the rotation's to change.
-                // `deactivated` and the admin keep their own rules, the power-users
-                // list is fixed for life, the minting authority has its own
-                // rotation, and the supply headroom moves only through
-                // `SetMintableAmount` and mint/burn, never through a rotation.
-                unchanged(idx_deactivated),
-                unchanged(idx_admin_credential_hash),
-                unchanged(idx_power_user_linked_list_policy_id),
-                unchanged(idx_minting_script_credential_hash),
-                unchanged(idx_mintable_amount),
+                // Every other field keeps its own rules: `deactivated` and the
+                // admin, the power-users list fixed for life, the minting
+                // authority with its own rotation, the supply headroom moved
+                // only through `SetMintableAmount` and mint/burn, and the rest
+                // through their own actions — never through a rotation.
+                (builtin.fst_pair(output_constr) == 0)?,
+                builtin.equals_data(
+                  builtin.constr_data(
+                    0,
+                    list.take(output_fields, list.length(input_fields)),
+                  ),
+                  set_global_state_script_credential_hash(
+                    input_fields,
+                    new_global_state_script_hash,
+                  ),
+                )?,
                 // The new logic RUNS in this transaction — so its script is
                 // producible and its stake credential registered...
                 must_run_script_withdrawal(self, new_global_state_script_hash),
@@ -398,8 +401,8 @@ validator global_state_logic(
                 // passes in any transaction that moves no security token. This
                 // still does not prove the script is a correct GlobalState logic
                 // (one that ignores its redeemer passes): re-derive its hash from
-                // source and every parameter before signing. Everything else in
-                // the output is the new logic's to accept or refuse.
+                // source and every parameter before signing. A field appended
+                // after the input's is the new logic's to accept or refuse.
                 pairs.get_first(
                   self.redeemers,
                   Withdraw(Script(new_global_state_script_hash)),
@@ -428,7 +431,7 @@ validator global_state_logic(
             when redeemer.action is {
               MintSecurity -> {
                 // Why this is enough: see the header. The security token is
-                // minted or burned, and only field 5 changes, to an Int; HOW
+                // minted or burned, and only field 6 changes, to an Int; HOW
                 // MUCH is the minting authority's debit, not counted here.
                 let security_delta = value.quantity_of(
                   mint,

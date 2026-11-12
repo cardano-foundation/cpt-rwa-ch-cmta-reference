@@ -29,7 +29,7 @@ pub type MintingAuthorityWithdrawRedeemer {
     global_state_input_index: Int,
     /// Index into `self.outputs` — GlobalState's continuing output. `MintBurn`
     /// requires it at GlobalState's address, with GlobalState's non-ADA
-    /// value, carrying the input datum with only field 5 (`mintable_amount`)
+    /// value, carrying the input datum with only field 6 (`mintable_amount`)
     /// rewritten to `in − minted` (a burn raises it), never below zero.
     global_state_output_index: Int,
     power_user_node_ref_input_index: Int,

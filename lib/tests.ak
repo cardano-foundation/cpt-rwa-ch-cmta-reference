@@ -301,12 +301,13 @@ pub fn with_trailing_gs_fields(
   }
 }
 
-/// Replace everything after the frozen core (fields 0–5) of the GlobalState
-/// datum, in every input and reference input carrying the NFT, with a tail of
-/// a DIFFERENT shape: five fields of other types, so the datum has 11 fields
-/// and fields 6–10 no longer decode as the v1 layout. The shape a later
-/// GlobalState logic may produce; the permanent readers (minting proxy,
-/// power-users, denylist) read only the core and must keep accepting it.
+/// Replace everything after the core (fields 0–4) of the GlobalState datum,
+/// in every input and reference input carrying the NFT, with a tail of a
+/// DIFFERENT shape: five fields of other types, so the datum has 10 fields and
+/// fields 5–9 no longer decode as the v1 layout. A rotation of this version
+/// refuses to produce it (the datum is append-only), but the permanent readers
+/// (minting proxy, power-users, denylist) read only the core and must keep
+/// accepting it whatever a later logic writes.
 pub fn with_reshaped_gs_tail(
   tx: Transaction,
   gs_policy: ByteArray,

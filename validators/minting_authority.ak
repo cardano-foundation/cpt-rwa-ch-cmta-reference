@@ -63,7 +63,7 @@ use utils.{must_be_signed_by_credential}
 ///      every one: `MintBurn` spends GlobalState (its bare
 ///      `global_state_input_index`), and GlobalState's continuing output
 ///      (`global_state_output_index`) keeps its address and non-ADA value and
-///      carries the input datum with field 5 (`mintable_amount`) alone
+///      carries the input datum with field 6 (`mintable_amount`) alone
 ///      rewritten to `in − minted`, never below zero; a burn credits it
 ///      (`debits_mintable_amount`). The other two cannot change supply.
 ///      `Register` mints no supply: at most the CIP-68 reference NFT,
@@ -526,7 +526,7 @@ fn only_permitted_assets_minted(
 /// under `security_policy_id` is debited from GlobalState's `mintable_amount`
 /// in this same transaction: the continuing output at
 /// `global_state_output_index` keeps the spent GlobalState input's address and
-/// non-ADA value, and its inline datum is the input datum with field 5 alone
+/// non-ADA value, and its inline datum is the input datum with field 6 alone
 /// set to `in − minted`, never below zero. A burn credits.
 ///
 /// The amount is ledger truth, derived from `self.mint`, never the redeemer's.

@@ -720,7 +720,7 @@ test mint_security_accepts_a_clean_cap_decrement() {
 /// The cap must actually be decremented. Here the datum is reproduced
 /// unchanged while 100 tokens are issued, which would leave headroom for the
 /// full original cap on top of live supply. The GlobalState logic accepts it
-/// (only field 5 may change, and it is still an Int) and the minting proxy
+/// (only field 6 may change, and it is still an Int) and the minting proxy
 /// checks no amount; the minting authority's debit refuses it, so the
 /// transaction as a whole is refused.
 test a_cap_that_does_not_decrement_is_refused_by_the_minting_authority() {
@@ -766,7 +766,7 @@ test mint_security_leaves_the_amount_to_the_minting_authority() {
   )
 }
 
-/// Field 5 must stay an Int: the output's `mintable_amount` as bytes, with 100
+/// Field 6 must stay an Int: the output's `mintable_amount` as bytes, with 100
 /// minted, TRAPS when MintSecurity reads it (`get_mintable_amount`). Paired
 /// with `mint_security_leaves_the_amount_to_the_minting_authority`, the same
 /// transaction with an Int there. Trap-only: `|| True` makes a False return
@@ -2296,7 +2296,7 @@ test deactivated_input_rejects_set_mintable_amount() fail {
 // Supply is never seen on chain, only headroom: the minting authority
 // requires the GlobalState output to carry `mintable_amount - minted`, never
 // below zero, and a burn mints a NEGATIVE quantity. The GlobalState logic
-// accepts each of these (it checks only that field 5 alone changed) and the
+// accepts each of these (it checks only that field 6 alone changed) and the
 // minting proxy checks no amount; the authority decides. So a cap of 0, or
 // one set below what is already in
 // circulation (indistinguishable on chain), never blocks a burn — and every
@@ -2763,12 +2763,130 @@ test rotate_gs_logic_fails_when_the_mintable_amount_changes() {
   )
 }
 
+// The datum is append-only across a rotation: every v1 field after field 0
+// keeps its value. One refusal per field not covered above; each differs from
+// `rotate_gs_logic_succeeds_when_admin_signs` only in that field, and each is
+// a False return of the prefix comparison.
+test rotate_gs_logic_outgoing_refuses_a_changed_transfers_paused() {
+  !outgoing(
+    t_new_gs_logic,
+    t_rotate_tx(
+      GlobalStateDatum { ..t_rotated_datum(), transfers_paused: True },
+    ),
+  )
+}
+
+test rotate_gs_logic_outgoing_refuses_a_changed_denylist_linked_list_policy_id() {
+  !outgoing(
+    t_new_gs_logic,
+    t_rotate_tx(
+      GlobalStateDatum {
+        ..t_rotated_datum(),
+        denylist_linked_list_policy_id: t_dl_ll_policy,
+      },
+    ),
+  )
+}
+
+test rotate_gs_logic_outgoing_refuses_a_changed_security_info() {
+  !outgoing(
+    t_new_gs_logic,
+    t_rotate_tx(
+      GlobalStateDatum {
+        ..t_rotated_datum(),
+        security_info: builtin.constr_data(0, [builtin.i_data(7)]),
+      },
+    ),
+  )
+}
+
+test rotate_gs_logic_outgoing_refuses_a_changed_trusted_entity_vkeys() {
+  !outgoing(
+    t_new_gs_logic,
+    t_rotate_tx(
+      GlobalStateDatum {
+        ..t_rotated_datum(),
+        trusted_entity_vkeys: [Pair(t_vkey_10, builtin.i_data(1))],
+      },
+    ),
+  )
+}
+
+test rotate_gs_logic_outgoing_refuses_a_changed_member_root_hash() {
+  !outgoing(
+    t_new_gs_logic,
+    t_rotate_tx(
+      GlobalStateDatum { ..t_rotated_datum(), member_root_hash: t_root32 },
+    ),
+  )
+}
+
+test rotate_gs_logic_outgoing_refuses_a_changed_requires_sender_kyc() {
+  !outgoing(
+    t_new_gs_logic,
+    t_rotate_tx(
+      GlobalStateDatum { ..t_rotated_datum(), requires_sender_kyc: True },
+    ),
+  )
+}
+
+test rotate_gs_logic_outgoing_refuses_a_changed_requires_receiver_kyc() {
+  !outgoing(
+    t_new_gs_logic,
+    t_rotate_tx(
+      GlobalStateDatum { ..t_rotated_datum(), requires_receiver_kyc: True },
+    ),
+  )
+}
+
+// The input is unlocked, so the lock check passes; only the comparison
+// refuses a rotation that would also set the lock.
+test rotate_gs_logic_outgoing_refuses_a_changed_upgrades_locked() {
+  !outgoing(
+    t_new_gs_logic,
+    t_rotate_tx(GlobalStateDatum { ..t_rotated_datum(), upgrades_locked: True }),
+  )
+}
+
+test rotate_gs_logic_outgoing_refuses_a_changed_network_id() {
+  !outgoing(
+    t_new_gs_logic,
+    t_rotate_tx(GlobalStateDatum { ..t_rotated_datum(), network_id: 7 }),
+  )
+}
+
+// The output's last field removed: a shorter datum is refused.
+test rotate_gs_logic_outgoing_refuses_a_dropped_last_field() {
+  let raw: Data = t_rotated_datum()
+  expect [_, ..rest] = list.reverse(builtin.unconstr_fields(raw))
+  !outgoing(
+    t_new_gs_logic,
+    with_raw_output(
+      t_rotate_tx(t_rotated_datum()),
+      builtin.constr_data(0, list.reverse(rest)),
+    ),
+  )
+}
+
+// Constructor 1 with the rotated datum's fields: refused by the constructor
+// check alone (a False return), since the prefix comparison rebuilds
+// constructor 0 from the fields.
+test rotate_gs_logic_outgoing_refuses_another_constructor() {
+  let raw: Data = t_rotated_datum()
+  !outgoing(
+    t_new_gs_logic,
+    with_raw_output(
+      t_rotate_tx(t_rotated_datum()),
+      builtin.constr_data(1, builtin.unconstr_fields(raw)),
+    ),
+  )
+}
+
 // A retyped known field would make the frozen readers trap for good.
 test rotate_gs_logic_fails_when_the_output_is_not_readable() fail {
-  // Frozen core (2026-10-15): the tail is the successor's to retype, so the
-  // unreadable output is now one whose CORE cannot be read — here constructor
-  // 1, which only the outgoing core decode catches (fields 1–5 are pinned by
-  // `unchanged` anyway). The proxy would trap on it forever.
+  // Constructor 1, which no reader decodes. The outgoing constructor check
+  // refuses it with a False return, which a `fail` test also accepts; the
+  // same shape as `rotate_gs_logic_outgoing_refuses_another_constructor`.
   let raw: Data = t_rotated_datum()
   let fields = builtin.unconstr_fields(raw)
   outgoing(
@@ -2807,15 +2925,8 @@ test rotate_gs_logic_fails_with_a_reference_script_on_the_output() {
   )
 }
 
-// "Don't block updates": the outgoing logic leaves every other field, and any
-// appended field, to the new logic.
-test rotate_gs_logic_outgoing_allows_another_field_to_change() {
-  outgoing(
-    t_new_gs_logic,
-    t_rotate_tx(GlobalStateDatum { ..t_rotated_datum(), network_id: 7 }),
-  )
-}
-
+// "Don't block updates": a new version may append fields after the input's,
+// and the outgoing logic leaves them to it.
 test rotate_gs_logic_outgoing_allows_an_appended_field() {
   let raw: Data = t_rotated_datum()
   outgoing(
@@ -2825,6 +2936,23 @@ test rotate_gs_logic_outgoing_allows_an_appended_field() {
       builtin.constr_data(
         0,
         list.concat(builtin.unconstr_fields(raw), [builtin.i_data(1)]),
+      ),
+    ),
+  )
+}
+
+test rotate_gs_logic_outgoing_allows_two_appended_fields() {
+  let raw: Data = t_rotated_datum()
+  outgoing(
+    t_new_gs_logic,
+    with_raw_output(
+      t_rotate_tx(t_rotated_datum()),
+      builtin.constr_data(
+        0,
+        list.concat(
+          builtin.unconstr_fields(raw),
+          [builtin.i_data(1), builtin.b_data(#"ff")],
+        ),
       ),
     ),
   )
@@ -3153,17 +3281,14 @@ test datum_cap_set_mintable_amount_rejects_an_output_over_the_cap() {
   !mintable_case(-1)
 }
 
-// Outgoing rotation: the successor may change other fields, but the datum it
+// Outgoing rotation: the successor may append fields, but the datum it
 // inherits must respect the outgoing logic's cap.
 fn rotation_case(cap_offset: Int) -> Bool {
-  let output_datum = GlobalStateDatum {
-    ..t_rotated_datum(),
-    security_info: builtin.constr_data(0, [builtin.i_data(7)]),
-  }
+  let output_raw = appended(t_rotated_datum())
   run_logic_capped(
-    t_datum_size(output_datum) + cap_offset,
+    bytearray.length(builtin.serialise_data(output_raw)) + cap_offset,
     rotate_gs_redeemer(t_new_gs_logic),
-    t_rotate_tx(output_datum),
+    with_raw_output(t_rotate_tx(t_rotated_datum()), output_raw),
   )
 }
 
@@ -3277,7 +3402,7 @@ test datum_cap_does_not_block_a_pause_over_the_cap() {
   )
 }
 
-// ── Frozen core: the outgoing logic leaves the tail to its successor ─────────
+// ── Append-only: the outgoing logic keeps every field but field 0 ────────────
 
 fn rotated_core_with_tail(tail: List<Data>) -> Data {
   let raw: Data = t_rotated_datum()
@@ -3290,10 +3415,10 @@ fn rotated_core_with_tail(tail: List<Data>) -> Data {
   )
 }
 
-// A successor may give the datum a different shape after the core — here 11
-// fields, the tail retyped — and the outgoing logic hands over.
-test rotate_gs_logic_outgoing_allows_a_reshaped_tail() {
-  outgoing(
+// A different shape after the core — here 10 fields, the tail retyped — is
+// refused (a False return of the prefix comparison).
+test rotate_gs_logic_outgoing_refuses_a_reshaped_tail() {
+  !outgoing(
     t_new_gs_logic,
     with_raw_output(
       t_rotate_tx(t_rotated_datum()),
@@ -3310,15 +3435,15 @@ test rotate_gs_logic_outgoing_allows_a_reshaped_tail() {
   )
 }
 
-// A v1 tail field retyped (transfers_paused as bytes) is the successor's call.
-test rotate_gs_logic_outgoing_allows_a_retyped_tail_field() {
+// A v1 field after the core retyped (transfers_paused as bytes) is refused.
+test rotate_gs_logic_outgoing_refuses_a_retyped_tail_field() {
   let raw: Data = t_rotated_datum()
   let fields = utils.replace_data_field(
     builtin.unconstr_fields(raw),
     idx_transfers_paused,
     builtin.b_data(#"00"),
   )
-  outgoing(
+  !outgoing(
     t_new_gs_logic,
     with_raw_output(
       t_rotate_tx(t_rotated_datum()),
@@ -3327,18 +3452,18 @@ test rotate_gs_logic_outgoing_allows_a_retyped_tail_field() {
   )
 }
 
-// The core alone, with no tail at all, is still a datum the permanent
-// readers can read.
-test rotate_gs_logic_outgoing_allows_the_core_alone() {
-  outgoing(
+// The core alone, with every field after it dropped, is refused even though
+// the permanent readers could read it.
+test rotate_gs_logic_outgoing_refuses_the_core_alone() {
+  !outgoing(
     t_new_gs_logic,
     with_raw_output(t_rotate_tx(t_rotated_datum()), rotated_core_with_tail([])),
   )
 }
 
-// A core field retyped would make the permanent readers trap for good. (Fields
-// 1–5 are also pinned by `unchanged`, so this is not evidence for the decoder
-// — `rotate_gs_logic_fails_when_the_output_is_not_readable` is.)
+// A core field retyped would make the permanent readers trap for good. The
+// prefix comparison refuses it with a False return, which this `fail` test
+// also accepts.
 test rotate_gs_logic_fails_when_a_core_field_is_retyped() fail {
   let raw: Data = t_rotated_datum()
   let fields = utils.replace_data_field(

@@ -9,6 +9,7 @@ use cardano/transaction.{
 }
 use constants
 use tests
+use tests/global_state_fixtures.{t_datum}
 use types/global_state.{
   GlobalStateCore, GlobalStateDatum, GlobalStateLocation, GlobalStateReferenced,
   GlobalStateSpent, gs_core_from_output, idx_deactivated,
@@ -79,7 +80,7 @@ validator minting_logic_validator(global_state_policy_id: ByteArray) {
     // launch, editing any of them changes this hash and so the token. Before
     // launch the hash changed deliberately when the frozen-core layout changed
     // its reads (2026-10-15, and again when `mintable_amount` moved into the
-    // core).
+    // core and back out of it).
     let gs_output: Output = when redeemer is {
       GlobalStateSpent { global_state_input_index } ->
         utils.safe_list_at(self.inputs, global_state_input_index).output
@@ -173,23 +174,13 @@ fn test_out_ref(ix: Int) -> OutputReference {
 
 // ── GlobalState ──────────────────────────────────────────────────────────────
 
+// The shared v1 fixture, with no admin and `authority` as the minting
+// authority.
 fn make_gs_datum(authority: ByteArray, deactivated: Bool) -> GlobalStateDatum {
   GlobalStateDatum {
-    global_state_script_credential_hash: #"9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a",
-    transfers_paused: False,
-    deactivated,
-    mintable_amount: 1_000_000,
+    ..t_datum(False, deactivated),
     admin_credential_hash: #"",
-    power_user_linked_list_policy_id: #"",
-    denylist_linked_list_policy_id: #"",
-    security_info: builtin.constr_data(0, []),
-    trusted_entity_vkeys: [],
-    member_root_hash: #"",
-    requires_sender_kyc: False,
-    requires_receiver_kyc: False,
-    network_id: 1,
     minting_script_credential_hash: authority,
-    upgrades_locked: False,
   }
 }
 
@@ -454,8 +445,8 @@ test succeeds_when_global_state_has_trailing_fields() {
   )
 }
 
-// Frozen core: a later GlobalState logic may reshape every field after 0–5;
-// this permanent script reads only the core, so it keeps working.
+// This permanent script reads only the core (fields 0–4), so it keeps working
+// whatever follows it.
 test succeeds_when_global_state_has_a_reshaped_tail() {
   run_withdraw(
     spent_redeemer(),
@@ -505,25 +496,4 @@ test proxy_fails_when_deactivated() {
     referenced_redeemer(),
     referenced_tx(make_gs_datum(test_minting_authority_hash, True)),
   )
-}
-
-// A permanent reader traps on a retyped core field: `mintable_amount` as bytes
-// is refused by the core decoder, although this script never uses its value.
-test proxy_traps_on_a_non_int_mintable_amount() fail {
-  let raw: Data = make_gs_datum(test_minting_authority_hash, False)
-  let bad = builtin.constr_data(
-    0,
-    utils.replace_data_field(
-      builtin.unconstr_fields(raw),
-      global_state.idx_mintable_amount,
-      builtin.b_data(#"00"),
-    ),
-  )
-  run_withdraw(
-    spent_redeemer(),
-    Transaction {
-      ..spent_tx(test_minting_authority_hash, Some(test_minting_authority_hash)),
-      inputs: [gs_input_of(bad)],
-    },
-  ) || True
 }
