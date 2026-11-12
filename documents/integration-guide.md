@@ -17,7 +17,9 @@ Aiken-shaped sketches, not a ready-to-submit SDK or CLI implementation.
    [README: Deployment checklist](../README.md#deployment-checklist).
    Record the applied script hashes, the issuance policy ID, the selected `security_asset_name`,
    the CIP-113 registry policy ID and the deployed base-layer commit. Keep list **policy IDs**
-   distinct from list **spend validator hashes**.
+   distinct from list **spend validator hashes**: apply each list's spend validator first (it takes
+   only `global_state_policy_id`), then its mint, whose third parameter, `list_script_hash`, is that
+   spend validator's hash. The mint's hash is the list's policy ID.
 2. Select three spendable one-shot inputs: one for GlobalState, one for the power-users root and
    one for the denylist root. The list mint validators' `init_input_out_ref` values and the
    GlobalState mint validator's `tx0`/`index0` must match the inputs actually spent at genesis.
@@ -45,7 +47,7 @@ Register the applied stake credential of `global_state_logic` (its `publish` han
 `RegisterCredential`): the genesis transaction runs its withdraw-0, and a withdrawal from an
 unregistered credential fails at ledger phase 1. Publish `global_state_logic` and both list `mint`
 validators as reference-script UTxOs too. Genesis runs those three and the GlobalState mint,
-≈ 19.0 KB of scripts, so they cannot all be inlined under the 16 KiB transaction limit. No
+≈ 20.0 KB of scripts, so they cannot all be inlined under the 16 KiB transaction limit. No
 transaction before genesis may spend one of the three reserved one-shot inputs, so exclude them
 from coin selection: their output references are baked into the mint parameters, and spending one
 means choosing a new input and re-applying every parameter that depends on it.
@@ -63,7 +65,12 @@ Output the GlobalState NFT with an inline `GlobalStateDatum` at `global_state_pr
 (unparameterised; the GlobalState mint takes its hash as `global_state_proxy_hash` and rejects any
 other payment credential). Datum **field 0**, `global_state_script_credential_hash`, is the hash of
 `global_state_logic.global_state_logic` applied with this deployment's parameters; it must be 28 bytes and
-differ from the admin, the minting authority and the proxy. Apply the same
+differ from the admin, the minting authority and the proxy. The fields, by position: the core —
+0 `global_state_script_credential_hash`, 1 `deactivated`, 2 `admin_credential_hash`,
+3 `power_user_linked_list_policy_id`, 4 `minting_script_credential_hash` — then
+5 `transfers_paused`, 6 `mintable_amount`, 7 `denylist_linked_list_policy_id`, 8 `security_info`,
+9 `trusted_entity_vkeys`, 10 `member_root_hash`, 11 `requires_sender_kyc`,
+12 `requires_receiver_kyc`, 13 `network_id` and 14 `upgrades_locked`. Apply the same
 `max_global_state_datum_bytes` (recommended 8192) to the mint and the logic; the serialised genesis
 datum must fit under it, and later actions that grow the datum are refused beyond it. Nothing on chain
 ties the two values together: assert in the deployment script that they are equal and positive. A
@@ -74,9 +81,11 @@ Before locking, check it with a write that grows the datum, such as adding and t
 entity; a same-size write passes whatever the cap. In operation, keep headroom below the cap: a datum
 sitting exactly at it refuses even a burn that adds a byte to `mintable_amount`, until the admin
 shrinks it. Output each root at its corresponding
-list spend validator address. The list mint validators cannot verify those destination addresses,
-and nothing on chain can bind field 0 to the compiled logic hash, so compare the applied hashes,
-field 0 and output addresses **before signing**. The GlobalState mint does require the logic field
+list spend validator address: each list's `Init` requires the root's payment credential to be
+`Script(list_script_hash)`, the spend hash that list's mint was applied with, so a root anywhere
+else is refused (the stake part is free). Nothing on chain can bind field 0 to the compiled logic
+hash, or a list mint's `list_script_hash` to the real spend validator, so compare the applied
+hashes and field 0 **before signing**. The GlobalState mint does require the logic field
 0 names to run: add its withdrawal, with a `GlobalStateSpendRedeemer` whose
 `global_state_output_index` points at the GlobalState output (the action is ignored at genesis), so
 its stake credential must be registered first (§0). That proves the script runs and that its own
@@ -87,7 +96,7 @@ this same transaction that names another list (`power_user_linked_list_policy_id
 `denylist_linked_list_policy_id`). That catches swapped ids and any genesis that initialises the
 real lists, but not a datum naming some other policy that mints in the transaction while the real
 `Init`s never run — so the off-chain check stays load-bearing: assert that the two list policy IDs
-are distinct and equal the compiled list mint hashes. The datum's
+are distinct and equal the hashes of the list mints applied with their own spend hashes. The datum's
 `minting_script_credential_hash` must identify the intended current minting authority, not the
 permanent proxy.
 
@@ -311,14 +320,14 @@ base layer's issuance logic needs a registry proof. The minting proxy does not r
 referenced, not spent. Besides the GlobalState logic, invoke the minting proxy and the minting
 authority as zero-value withdrawals — three withdrawals in all.
 
-**The continuing GlobalState datum.** Write it as the input datum's Data with only field 5,
+**The continuing GlobalState datum.** Write it as the input datum's Data with only field 6,
 `mintable_amount`, replaced by `in − minted`, where `in` is the input's `mintable_amount` and
 `minted` the signed ledger quantity of `security_asset_name` minted under the issuance policy; a
 burn's negative amount raises it. The minting authority's `MintBurn` refuses a different value or a
 result below zero, any other changed field (appended fields included), and a changed address or
 non-ADA value. Lovelace may change. A builder that round-trips the datum through a typed v1 record
 drops appended fields and is refused. `MintSecurity` accepts only a transaction that mints or burns
-the security token, and in which field 5 alone changed; it permits that write and does not check
+the security token, and in which field 6 alone changed; it permits that write and does not check
 the amount.
 
 ```aiken
@@ -471,20 +480,24 @@ GlobalState, signed by the admin, with one `GlobalStateSpendRedeemer { global_st
 action: RotateGlobalStateScript { new_global_state_script_hash } }` (action constructor index 14)
 as the redeemer of **both** withdrawals, the current logic's (old field 0) and the new one's: the
 current logic requires the two to be identical, index included. The continuing output stays at
-the proxy with the same non-ADA value; its datum has field 0 set to the new hash. The current logic
-requires the frozen core (fields 0–5: logic hash, `deactivated`, admin, power-users list policy,
-minting-authority hash, `mintable_amount`) to still decode, with constructor 0, and fields 1–5 to
-be unchanged; the
-proxy, the minting proxy and both lists read only the core and can never be redeployed. Everything
-after the core is the new logic's to accept, including a completely different layout.
+the proxy with the same non-ADA value; its datum has field 0 set to the new hash. The datum is
+**append-only**: the current logic requires the output datum to be constructor 0 and its first N
+fields, N the input's field count, to equal the input's except field 0. So a rotation changes no
+other field: none may be dropped, reordered, retyped or rewritten. Fields appended after the
+input's are the new logic's to accept. The core, fields 0–4 (logic hash, `deactivated`, admin, power-users list policy,
+minting-authority hash), is what the proxy, the minting proxy and both lists read, and they can
+never be redeployed, so its position and type are fixed forever. A field that falls out of use is
+set to its type's empty value by a later logic, never dropped or retyped. The current logic
+enforces this in the rotation transaction only; each later version must carry the check into its
+own rotation, so the rule is absolute only after `LockUpgrades`.
 This version, as the new logic, accepts exactly the input datum with field 0 rewritten. The new hash
 must differ from the admin and the minting authority. No security token may be minted, burned or
-spent in the same transaction. Off-chain readers should read the core (fields 0–5) by position and the rest according to the
-installed logic's layout: a later logic may reshape everything after field 5. The v1 layout is
-`GlobalStateDatum`; `decode_global_state_core` is the on-chain core reader.
+spent in the same transaction. Off-chain readers can read every v1 field by position, and should
+ignore fields appended after field 14 unless they know the installed logic's use of them. The v1
+layout is `GlobalStateDatum`; `decode_global_state_core` is the on-chain core reader.
 
-`LockUpgrades` irreversibly closes the authority-rotation, registry-upgrade and GlobalState-logic-rotation
-paths, and admin changes to the supply cap, for **later** transactions. A registry upgrade bundled into the same transaction can still read the
+`LockUpgrades` irreversibly closes the authority-rotation, registry-upgrade, GlobalState-logic-rotation
+and list-migration paths, and admin changes to the supply cap, for **later** transactions. A registry upgrade bundled into the same transaction can still read the
 unlocked input state and succeed; inspect all redeemers in the locking transaction. Admin-only
 GlobalState actions similarly expose their pre-state to a bundled registry operation. The lock is
 enforced by the installed GlobalState logic itself, so after it the cap is final only if that logic
@@ -494,3 +507,39 @@ permanent, and that authority enforces the registry-upgrade lock itself. Before 
 active script hashes, operator credentials, base-layer version and lock transaction as deployment
 artifacts. For final retirement, follow the ordered
 [decommissioning runbook](security/security-fixes.md#the-decommissioning-runbook-in-order).
+
+### Migrating the lists
+
+`MigrateLists` replaces either list, or both, before `LockUpgrades`. It rewrites datum fields 3
+(power-users policy ID) and 7 (denylist policy ID) together and nothing else; readers authenticate
+list elements by these policy IDs alone, so the switch takes effect for every later transaction. It
+does not check what the new lists contain. In order:
+
+1. **Pause transfers** (`PauseTransfers`, a `can_pause` operator), so no transfer runs while the
+   lists are copied. Mints, burns and seizures stay available during a pause, and the old lists stay
+   writable: make no list change until step 6, or repeat steps 3 and 4 after any change.
+2. **Deploy the new list code with its own `Init`.** This repository's list `Init` binds the root
+   to the genesis GlobalState and its one-shot input, so it cannot initialise a list later.
+   Register and publish whatever the new code needs.
+3. **Initialise and populate the new lists**: copy every operator node into the new power-users
+   list and every entry into the new denylist.
+4. **Verify off-chain** that the new denylist has every entry of the old, each with the same
+   `frozen_amount`, and that the new power-users list grants exactly the intended roles.
+5. **Submit `MigrateLists`**, admin-signed: spend GlobalState with `GlobalStateSpendRedeemer {
+   global_state_output_index, action: MigrateLists { new_power_user_linked_list_policy_id,
+   new_denylist_linked_list_policy_id, power_user_root_ref_input_index,
+   denylist_root_ref_input_index } }` (action constructor index 15), with both lists' roots as
+   reference inputs at those indices. An unchanged list cites its current root. The continuing
+   output is the input datum with fields 3 and 7 replaced, nothing else changed or appended. Both
+   ids must be 28 bytes, differ from each other and from the issuance and GlobalState policies, and
+   at least one must change. No security token may be minted, burned or spent in the same
+   transaction.
+6. **Unpause** (`PauseTransfers`, under an operator node of the list now in field 3).
+
+Old and new elements never mix: after the switch every reader authenticates under the new policy
+IDs, so a transaction citing an old node is refused, and before it a new node is refused. The
+failure is closed. Switching only the power-users list leaves the permanent denylist code reading
+operators under field 3, so the new power-users list must keep the `PowerUser` datum shape (and
+the library's `"Node"` key layout). The old lists stay on chain, still mutable under their own
+rules but read by nothing. Their roots can be deinitialised only after `DeactivateContract`. Do not
+mix old-list and new-list spends in one transaction: each list mint checks only its own policy.

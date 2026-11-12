@@ -140,10 +140,11 @@ validator mint(
           (utils.count_inputs_with_policy(self.inputs, policy_id) == 0)?,
           // Genesis binding: the GlobalState minted in this same transaction
           // must name THIS list. The GlobalState mint only checks that the
-          // policy its datum names mints something, and the id is immutable
-          // afterwards — so a deployment naming another list would leave this
-          // one, and the role or sanctions checks it carries, unreachable for
-          // good. Not circular: the GlobalState policy is a parameter here.
+          // policy its datum names mints something, and the id changes
+          // afterwards only through `MigrateLists`, before `LockUpgrades` — so
+          // a deployment naming another list would leave this one, and the
+          // role or sanctions checks it carries, unreachable. Not circular:
+          // the GlobalState policy is a parameter here.
           (genesis_global_state(self.outputs, global_state_policy_id).power_user_linked_list_policy_id == policy_id)?,
           // The library hands this callback the produced root's address, and
           // the root is pinned there: its whole payment credential must be
@@ -174,13 +175,15 @@ validator mint(
         // is if anything broader.
         //
         // Burning this root is irreversible: `Init` is gated on a one-shot UTxO
-        // consumed at genesis, `AddPowerUser` needs an existing element as its
-        // anchor, and `power_user_linked_list_policy_id` is immutable in the
-        // GlobalState datum. So once the root is gone no operator can ever be
-        // added again — mint, burn, pause, unpause, seizure and sanctions all
-        // authenticate against a node of THIS list and would be lost for good.
-        // If transfers happened to be paused at that moment they stay paused
-        // forever, since unpausing needs a `can_pause` node.
+        // consumed at genesis, and `AddPowerUser` needs an existing element as
+        // its anchor. On a live protocol before `LockUpgrades` the admin could
+        // still point GlobalState at a new list (`MigrateLists`); after the
+        // lock `power_user_linked_list_policy_id` is final, so once the root
+        // is gone no operator could ever be added again — mint, burn, pause,
+        // unpause, seizure and sanctions all authenticate against a node of
+        // THIS list and would be lost for good. If transfers happened to be
+        // paused at that moment they would stay paused forever, since
+        // unpausing needs a `can_pause` node.
         //
         // Requiring `deactivated` keeps the branch to its purpose: reclaiming
         // the root's min-ADA after the token has been retired.
@@ -1060,8 +1063,9 @@ test power_users_insert_accepts_a_global_state_with_trailing_fields() {
 
 // ── Init — bound to the genesis GlobalState ──────────────────────────────────
 //
-// The GlobalState minted alongside must name THIS list; its id is immutable
-// afterwards, so a mismatch would leave every role on this list unreachable.
+// The GlobalState minted alongside must name THIS list; its id changes
+// afterwards only through `MigrateLists`, before `LockUpgrades`, so a mismatch
+// would leave every role on this list unreachable.
 
 fn t_run_pu_init(outputs: List<Output>) -> Bool {
   mint.mint(

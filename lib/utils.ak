@@ -194,10 +194,12 @@ pub fn credential_type_byte(credential: Credential) -> Int {
 /// insert or remove. (The denylist's in-place `UpdateDenylistEntry` runs no
 /// mint at all: the library's `one_to_one` binds each update spend to its own
 /// continuation, which must keep the address, the NFT and the link, so no node
-/// can leave the list that way either.) Outputs need no separate constraint —
-/// with inputs pinned and the mint field already restricted to a single asset,
+/// can leave the list that way either.) Outputs need no separate count — with
+/// inputs pinned and the mint field already restricted to a single asset,
 /// value conservation forces the count, and the library already requires each
-/// element output to hold exactly one NFT of the policy.
+/// element output to hold exactly one NFT of the policy. Where those outputs
+/// sit is the per-branch outputs check, `policy_only_at_script`, which every
+/// list mint branch runs beside this count.
 pub fn count_inputs_with_policy(inputs: List<Input>, policy_id: PolicyId) -> Int {
   list.foldl(
     inputs,

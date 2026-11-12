@@ -208,10 +208,11 @@ validator mint(
           (utils.count_inputs_with_policy(self.inputs, policy_id) == 0)?,
           // Genesis binding: the GlobalState minted in this same transaction
           // must name THIS list. The GlobalState mint only checks that the
-          // policy its datum names mints something, and the id is immutable
-          // afterwards — so a deployment naming another list would leave this
-          // one, and the role or sanctions checks it carries, unreachable for
-          // good. Not circular: the GlobalState policy is a parameter here.
+          // policy its datum names mints something, and the id changes
+          // afterwards only through `MigrateLists`, before `LockUpgrades` — so
+          // a deployment naming another list would leave this one, and the
+          // role or sanctions checks it carries, unreachable. Not circular:
+          // the GlobalState policy is a parameter here.
           (genesis_global_state(self.outputs, global_state_policy_id).denylist_linked_list_policy_id == policy_id)?,
           // The library hands this callback the produced root's address, and
           // the root is pinned there: its whole payment credential must be
@@ -239,19 +240,21 @@ validator mint(
       Deinit { global_state_ref_input_index } -> {
         // POST-DECOMMISSION CLEANUP ONLY.
         //
-        // Burning the root is irreversible in both directions: `Init` is gated
-        // on a one-shot UTxO consumed at genesis, so a root can never be
-        // re-created, and `denylist_linked_list_policy_id` is immutable in the
-        // GlobalState datum — no spend branch writes it — so GlobalState can
-        // never be pointed at a replacement list either.
+        // Burning the root is irreversible: `Init` is gated on a one-shot UTxO
+        // consumed at genesis, so a root can never be re-created. Only
+        // `MigrateLists` writes `denylist_linked_list_policy_id`, admin-signed
+        // and before `LockUpgrades`, and it needs GlobalState spent — so after
+        // the lock, or once deactivated, GlobalState can never be pointed at a
+        // replacement list either.
         //
         // What that costs while the protocol is LIVE: every movement of the
         // security token needs a covering node of THIS list as a reference
         // input — the transfer path, the seizure path and every mint
         // destination all go through `lib/denylist/absence.ak`. With no root
         // there is no element to cover anything, so a `Deinit` on a live
-        // protocol permanently freezes the register while the token still
-        // reports itself active. That is a worse state than decommissioning,
+        // protocol freezes the register — until a `MigrateLists` before the
+        // lock, for good after it — while the token still reports itself
+        // active. That is a worse state than decommissioning,
         // because it is invisible: `deactivated` stays False.
         //
         // Requiring `deactivated` first forces the two irreversible decisions
