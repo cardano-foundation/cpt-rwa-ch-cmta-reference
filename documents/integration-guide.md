@@ -484,7 +484,8 @@ the proxy with the same non-ADA value; its datum has field 0 set to the new hash
 **append-only**: the current logic requires the output datum to be constructor 0 and its first N
 fields, N the input's field count, to equal the input's except field 0. So a rotation changes no
 other field: none may be dropped, reordered, retyped or rewritten. Fields appended after the
-input's are the new logic's to accept. The core, fields 0–4 (logic hash, `deactivated`, admin, power-users list policy,
+input's are the new logic's to accept. The core, fields 0–4 (logic hash, `deactivated`, admin,
+power-users list policy,
 minting-authority hash), is what the proxy, the minting proxy and both lists read, and they can
 never be redeployed, so its position and type are fixed forever. A field that falls out of use is
 set to its type's empty value by a later logic, never dropped or retyped. The current logic
@@ -496,13 +497,16 @@ spent in the same transaction. Off-chain readers can read every v1 field by posi
 ignore fields appended after field 14 unless they know the installed logic's use of them. The v1
 layout is `GlobalStateDatum`; `decode_global_state_core` is the on-chain core reader.
 
-`LockUpgrades` irreversibly closes the authority-rotation, registry-upgrade, GlobalState-logic-rotation
-and list-migration paths, and admin changes to the supply cap, for **later** transactions. A registry upgrade bundled into the same transaction can still read the
+`LockUpgrades` irreversibly closes the authority-rotation, registry-upgrade,
+GlobalState-logic-rotation
+and list-migration paths, and admin changes to the supply cap, for **later** transactions. A
+registry upgrade bundled into the same transaction can still read the
 unlocked input state and succeed; inspect all redeemers in the locking transaction. Admin-only
 GlobalState actions similarly expose their pre-state to a bundled registry operation. The lock is
 enforced by the installed GlobalState logic itself, so after it the cap is final only if that logic
 is a reviewed build of this repository. The lock also makes the installed minting authority
-permanent, and that authority enforces the registry-upgrade lock itself. Before locking, check datum fields 0 and 4 against rebuilds (see
+permanent, and that authority enforces the registry-upgrade lock itself. Before locking, check datum
+fields 0 and 4 against rebuilds (see
 [README: Deployment checklist](../README.md#deployment-checklist)). Record the
 active script hashes, operator credentials, base-layer version and lock transaction as deployment
 artifacts. For final retirement, follow the ordered

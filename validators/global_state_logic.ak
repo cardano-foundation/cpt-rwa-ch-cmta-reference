@@ -263,8 +263,8 @@ validator global_state_logic(
       // Raw Data field list of the input datum — taken from the RAW datum, so
       // fields a later logic appended survive every write below. Each branch
       // proves the output datum equals this with exactly one field replaced
-      // (`MigrateLists`: the two list policy ids), sharing every unchanged field as opaque Data — no unwrap/rewrap, and no
-      // full-datum re-validation of the output.
+      // (`MigrateLists`: the two list policy ids), sharing every unchanged field as opaque Data —
+      // no unwrap/rewrap, and no full-datum re-validation of the output.
       let input_fields = builtin.unconstr_fields(input_datum_data)
 
       // Aggregate datum cap (F09), for EVERY action: the output fits

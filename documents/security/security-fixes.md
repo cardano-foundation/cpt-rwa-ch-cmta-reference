@@ -271,9 +271,10 @@ The misleading reasoning in `lib/utils.ak` was rewritten to say explicitly that 
 index 2 only, and that every caller passing index 3 or 4 must compare the derived id against a
 compile-time expectation.
 
-**Pinned by** `transfer_rejects_a_foreign_registry_node` and `seizure_rejects_a_foreign_registry_node`
-(both historical, retired as described below), and — as the control that proves the pin did not simply break the path —
-`transfer_rejects_a_sanctioned_sender_via_the_genuine_node`.
+**Pinned by** `transfer_rejects_a_foreign_registry_node` and
+`seizure_rejects_a_foreign_registry_node`
+(both historical, retired as described below), and — as the control that proves the pin did not
+simply break the path — `transfer_rejects_a_sanctioned_sender_via_the_genuine_node`.
 
 **Later hardening (2026-08-20):** the registry node is no longer consulted at all on the transfer,
 seizure or mint-burn paths — the issuance policy id is pinned at compile time, with no runtime
@@ -609,8 +610,8 @@ either to a real list validator. Set equal, a power-user node would double as a 
 node and the sanctions list would be inert from day one.
 
 Both fields were immutable afterwards — every spend branch reproduced the datum wholesale — so
-genesis was the only chance to catch it. (Since 2026-11 `MigrateLists` can rewrite both, admin-signed
-and before `LockUpgrades`, and refuses two equal ids too; see §22.)
+genesis was the only chance to catch it. (Since 2026-11 `MigrateLists` can rewrite both,
+admin-signed and before `LockUpgrades`, and refuses two equal ids too; see §22.)
 
 ### The fix
 
@@ -677,7 +678,8 @@ rule is stated because it decides which key an integrator deduplicates on.
 
 **Pinned by** `cip30_rejects_signed_wrong_credential_type`, which uses a genuine signature over a
 payload carrying the other credential-type byte, so the credential-form mismatch is isolated;
-`membership_leaf_key_separates_credential_forms` and `membership_genuine_root_rejects_other_credential`,
+`membership_leaf_key_separates_credential_forms` and
+`membership_genuine_root_rejects_other_credential`,
 which show that a leaf built for one form does not satisfy the other; and four tests
 covering the two *separate* dedup implementations:
 `transfer_treats_key_and_script_forms_of_one_hash_as_two_parties` /
@@ -1580,7 +1582,8 @@ In `validators/global_state_logic_tests.ak`:
   `mint_security_rejects_a_retyped_mintable_amount`,
   `mint_security_allows_security_token_input_and_output`, `mint_security_requires_a_security_mint`
   and `zero_mint_mint_security_cannot_move_the_counter`;
-* the rotation pin on `mintable_amount` (field 6) — `rotate_gs_logic_fails_when_the_mintable_amount_changes`.
+* the rotation pin on `mintable_amount` (field 6) —
+  `rotate_gs_logic_fails_when_the_mintable_amount_changes`.
 
 In `validators/minting_logic_script.ak`, the delegation — `succeeds_when_the_named_authority_runs`,
 `succeeds_when_global_state_is_only_referenced`, `fails_without_the_authority_withdrawal`,
@@ -1640,7 +1643,8 @@ field became these refusals.
 
 ### (b) `mintable_amount` sat in the core though no permanent script read it
 
-**Before.** [§21](#21-the-supply-cap-is-debited-by-the-minting-authority) moved `mintable_amount` into
+**Before.** [§21](#21-the-supply-cap-is-debited-by-the-minting-authority) moved `mintable_amount`
+into
 the frozen core, at field 5, so the permanent minting proxy decoded it, and trapped on a non-Int
 there, although it never uses it.
 
@@ -1654,7 +1658,8 @@ proxy no longer decodes it, which makes every mint and burn cheaper (Cost, below
 
 **Pinned by** `gs_getters_read_correct_fields` (the field-order tripwire, in
 `lib/types/global_state.ak`), `decode_global_state_core_reads_the_core_of_a_v1_datum`,
-`decode_global_state_core_accepts_the_core_alone` and `decode_global_state_core_rejects_a_short_core`
+`decode_global_state_core_accepts_the_core_alone` and
+`decode_global_state_core_rejects_a_short_core`
 (same file), `rotate_gs_logic_fails_when_the_mintable_amount_changes` and
 `mint_security_rejects_a_retyped_mintable_amount` (`validators/global_state_logic_tests.ak`).
 
@@ -1840,8 +1845,8 @@ this repository's list mint and switches to it (`validators/global_state_logic_t
   requires the first policy of the spent value to be ADA. A ledger value always carries its
   lovelace first, so that `expect` cannot fail by construction; it stays as a statement of the
   shape.
-* **A foreign-token UTxO at a list address, old lists after a switch, and a power-users-only switch**
-  are recorded under
+* **A foreign-token UTxO at a list address, old lists after a switch, and a power-users-only
+  switch** are recorded under
   [Acknowledged, and deliberately not changed](#lists-foreign-tokens-at-a-list-address-and-lists-after-a-migration).
 
 ### Reliance
@@ -1857,8 +1862,8 @@ and [the base-layer table](#what-the-cip-113-base-layer-actually-guarantees).
 
 Measured with `aiken bench -m "transfer_logic_script.{..}" --max-size 40`,
 `aiken bench -m "minting_authority.{..}" --seed 42 --max-size 16` and
-`aiken bench -m "global_state_logic_tests.{..}" --seed 42 --max-size 16`. Before is commit `2addf7d`;
-after is this change. Memory / CPU units:
+`aiken bench -m "global_state_logic_tests.{..}" --seed 42 --max-size 16`. Before is commit
+`2addf7d`; after is this change. Memory / CPU units:
 
 | | before (mem / CPU) | after | change |
 |---|---|---|---|
@@ -2161,12 +2166,13 @@ the datum order and one redeemer.
   hash of their own list's spend validator, after `init_input_out_ref`; apply each spend validator
   before its mint. `power_user_list_script_hash` and `denylist_script_hash` are gone from every
   validator: `global_state_logic` has four parameters, `transfer_logic_validator` and
-  `third_party_transfer_logic_validator` three, and `minting_authority_validator` seven. The README's
-  *Parameter order* table lists them.
+  `third_party_transfer_logic_validator` three, and `minting_authority_validator` seven. The
+  README's *Parameter order* table lists them.
 * **Datum, breaking.** The core is fields 0–4. `transfers_paused` is field 5 and `mintable_amount`
   field 6 again; every other field keeps its index. A rotation now keeps every field but field 0
   and may only append.
-* **Redeemers.** `GlobalStateSpendAction` gains `MigrateLists { new_power_user_linked_list_policy_id,
+* **Redeemers.** `GlobalStateSpendAction` gains
+  `MigrateLists { new_power_user_linked_list_policy_id,
   new_denylist_linked_list_policy_id, power_user_root_ref_input_index,
   denylist_root_ref_input_index }` at constructor 15, and both list `MintRedeemer` types gain
   `InitAfterGenesis { root_output_index, global_state_ref_input_index }` at constructor 4; no other
@@ -2234,7 +2240,8 @@ redeemers and transaction shapes.
   `StateTransition` keeps its encoding.
 * **Parameters.** `denylist_validator` goes from 1 to 3, in the same positions as `denylist.mint`'s:
   `(global_state_policy_id, denylist_linked_list_policy_id, power_user_list_script_hash)` — the list
-  policy id moves from first to second (README row 5 at the time). Its hash moves, and with it every script
+  policy id moves from first to second (README row 5 at the time). Its hash moves, and with it every
+  script
   that pins it: transfer logic, third-party logic, minting authority (rows 8–10). (Historical: the
   2026-11 change takes it back to one parameter; see
   [below](#the-2026-11-append-only-datum-and-self-pinning-lists-a-new-token).)
@@ -2281,7 +2288,8 @@ The two list mint hashes were verified **not** to move under fix 13, so adding
 
 Every other validator's *source* is byte-identical, so every other **unapplied** hash in
 `plutus.json` is unchanged. (The table below names the parameters of that time:
-`power_user_list_script_hash` and `denylist_script_hash` were removed again in 2026-11, §22.) But the two changed hashes are the two list **policy ids**, and those are
+`power_user_list_script_hash` and `denylist_script_hash` were removed again in 2026-11, §22.) But
+the two changed hashes are the two list **policy ids**, and those are
 compile-time parameters of most of the protocol — so the *applied* hashes cascade:
 
 | Applied artefact | Moves? | Because |
@@ -2292,7 +2300,7 @@ compile-time parameters of most of the protocol — so the *applied* hashes casc
 | `power_users_validator` → power-users list address, `power_user_list_script_hash` | yes | takes the power-users policy id |
 | `denylist.mint` → denylist policy id | yes | source changed **and** takes `power_user_list_script_hash` |
 | `denylist_validator` → denylist address, `denylist_script_hash` | yes | takes the denylist policy id |
-| `global_state_spend_validator` → **the GlobalState UTxO's address** | yes | takes `power_user_list_script_hash` |
+| `global_state_spend_validator` (historical: since replaced by `global_state_proxy`) → **the GlobalState UTxO's address** | yes | takes `power_user_list_script_hash` |
 | `transfer_logic_validator` → its withdraw-0 credential, registry field 3 | yes | takes `denylist_script_hash` |
 | `third_party_transfer_logic_validator` → its withdraw-0 credential, registry field 4 | yes | takes both list hashes |
 | `minting_authority_validator` → `minting_script_credential_hash` | yes | takes both list hashes and the power-users policy id |

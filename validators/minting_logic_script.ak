@@ -38,8 +38,8 @@ use utils.{must_run_script_withdrawal}
 /// WHY THE SUPPLY DEBIT IS DELIBERATELY NOT HERE. The token's issuance policy
 /// id is derived from this file's hash (the CIP-113 issuance template applied
 /// to it; see the README's "What the derived parameters must equal"), so a
-/// defect in a rule written here could never be fixed. The authority can be rotated. Until `LockUpgrades` the admin can
-/// already set the cap with `SetMintableAmount`; after `LockUpgrades`,
+/// defect in a rule written here could never be fixed. The authority can be rotated. Until
+/// `LockUpgrades` the admin can already set the cap with `SetMintableAmount`; after `LockUpgrades`,
 /// `RotateMintingScript` is closed and the installed authority, its debit
 /// included, is permanent too.
 ///

@@ -44,9 +44,9 @@ pub type GlobalStateLocation {
 /// addresses the datum positionally through the shared `idx_*` constants, and
 /// `global_state_logic` rewrites exactly one field by index on every branch
 /// (the outgoing side of `RotateGlobalStateScript` rewrites field 0 and may
-/// append; `MigrateLists` rewrites fields 3 and 7 together). Reordering, inserting or removing a field silently reads or writes
-/// the wrong one — the tripwire test `gs_getters_read_correct_fields` exists to
-/// turn that into a build failure.
+/// append; `MigrateLists` rewrites fields 3 and 7 together). Reordering, inserting or removing a
+/// field silently reads or writes the wrong one — the tripwire test
+/// `gs_getters_read_correct_fields` exists to turn that into a build failure.
 ///
 /// CORE. Fields 0–4 are the `GlobalStateCore`: what the permanent scripts,
 /// which can never be redeployed (the GlobalState proxy, the minting proxy,
@@ -1018,12 +1018,14 @@ test decode_global_state_ignores_trailing_fields() {
 test decode_global_state_rejects_a_short_datum() fail {
   let raw: Data = test_layout_datum()
   expect [_, ..thirteen] = list.reverse(builtin.unconstr_fields(raw))
-  decode_global_state(builtin.constr_data(0, list.reverse(thirteen))) == test_layout_datum()
+  let x = builtin.constr_data(0, list.reverse(thirteen))
+  decode_global_state(x) == decode_global_state(x)
 }
 
 test decode_global_state_rejects_another_constructor() fail {
   let raw: Data = test_layout_datum()
-  decode_global_state(builtin.constr_data(1, builtin.unconstr_fields(raw))) == test_layout_datum()
+  let x = builtin.constr_data(1, builtin.unconstr_fields(raw))
+  decode_global_state(x) == decode_global_state(x)
 }
 
 // Leniency covers the TAIL only: a wrong type in a known field still traps
@@ -1035,7 +1037,8 @@ test decode_global_state_rejects_a_wrong_type_in_a_known_field() fail {
     idx_mintable_amount,
     builtin.b_data(#"00"),
   )
-  decode_global_state(builtin.constr_data(0, fields)) == test_layout_datum()
+  let x = builtin.constr_data(0, fields)
+  decode_global_state(x) == decode_global_state(x)
 }
 
 // ── decode_global_state_core: the core, whatever follows it ──────────────────
@@ -1160,21 +1163,17 @@ test gs_core_from_output_reads_an_authenticated_global_state() {
 
 test gs_core_from_output_rejects_a_utxo_without_the_nft() fail {
   let raw: Data = test_layout_datum()
-  gs_core_from_output(
-    test_core_output(
-      from_asset(#"bb", constants.global_state_asset_name, 1),
-      InlineDatum(raw),
-    ),
-    #"aa",
-  ) == test_layout_core()
+  let output = test_core_output(
+    from_asset(#"bb", constants.global_state_asset_name, 1),
+    InlineDatum(raw),
+  )
+  gs_core_from_output(output, #"aa") == gs_core_from_output(output, #"aa")
 }
 
 test gs_core_from_output_rejects_a_datum_that_is_not_inline() fail {
-  gs_core_from_output(
-    test_core_output(
-      from_asset(#"aa", constants.global_state_asset_name, 1),
-      NoDatum,
-    ),
-    #"aa",
-  ) == test_layout_core()
+  let output = test_core_output(
+    from_asset(#"aa", constants.global_state_asset_name, 1),
+    NoDatum,
+  )
+  gs_core_from_output(output, #"aa") == gs_core_from_output(output, #"aa")
 }

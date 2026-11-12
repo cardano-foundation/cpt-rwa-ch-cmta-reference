@@ -196,9 +196,12 @@ referenced by compact identifiers or hashes.
   list itself (add, remove, modify), the security metadata, the remaining supply cap
   (`SetMintableAmount`, until `LockUpgrades`), the GlobalState logic itself
   (`RotateGlobalStateScript`, until `LockUpgrades`), which two lists GlobalState names
-  (`MigrateLists`, until `LockUpgrades`), and the irreversible deactivation switch. Rotatable, so the master key can be replaced without redeploying.
-  Never the minting authority: genesis and `RotateAdmin` refuse it, and `RotateMintingScript` refuses
-  an authority equal to the admin. Use a key or a native multisig, never a script of this deployment.
+  (`MigrateLists`, until `LockUpgrades`), and the irreversible deactivation switch. Rotatable, so
+  the master key can be replaced without redeploying.
+  Never the minting authority: genesis and `RotateAdmin` refuse it, and `RotateMintingScript`
+  refuses
+  an authority equal to the admin. Use a key or a native multisig, never a script of this
+  deployment.
 * **Power user** — a node in the power-users linked list, carrying independently grantable flags
   (a credential equal to GlobalState datum field 0, the GlobalState logic hash, is refused
   wherever the role is used — that logic's withdrawal is in every GlobalState transaction and
@@ -345,7 +348,8 @@ The GlobalState admin has four distinct upgrade paths, plus control over the sup
   every GlobalState rule lives in the script field 0 names. Rotation rewrites field 0 and must run
   **both** logics in one transaction: the current one checks the admin signature, the lock, that the
   new hash is not the admin's or the minting authority's, and that the output datum keeps every
-  input field unchanged apart from field 0 (append-only, below); the new one must run its own withdraw-0 with
+  input field unchanged apart from field 0 (append-only, below); the new one must run its own
+  withdraw-0 with
   the same `RotateGlobalStateScript` redeemer — which proves its script is producible, its stake
   credential registered and that it decodes a GlobalState rotation, but **not** that it is a correct
   GlobalState logic — and checks the datum it is about to govern (this version accepts exactly the
@@ -402,7 +406,8 @@ transactions — with this repository's GlobalState logic installed, after it `m
 only through mint and burn, the GlobalState logic can no longer be replaced, and the two list
 policy ids (fields 3 and 7) are final, so finish any `MigrateLists` before locking.
 `LockUpgrades` is enforced by the installed GlobalState logic itself, which also closes
-`RotateMintingScript` and `MigrateLists`; the lock's closure of `UpgradeRegistryNode` is enforced by the installed
+`RotateMintingScript` and `MigrateLists`; the lock's closure of `UpgradeRegistryNode` is enforced by
+the installed
 minting authority, which refuses the upgrade once `upgrades_locked` is set. So after the lock both
 the installed GlobalState logic (datum field 0) and the installed minting authority (field 4) are
 permanent, and "closes all five" holds only if both are reviewed builds of this repository:
@@ -507,7 +512,8 @@ not feed the issuance policy ID, because the minting proxy (row 6) does not take
 ### What the derived parameters must equal
 
 * `list_script_hash` (rows 3 and 5) — the hash of that list's own **spend** validator (row 2 for
-  the power-users list, row 4 for the denylist), **never** a policy ID. The mint pins its list there:
+  the power-users list, row 4 for the denylist), **never** a policy ID. The mint pins its list
+  there:
   a list mint applied with the wrong spend hash roots its list at that script (see the warning under
   [Deployment: reference scripts](#deployment-reference-scripts)).
 * The power-users and denylist policy IDs (GlobalState datum fields 3 and 7) — the hashes of the
@@ -525,7 +531,8 @@ not feed the issuance policy ID, because the minting proxy (row 6) does not take
   transfer logic built with the wrong policy ID finds no parties and skips the denylist and KYC
   checks for every transfer.
   A minting authority built with the wrong `security_policy_id` still passes `Register`, but every
-  `MintBurn` is refused until `RotateMintingScript` installs a corrected one (fails closed).
+  `MintBurn` is refused until `RotateMintingScript` installs a corrected one (fails closed). After
+  `LockUpgrades` the refusal is permanent, because that rotation is closed then.
 * `transfer_logic_script_hash` and `third_party_transfer_logic_script_hash` (row 10) — the hashes of
   rows 8 and 9, in that order. Registration and every `UpgradeRegistryNode` require registry fields 3
   and 4 to name exactly these (F08), and the two must differ. The pin is only as good as row 10's
@@ -574,7 +581,8 @@ runs, so forgetting the proxy's registration makes every mint and burn fail from
 > fields 3 and 7, is the check.
 
 > **Verify before genesis, off-chain:** that the two linked-list policy IDs differ and each equals
-> the hash of its list's `mint` applied with that list's own spend-validator hash (rows 2–5), and that datum field 0 is the hash of
+> the hash of its list's `mint` applied with that list's own spend-validator hash (rows 2–5), and
+> that datum field 0 is the hash of
 > `global_state_logic` rebuilt from source with this deployment's parameters. The on-chain code
 > checks what it can (the IDs must differ and be 28 bytes; the NFT must land at
 > `global_state_proxy`; field 0 must be 28 bytes, differ from the admin, the minting authority and
@@ -599,7 +607,8 @@ runs, so forgetting the proxy's registration makes every mint and burn fail from
    refuses every `MintSecurity`, but its name-scoped security-token guard then misses the real
    token, so before `LockUpgrades` an admin-signed `SetMintableAmount` (in − n) can carry a mint of
    n that is still debited from the cap, with role, KYC and denylist still applying. Check by
-   rebuilding each script from source and comparing hashes. After deployment, smoke-test that a mint whose GlobalState output is not debited is
+   rebuilding each script from source and comparing hashes. After deployment, smoke-test that a mint
+   whose GlobalState output is not debited is
    rejected, and that a transfer of the minted token without a denylist proof is rejected.
 2. **The name passes the registration rules** (see `security_asset_name` under
    [What the derived parameters must equal](#what-the-derived-parameters-must-equal)). Check it
@@ -610,7 +619,8 @@ runs, so forgetting the proxy's registration makes every mint and burn fail from
    base layer's `max_inline_datum_bytes`.
 4. **Before `LockUpgrades`.** Rebuild `global_state_logic` and `minting_authority` from source at
    the commit being deployed (or its tagged release) with every parameter, and check their hashes
-   against datum fields 0 and 4 respectively. The lock is enforced by the installed GlobalState logic itself, so after it the cap
+   against datum fields 0 and 4 respectively. The lock is enforced by the installed GlobalState
+   logic itself, so after it the cap
    is final only if that logic is a reviewed build of this repository (see
    [Upgrading and locking the rules](#upgrading-and-locking-the-rules)). The lock makes the
    installed authority permanent too: it cannot be rotated afterwards, and it enforces the
@@ -702,7 +712,8 @@ changes the guarantees above:
 
 Both lists keep every NFT of their policy at their own spend script, and the readers rely on it.
 The guarantee has three parts: the linked-list library's usage guideline
-(`anastasia-labs/aiken-design-patterns` v1.9.0, whose insert and remove count the list's inputs since
+(`anastasia-labs/aiken-design-patterns` v1.9.0, whose insert and remove count the list's inputs
+since
 v1.8.0 and keep each continuation at its anchor's exact address and each new node at its anchor's
 payment credential, its stake part being free); this repository's `Init` pin,
 which requires the root's payment credential to be `Script(list_script_hash)`; and a check on every
@@ -798,7 +809,8 @@ above all, runs in every metadata update.
 ### Execution budget and transaction sizing
 
 Figures below are measured with `aiken bench` (`aiken bench -m "transfer_logic_script.{..}"
---max-size 40`; the per-test execution units `aiken check -D` prints are the other source) against the
+--max-size 40`; the per-test execution units `aiken check -D` prints are the other source) against
+the
 current, cost-optimised implementation, and were all re-measured on 2026-11-12 under Aiken v1.1.24.
 In the bullets, a single transaction's figure is a named test's execution units; a per-party
 increment is the slope of the named bench from `n = 1` to `n = 4`, halved where each step adds a
@@ -811,11 +823,12 @@ binding axis**.
   Each further party on a side that cites the same denylist covering node as the party before it
   adds ≈ 0.10 M mem / 33 M CPU (`transfer_cost_by_party_count_shared_node`) — the node is
   authenticated once per run of adjacent parties citing it; a party citing a different node pays
-  the full authentication, ≈ 0.16 M mem / 52 M CPU (`transfer_cost_by_party_count_alternating_nodes`).
+  the full authentication, ≈ 0.16 M mem / 52 M CPU
+  (`transfer_cost_by_party_count_alternating_nodes`).
   The dedupe check adds a small quadratic term that matters only beyond ~20 parties per side.
 * **Attestation KYC** (a trusted issuer signs the claim through CIP-30 `signData`, including
-  Ledger's CIP-8 hashed mode) adds ≈ 76 K mem / 80.4 M CPU per vetted party (measured on the transfer
-  fixture with and without the proof checked): the transaction builder
+  Ledger's CIP-8 hashed mode) adds ≈ 76 K mem / 80.4 M CPU per vetted party (measured on the
+  transfer fixture with and without the proof checked): the transaction builder
   extracts the COSE parts off chain, and the validator only rebuilds the COSE `Sig_structure` and
   verifies one Ed25519 signature (plus one BLAKE2b-224 when hashed). Membership (MPF) proofs are
   cheaper. A raw Ed25519 signature over the bare claim was supported until 2026-10-15 and is no
@@ -842,7 +855,8 @@ node; `seizure_cost_by_destination_count`: one seized input, `n` destinations, d
 | 16 | 4,010,116 | 1,515,110,094 | 2,081,743 | 794,131,350 |
 
 What moved since the previous measurement: readers no longer re-check a list element's address
-(see [What is relied on from the linked-list library](#what-is-relied-on-from-the-linked-list-library)),
+(see
+[What is relied on from the linked-list library](#what-is-relied-on-from-the-linked-list-library)),
 so every row is 9,816 mem / 3,392,805 CPU cheaper for a transfer and 8,884 mem / 3,167,142 CPU for
 a seizure — once per transaction here, because these benches authenticate one element — and a
 party that authenticates a different node saves about 4.6 K mem more. The bullets above had
@@ -851,7 +865,8 @@ predated the Aiken v1.1.24 bump; the redeemer sizes and the KYC increment did no
 > **Conservative maxima, at 25% of the budget:** ordinary transfer ≤ 14 unique parties per side
 > denylist-only, ≤ 8 per side with attestation KYC on both sides; seizure ≤ 26 destinations
 > denylist-only, ≤ 17 with receiver KYC. Each is the largest `n` whose bench memory above, plus
-> ≈ 76 K per attestation proof, stays within 3.5 M (CPU stays within 25% at those sizes). Split larger distributions; keep parties that share a
+> ≈ 76 K per attestation proof, stays within 3.5 M (CPU stays within 25% at those sizes). Split
+> larger distributions; keep parties that share a
 > covering node adjacent in the action lists — they follow input/output order.
 
 #### Mint and burn
@@ -859,8 +874,8 @@ predated the Aiken v1.1.24 bump; the redeemer sizes and the KYC increment did no
 A mint or burn runs four of this deployment's scripts: the GlobalState proxy and logic
 (`MintSecurity`), the minting proxy and the minting authority. Only the authority's cost grows with
 the number of destinations. Measured with `aiken bench -m "minting_authority.{..}"` and
-`aiken bench -m "global_state_logic_tests.{..}"` (`--seed 42 --max-size 16`). These benches build their
-transaction in the sampler, so fixture construction is excluded. They call the handlers with
+`aiken bench -m "global_state_logic_tests.{..}"` (`--seed 42 --max-size 16`). These benches build
+their transaction in the sampler, so fixture construction is excluded. They call the handlers with
 already-decoded arguments, so the on-chain entry point's redeemer decoding is not included (it grows
 with the number of destination actions), and the GlobalState figure assumes GlobalState is the first
 transaction input (each input before it adds about 11.5 K mem); the transfer and seizure
