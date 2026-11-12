@@ -2027,12 +2027,12 @@ test denylist_insert_rejects_an_operator_that_is_the_global_state_logic() fail {
 //
 // The denylist's Deinit path and both lists' `StateTransition` spend gate
 // (`Init` has none: where genesis places the root is verified off-chain, see
-// the comment on the `Init` branch of each list's mint); the other paths are pinned beside their fixtures in
-// `validators/denylist.ak` and `validators/power_users.ak`. Each is an
-// accepted fixture above with only the NFT's destination changed; its
-// accepted control is named in its comment. A `fail` test here is written
-// `… || True`, so a validator that merely returns False cannot pass it — only
-// a trap can.
+// the comment on the `Init` branch of each list's mint); the other paths are
+// pinned beside their fixtures in `validators/denylist.ak` and
+// `validators/power_users.ak`. Each is an accepted fixture above with only the
+// NFT's destination changed; its accepted control is named in its comment. A
+// `fail` test here is written `… || True`, so a validator that merely returns
+// False cannot pass it — only a trap can.
 
 fn at_wallet(output: Output) -> Output {
   Output {

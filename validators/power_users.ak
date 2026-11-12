@@ -1033,10 +1033,10 @@ test pu_add_rejects_a_node_keyed_other_than_the_redeemer() fail {
 //
 // One refusal per path through which a power-users NFT is minted, moved or
 // kept, except `Init`: where genesis places the root is verified off-chain
-// (see the comment on the `Init` branch). Each is an accepted fixture above with only the NFT's destination
-// changed; its accepted control is named in its comment. A `fail` test here
-// is written `… || True`, so a validator that merely returns False cannot
-// pass it — only a trap can.
+// (see the comment on the `Init` branch). Each is an accepted fixture above
+// with only the NFT's destination changed; its accepted control is named in
+// its comment. A `fail` test here is written `… || True`, so a validator that
+// merely returns False cannot pass it — only a trap can.
 
 /// A key (wallet) address outside the list.
 const t_wallet: ByteArray =

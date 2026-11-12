@@ -1314,10 +1314,11 @@ test dl_remove_rejects_a_missing_signature() {
 // One refusal per path through which a denylist NFT is minted, moved or kept
 // in this file's fixtures (Deinit and the spend gate are in
 // `validators/regression.ak`; `Init` has none, since where genesis places the
-// root is verified off-chain, see the comment on the `Init` branch). Each is an accepted fixture above with only the
-// NFT's destination changed; its accepted control is named in its comment. A
-// `fail` test here is written `… || True`, so a validator that merely returns
-// False cannot pass it — only a trap can.
+// root is verified off-chain, see the comment on the `Init` branch). Each is
+// an accepted fixture above with only the NFT's destination changed; its
+// accepted control is named in its comment. A `fail` test here is written
+// `… || True`, so a validator that merely returns False cannot pass it — only
+// a trap can.
 
 /// A key (wallet) address outside the list.
 const t_wallet: ByteArray =
