@@ -140,9 +140,9 @@ use utils.{must_be_signed_by_credential}
 ///   6. POWER USERS ARE AUTHENTICATED UNDER GLOBALSTATE FIELD 3
 ///      (`power_user_linked_list_policy_id`), read from the NFT-authenticated
 ///      GlobalState input — there is no compile-time copy to check it
-///      against. `power_user_list_script_hash` pins only the node's ADDRESS,
-///      and anyone can pay an NFT of a foreign policy there, so field 3 is the
-///      sole anchor for which list grants `can_mint` / `can_burn`. It is set
+///      against, and the node's address is not re-checked (the list keeps
+///      every NFT of its policy at its spend script), so field 3 is the sole
+///      anchor for which list grants `can_mint` / `can_burn`. It is set
 ///      once at genesis and no GlobalState logic may ever change its value
 ///      (see the replacement-logic invariants in global_state_logic.ak).
 ///   7. A MintBurn THAT CHANGES NO SUPPLY AUTHORISES NOTHING.
@@ -185,20 +185,6 @@ validator minting_authority_validator(
   /// Not circular: `gs_policy → proxy hash → issuance_policy_id → this
   /// validator`, and this validator is compiled last (it is the swappable one).
   security_policy_id: ByteArray,
-  /// The DENYLIST SPEND VALIDATOR's script hash, which every denylist element
-  /// a party cites must sit at. See `absence.with_denylist_element`.
-  denylist_script_hash: ByteArray,
-  /// The POWER-USERS SPEND VALIDATOR's script hash — not the list
-  /// policy id (they are separate validators with separate hashes).
-  ///
-  /// Element authentication ignores the address, so a power-user NFT carried
-  /// out of the list into a private wallet keeps authenticating whatever datum
-  /// its holder writes. The node's KEY stays pinned to the NFT asset name — so
-  /// the signature gate still binds — but the ROLE FLAGS come from the datum,
-  /// which means a revoked operator retains whichever powers their old key hash
-  /// signs for. Requiring the node to still live at the list's script address
-  /// is what makes revocation stick.
-  power_user_list_script_hash: ByteArray,
   /// F08: the hash of `transfer_logic_script.transfer_logic_validator` that
   /// registry field 3 must name, at registration and on every upgrade.
   ///
@@ -308,8 +294,6 @@ validator minting_authority_validator(
             destination_actions,
             security_asset_name,
             power_user_linked_list_policy_id,
-            denylist_script_hash,
-            power_user_list_script_hash,
             role_signed,
             self,
           ),
@@ -792,8 +776,6 @@ fn verify_mint_or_burn(
   destination_actions: List<PartyAction>,
   security_asset_name: ByteArray,
   power_user_linked_list_policy_id: ByteArray,
-  denylist_script_hash: ByteArray,
-  power_user_list_script_hash: ByteArray,
   // The withdraw handler's signature check: refuses the scripts that run in
   // this transaction (INVARIANT 8) before it accepts a signature.
   role_signed: fn(ByteArray) -> Bool,
@@ -816,7 +798,6 @@ fn verify_mint_or_burn(
   let (power_user_node_key, power_user_data) = utils.authenticated_power_user(
     power_user_ref_input.output,
     power_user_linked_list_policy_id,
-    power_user_list_script_hash,
   )
 
   // Destination verification (mirrors transfer_logic_script's per-output
@@ -857,7 +838,6 @@ fn verify_mint_or_burn(
       security_asset_name,
       gs_datum,
       power_user_node_key,
-      denylist_script_hash,
       self,
     )
   } else {
@@ -913,7 +893,6 @@ fn verify_mint_destinations(
   security_asset_name: ByteArray,
   gs_datum: GlobalStateDatum,
   power_user_node_key: ByteArray,
-  denylist_script_hash: ByteArray,
   self: Transaction,
 ) -> Bool {
   when outputs is {
@@ -944,7 +923,6 @@ fn verify_mint_destinations(
             security_asset_name,
             gs_datum,
             power_user_node_key,
-            denylist_script_hash,
             self,
           )
         } else {
@@ -986,7 +964,6 @@ fn verify_mint_destinations(
               action.denylist_ref_input_index,
               self.reference_inputs,
               gs_datum.denylist_linked_list_policy_id,
-              denylist_script_hash,
               fn(_, _) { True },
             ),
             verify_mint_destinations(
@@ -997,7 +974,6 @@ fn verify_mint_destinations(
               security_asset_name,
               gs_datum,
               power_user_node_key,
-              denylist_script_hash,
               self,
             ),
           }
@@ -1011,7 +987,6 @@ fn verify_mint_destinations(
           security_asset_name,
           gs_datum,
           power_user_node_key,
-          denylist_script_hash,
           self,
         )
       }
@@ -1077,9 +1052,9 @@ const test_dest_stake_hash: ByteArray =
 // The list SPEND validators' hashes — deliberately distinct from the
 // list POLICY ids above, because `denylist_validator`/`power_users_validator`
 // (spend) and their `mint` counterparts are separate validators with separate
-// hashes. The fixtures below place list nodes at THESE addresses; a node
-// anywhere else must now be rejected.
-const test_denylist_script_hash: ByteArray =
+// hashes. The fixtures below place list nodes at THESE addresses, where the
+// list mints keep them.
+const test_denylist_spend_hash: ByteArray =
   #"d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0"
 
 const test_pu_script_hash: ByteArray =
@@ -1377,7 +1352,7 @@ fn make_denylist_root_ref_input() -> Input {
     output_reference: test_out_ref(3),
     output: Output {
       address: Address {
-        payment_credential: Script(test_denylist_script_hash),
+        payment_credential: Script(test_denylist_spend_hash),
         stake_credential: None,
       },
       value: merge(
@@ -1410,7 +1385,7 @@ fn make_denylist_node_ref_input(pkh: ByteArray) -> Input {
     output_reference: test_out_ref(3),
     output: Output {
       address: Address {
-        payment_credential: Script(test_denylist_script_hash),
+        payment_credential: Script(test_denylist_spend_hash),
         stake_credential: None,
       },
       value: merge(
@@ -1570,8 +1545,6 @@ fn run_withdraw_named(
     test_registry_policy_id,
     test_proxy_hash,
     test_issuance_policy_id,
-    test_denylist_script_hash,
-    test_pu_script_hash,
     pinned_transfer_logic_hash,
     test_third_party_logic_hash,
     redeemer,
@@ -2996,8 +2969,6 @@ test publish_accepts_credential_registration() {
     test_registry_policy_id,
     test_proxy_hash,
     test_issuance_policy_id,
-    test_denylist_script_hash,
-    test_pu_script_hash,
     test_transfer_logic_hash,
     test_third_party_logic_hash,
     builtin.constr_data(0, []),
@@ -3024,8 +2995,6 @@ test publish_rejects_credential_deregistration() {
     test_registry_policy_id,
     test_proxy_hash,
     test_issuance_policy_id,
-    test_denylist_script_hash,
-    test_pu_script_hash,
     test_transfer_logic_hash,
     test_third_party_logic_hash,
     builtin.constr_data(0, []),
@@ -3218,8 +3187,6 @@ test an_authority_built_with_one_hash_for_both_scripts_refuses_registration() fa
     test_registry_policy_id,
     test_proxy_hash,
     test_issuance_policy_id,
-    test_denylist_script_hash,
-    test_pu_script_hash,
     test_transfer_logic_hash,
     test_transfer_logic_hash,
     register_redeemer(),

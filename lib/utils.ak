@@ -116,27 +116,24 @@ pub fn quantity_of_policy_id(value: Assets, policyId: PolicyId) {
 ///    well-formed inline `Element` datum.
 /// 2. It is a NODE, not the list root. `get_node_element_info` enforces this
 ///    structurally, so there is no `expect Some(key)` to get wrong.
-/// 3. It still LIVES AT THE LIST'S SPEND ADDRESS. Authentication says nothing
-///    about where an element sits, and that omission is load-bearing: the key
-///    is fixed by the NFT's asset name, but the ROLE FLAGS come from the datum.
-///    A power-user NFT carried out of the list into a private wallet would
-///    otherwise keep granting whatever flags its holder writes, so a revoked
-///    operator would keep their powers. Pinning the address is what makes
-///    revocation stick.
+/// 3. Its datum is a well-formed `PowerUser`.
+///
+/// The node's ADDRESS is not checked here: the list guarantees that every NFT
+/// of its policy lives at its spend script — the list mint's Init pin and its
+/// outputs check on every branch (`policy_only_at_script`), plus the library's
+/// own address checks on nodes and continuations — so the policy id alone
+/// identifies a list element.
 ///
 /// Every caller that reads power-user authority goes through here — the
 /// denylist mint, the minting authority, the seizure logic and the GlobalState
-/// pause branch — so the three checks cannot drift apart between them.
+/// pause branch — so the checks cannot drift apart between them.
 pub fn authenticated_power_user(
   node_output: Output,
   power_user_list_policy_id: PolicyId,
-  power_user_list_script_hash: ByteArray,
 ) -> (ByteArray, PowerUser) {
   get_node_element_info(
     node_output,
-    fn(address, _lovelace, node_key, data, _link) {
-      expect Address { payment_credential: Script(node_script), .. } = address
-      expect node_script == power_user_list_script_hash
+    fn(_address, _lovelace, node_key, data, _link) {
       expect power_user_data: PowerUser = data
       (node_key, power_user_data)
     },

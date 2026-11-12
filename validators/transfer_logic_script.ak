@@ -70,9 +70,6 @@ validator transfer_logic_validator(
   /// what closes that; nothing about "did some node name me" was ever
   /// load-bearing.
   security_policy_id: ByteArray,
-  /// The DENYLIST SPEND VALIDATOR's script hash, which every denylist element
-  /// a party cites must sit at. See `absence.with_denylist_element`.
-  denylist_script_hash: ByteArray,
 ) {
   withdraw(
     redeemer: TransferLogicScriptWithdrawRedeemer,
@@ -264,7 +261,6 @@ validator transfer_logic_validator(
       gs_datum.requires_sender_kyc,
       gs_datum,
       security_policy_id,
-      denylist_script_hash,
       self,
     )
 
@@ -275,7 +271,6 @@ validator transfer_logic_validator(
       gs_datum.requires_receiver_kyc,
       gs_datum,
       security_policy_id,
-      denylist_script_hash,
       self,
     )
 
@@ -380,7 +375,7 @@ const t_third_party_hash: ByteArray =
 
 // The denylist SPEND validator's hash — distinct from the denylist
 // POLICY id (mint and spend are separate validators). Node fixtures live here.
-const t_denylist_script_hash: ByteArray =
+const t_denylist_spend_hash: ByteArray =
   #"d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0"
 
 const t_plb_hash: ByteArray =
@@ -550,7 +545,7 @@ fn t_denylist_root_ref_input() -> Input {
     output_reference: t_out_ref(2),
     output: Output {
       address: Address {
-        payment_credential: Script(t_denylist_script_hash),
+        payment_credential: Script(t_denylist_spend_hash),
         stake_credential: None,
       },
       value: merge(
@@ -653,7 +648,6 @@ fn run_transfer(
     t_sec_name,
     t_gs_policy,
     t_issuance_policy,
-    t_denylist_script_hash,
     redeemer,
     Script(t_transfer_hash),
     tx,
@@ -1264,7 +1258,6 @@ fn run_cip68_transfer(
     t_cip68_sec_name,
     t_gs_policy,
     t_issuance_policy,
-    t_denylist_script_hash,
     redeemer,
     Script(t_transfer_hash),
     tx,
@@ -1465,7 +1458,7 @@ fn pf_node_with_data(
     output_reference: t_out_ref(20 + ix),
     output: Output {
       address: Address {
-        payment_credential: Script(t_denylist_script_hash),
+        payment_credential: Script(t_denylist_spend_hash),
         stake_credential: None,
       },
       value: merge(
@@ -1647,31 +1640,6 @@ test fully_frozen_receiver_is_rejected() {
     [pf_output(pf_a(), 1_000)],
     [pf_src(3)],
     [pf_dst(3)],
-  )
-}
-
-// A copy of A's node held anywhere but the denylist's own address
-// authenticates nothing — here under a foreign SCRIPT, so it is the hash
-// equality, not the credential kind, that must reject it.
-test partially_frozen_proof_from_a_node_outside_the_list_is_rejected() fail {
-  let wallet_node = Input {
-    ..pf_node(0, t_sender_stake, None, Some(1)),
-    output: Output {
-      ..pf_node(0, t_sender_stake, None, Some(1)).output,
-      address: Address {
-        payment_credential: Script(t_third_party_hash),
-        stake_credential: None,
-      },
-    },
-  }
-  pf_run(
-    [pf_root(Some(t_sender_stake)), wallet_node],
-    [pf_input(0, pf_a(), 1_000)],
-    [pf_output(pf_c(), 999), pf_output(pf_a(), 1)],
-    [pf_src(3)],
-    // Every proof leans on the wallet copy, so the address pin is the only
-    // thing that can reject this transaction.
-    [pf_dst(3), pf_dst(3)],
   )
 }
 
@@ -2561,7 +2529,6 @@ test transfer_publish_rejects_credential_deregistration() {
     t_sec_name,
     t_gs_policy,
     t_issuance_policy,
-    t_denylist_script_hash,
     builtin.constr_data(0, []),
     certificate.UnregisterCredential {
       credential: Script(t_transfer_hash),

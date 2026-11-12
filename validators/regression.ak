@@ -64,6 +64,7 @@ use types/power_users.{
   AddPowerUser, PowerUser, RemovePowerUser, StateTransition as PuStateTransition,
 }
 use types/transfer_logic_script.{TransferLogicScriptWithdrawRedeemer}
+use utils
 
 // ============================================================================
 // The world
@@ -111,16 +112,19 @@ const gs_script_hash: ByteArray =
 
 /// The denylist SPEND validator's hash — deliberately NOT
 /// `denylist_policy`. `denylist_validator` (spend) and `mint` are separate
-/// validators in the same file and therefore have different hashes; the
-/// original fixtures reused the policy id as the address only because nothing
-/// checked it — which is precisely what the wallet-held-node defect exploited.
-const denylist_script_hash: ByteArray =
+/// validators in the same file and therefore have different hashes. List
+/// fixtures sit here, where the list mint keeps every NFT of its policy.
+const denylist_spend_hash: ByteArray =
   #"d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0"
 
 /// The power-users SPEND validator's hash, likewise distinct from
 /// `pu_policy`.
 const pu_script_hash: ByteArray =
   #"d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1"
+
+/// A list policy that is neither list's, for the foreign-policy refusals.
+const foreign_list_policy: ByteArray =
+  #"9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f"
 
 const admin: ByteArray =
   #"0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
@@ -306,7 +310,7 @@ fn dl_node_input(ix: Int, key: ByteArray, link: Option<ByteArray>) -> Input {
     output_reference: oref(ix),
     output: Output {
       address: Address {
-        payment_credential: Script(denylist_script_hash),
+        payment_credential: Script(denylist_spend_hash),
         stake_credential: None,
       },
       value: merge(
@@ -329,7 +333,7 @@ fn dl_root_input(ix: Int) -> Input {
     output_reference: oref(ix),
     output: Output {
       address: Address {
-        payment_credential: Script(denylist_script_hash),
+        payment_credential: Script(denylist_spend_hash),
         stake_credential: None,
       },
       value: merge(
@@ -452,8 +456,7 @@ fn pu_node_input(ix: Int, pu: PowerUser) -> Input {
   pu_node_at(ix, pu, Script(pu_script_hash))
 }
 
-/// The same node at a caller-chosen address, so the address pin can be
-/// exercised in both directions.
+/// The same node at a caller-chosen address.
 fn pu_node_at(ix: Int, pu: PowerUser, payment: Credential) -> Input {
   let element: Element<Data, PowerUser> = Element {
     data: Node { data: pu },
@@ -673,7 +676,6 @@ fn run_transfer(
     sec_name,
     gs_policy,
     issuance_policy,
-    denylist_script_hash,
     redeemer,
     Script(transfer_hash),
     tx,
@@ -690,8 +692,6 @@ fn run_authority(
     registry_policy,
     proxy_hash,
     issuance_policy,
-    denylist_script_hash,
-    pu_script_hash,
     transfer_hash,
     third_party_hash,
     redeemer,
@@ -767,7 +767,6 @@ test denylisted_key_cannot_prove_its_own_absence() {
     0,
     [dl_node_input(0, dl_pred_key, Some(dl_sanctioned_key))],
     denylist_policy,
-    denylist_script_hash,
     fn(_, _) { True },
   )
 }
@@ -791,7 +790,6 @@ test denylist_absence_is_sound_and_complete_over_a_real_list() {
       0,
       dl,
       denylist_policy,
-      denylist_script_hash,
       fn(_, _) { True },
     ),
     // S is PRESENT. No node in the list may certify its absence — neither its
@@ -801,7 +799,6 @@ test denylist_absence_is_sound_and_complete_over_a_real_list() {
       0,
       dl,
       denylist_policy,
-      denylist_script_hash,
       fn(_, _) { True },
     ),
     !verify_denylist_permits(
@@ -809,7 +806,6 @@ test denylist_absence_is_sound_and_complete_over_a_real_list() {
       1,
       dl,
       denylist_policy,
-      denylist_script_hash,
       fn(_, _) { True },
     ),
   }
@@ -881,30 +877,113 @@ test transfer_accepts_a_clean_holder_with_a_high_successor_link() {
 }
 
 // ============================================================================
-// PROPERTY: a linked-list element is authoritative only while it lives at its
-// list's script address — and its NFT cannot be carried out of the list.
+// PROPERTY: a reader authenticates a list element by its list policy id alone,
+// and a list NFT cannot be carried out of its list.
 // ============================================================================
+//
+// `authenticate_element_utxo_and_get_info` checks the datum shape and the
+// single NFT, never the element's ADDRESS, and the readers no longer re-check
+// it either. A list NFT outside its list would therefore be read as list state:
+// a denylist node in a wallet, keyed at the lowest key with no successor, would
+// certify absence for every credential on chain, and a power-user node in a
+// wallet would grant whatever role flags its holder writes. What makes such an
+// element unreachable is the list itself: its mint pins the root at Init and
+// checks, on every branch, that every output carrying its NFT pays to the list
+// spend script, and the library keeps nodes and continuations at the anchor's
+// address. The two `*_trusts_the_policy_alone` tests below pin the reliance;
+// the list-side tests named in their comments pin the guarantee.
 
-/// THE DEFECT. `authenticate_element_utxo_and_get_info` checks the datum shape and
-/// the single NFT — never the element's ADDRESS. So one denylist-policy NFT in
-/// an attacker's own wallet, with an attacker-authored `link`, is accepted as a
-/// covering node for ANY target. Keyed at the lowest possible key with no
-/// successor, it certifies absence for every credential on chain.
-///
-/// THE GUARD. `verify_denylist_permits` takes the denylist
-/// SPEND validator's hash as a compile-time parameter and requires the covering
-/// element to still live there. The forged node sits at a `VerificationKey`
-/// address, so the `expect Script(...)` pattern match TRAPS — hence `fail`,
-/// not `!`.
-test absence_proof_rejects_a_covering_node_in_a_wallet() fail {
+/// A genuine-policy denylist node in an attacker's wallet, keyed at the lowest
+/// key with no successor, is ACCEPTED as a covering node: the reader trusts the
+/// policy alone. Such a node cannot exist on chain. The denylist mint refuses
+/// every path that would put one there:
+/// `denylist_init_refuses_a_root_at_a_wallet`,
+/// `denylist_insert_refuses_a_new_node_at_a_wallet`,
+/// `denylist_insert_refuses_an_anchor_continuation_at_a_wallet`,
+/// `denylist_remove_refuses_an_anchor_continuation_at_a_wallet`,
+/// `denylist_remove_refuses_a_removed_node_kept_under_another_list_mint`,
+/// `denylist_deinit_refuses_a_root_kept_under_another_list_mint`,
+/// `denylist_insert_rejects_a_smuggled_extra_node_input`; and the spend side,
+/// `denylist_spend_refuses_a_node_to_a_wallet_without_a_list_mint` and
+/// `denylist_update_rejects_a_continuation_at_another_address`.
+test denylist_element_trusts_the_policy_alone() {
   verify_denylist_permits(
     dl_sanctioned_key,
     0,
     [dl_forged_node_at_attacker(0, dl_lowest_key, None)],
     denylist_policy,
-    denylist_script_hash,
     fn(_, _) { True },
   )
+}
+
+/// The same covering node at the list's own address, but under a FOREIGN
+/// policy: the library finds no NFT of `denylist_policy` and traps, hence
+/// `fail`. Written `… || True`, so only a trap passes it.
+test denylist_element_refuses_a_node_under_a_foreign_policy() fail {
+  let genuine = dl_node_input(0, dl_lowest_key, None)
+  let foreign = Input {
+    ..genuine,
+    output: Output {
+      ..genuine.output,
+      value: merge(
+        from_lovelace(2_000_000),
+        from_asset(foreign_list_policy, ll_asset_name(dl_lowest_key), 1),
+      ),
+    },
+  }
+  verify_denylist_permits(
+    dl_sanctioned_key,
+    0,
+    [foreign],
+    denylist_policy,
+    fn(_, _) { True },
+  ) || True
+}
+
+/// A genuine-policy power-user node with every role flag set, in a wallet and
+/// at another script, is ACCEPTED: the reader trusts the policy alone. Such a
+/// node cannot exist on chain. The power-users mint refuses every path that
+/// would put one there:
+/// `power_users_init_refuses_a_root_at_a_wallet`,
+/// `power_users_insert_refuses_a_new_node_at_a_wallet`,
+/// `power_users_insert_refuses_an_anchor_continuation_at_a_wallet`,
+/// `power_users_remove_refuses_an_anchor_continuation_at_a_wallet`,
+/// `power_user_insert_rejects_a_smuggled_extra_node_input`; and the spend
+/// side, `power_users_spend_refuses_a_node_to_a_wallet_without_a_list_mint`,
+/// `power_users_modify_refuses_a_continuation_at_a_wallet` and
+/// `power_users_modify_refuses_a_continuation_at_another_script`.
+test authenticated_power_user_trusts_the_policy_alone() {
+  let pu = power_user(True, True, True, True, True)
+  let (wallet_key, wallet_data) = utils.authenticated_power_user(
+    pu_node_at(0, pu, VerificationKey(attacker_wallet)).output,
+    pu_policy,
+  )
+  let (script_key, script_data) = utils.authenticated_power_user(
+    pu_node_at(0, pu, Script(denylist_spend_hash)).output,
+    pu_policy,
+  )
+  and {
+    wallet_key == pu_cred,
+    wallet_data == pu,
+    script_key == pu_cred,
+    script_data == pu,
+  }
+}
+
+/// The same node at the list's own address, but under a FOREIGN policy: the
+/// library finds no NFT of `pu_policy` and traps, hence `fail`. Written
+/// `… || True`, so only a trap passes it.
+test authenticated_power_user_refuses_a_node_under_a_foreign_policy() fail {
+  let genuine = pu_node_input(0, power_user(True, True, True, True, True))
+  let foreign = Output {
+    ..genuine.output,
+    value: merge(
+      from_lovelace(2_000_000),
+      from_asset(foreign_list_policy, ll_asset_name(pu_cred), 1),
+    ),
+  }
+  let (key, _) = utils.authenticated_power_user(foreign, pu_policy)
+  key == pu_cred || True
 }
 
 /// THE DEFECT — how the NFT gets out. `denylist_validator.spend` delegates
@@ -912,8 +991,8 @@ test absence_proof_rejects_a_covering_node_in_a_wallet() fail {
 /// minted or burnt in this transaction". The mint validator's
 /// `insert_ascending` inspects exactly three element UTxOs, so any FOURTH
 /// denylist node spent alongside a legitimate insert is unconstrained — its NFT
-/// can go anywhere, including an attacker's wallet, which is exactly the
-/// precondition `absence_proof_rejects_a_covering_node_in_a_wallet` needs.
+/// can go anywhere, including an attacker's wallet, where a reader would take
+/// it for list state (`denylist_element_trusts_the_policy_alone`).
 ///
 /// REWRITTEN to invoke the MINT validator.
 /// The `spend` handler's `StateTransition` path is unchanged by the fix (it
@@ -979,8 +1058,7 @@ fn run_denylist_remove(anchor_ix: Int, tx: Transaction) -> Bool {
   v_denylist.mint.mint(
     gs_policy,
     oref(99),
-    denylist_script_hash,
-    pu_script_hash,
+    denylist_spend_hash,
     RemoveFromDenylist {
       user_pkh: dl_frozen_key,
       anchor_node_input_index: anchor_ix,
@@ -1012,8 +1090,7 @@ test denylist_remove_is_bound_to_the_declared_key() fail {
   v_denylist.mint.mint(
     gs_policy,
     oref(99),
-    denylist_script_hash,
-    pu_script_hash,
+    denylist_spend_hash,
     RemoveFromDenylist {
       user_pkh: dl_sanctioned_key,
       anchor_node_input_index: 0,
@@ -1046,8 +1123,7 @@ test denylist_init_succeeds_on_the_nonce_utxo() {
   v_denylist.mint.mint(
     gs_policy,
     oref(50),
-    denylist_script_hash,
-    pu_script_hash,
+    denylist_spend_hash,
     DenylistInit { root_output_index: 0 },
     denylist_policy,
     Transaction {
@@ -1069,8 +1145,7 @@ test denylist_init_rejects_a_missing_nonce() fail {
   v_denylist.mint.mint(
     gs_policy,
     oref(50),
-    denylist_script_hash,
-    pu_script_hash,
+    denylist_spend_hash,
     DenylistInit { root_output_index: 0 },
     denylist_policy,
     Transaction {
@@ -1108,8 +1183,7 @@ test denylist_deinit_succeeds_for_the_admin_after_deactivation() {
   v_denylist.mint.mint(
     gs_policy,
     oref(99),
-    denylist_script_hash,
-    pu_script_hash,
+    denylist_spend_hash,
     DenylistDeinit { global_state_ref_input_index: 0 },
     denylist_policy,
     Transaction {
@@ -1130,8 +1204,7 @@ test denylist_deinit_accepts_a_global_state_with_a_reshaped_tail() {
   v_denylist.mint.mint(
     gs_policy,
     oref(99),
-    denylist_script_hash,
-    pu_script_hash,
+    denylist_spend_hash,
     DenylistDeinit { global_state_ref_input_index: 0 },
     denylist_policy,
     tests.with_reshaped_gs_tail(
@@ -1158,8 +1231,7 @@ test denylist_deinit_rejects_a_live_protocol() {
   !v_denylist.mint.mint(
     gs_policy,
     oref(99),
-    denylist_script_hash,
-    pu_script_hash,
+    denylist_spend_hash,
     DenylistDeinit { global_state_ref_input_index: 0 },
     denylist_policy,
     Transaction {
@@ -1180,8 +1252,7 @@ test denylist_deinit_rejects_a_missing_admin_signature() {
   !v_denylist.mint.mint(
     gs_policy,
     oref(99),
-    denylist_script_hash,
-    pu_script_hash,
+    denylist_spend_hash,
     DenylistDeinit { global_state_ref_input_index: 0 },
     denylist_policy,
     Transaction {
@@ -1206,7 +1277,6 @@ test denylist_spend_handler_is_pure_delegation() {
   let no_datum: Option<Data> = None
   v_denylist.denylist_validator.spend(
     gs_policy,
-    pu_script_hash,
     no_datum,
     DenylistStateTransition,
     oref(0),
@@ -1222,14 +1292,11 @@ test denylist_spend_handler_is_pure_delegation() {
 // ── The denylist's own power-user read ──────────────────────────────────────
 //
 // `denylist.mint`'s `power_user_from_refs` authenticates the power-user node
-// that authorises a sanction. Like every other element read it ignored the
-// address, so a power-user NFT in a wallet could authorise sanctions with
-// whatever role flags its holder wrote. The smuggled-input test above stops at
-// the input-count check, so these cover the address pin directly.
+// that authorises a sanction, by the power-users list policy alone
+// (`authenticated_power_user_trusts_the_policy_alone`).
 
 /// A legitimate `AddToDenylist`: an admin power user in the list, one anchor
-/// spent, the root reproduced pointing at the new node. The positive control —
-/// without it the negative below would also pass if the branch were broken.
+/// spent, the root reproduced pointing at the new node.
 fn dl_insert_tx(pu_node: Input) -> Transaction {
   Transaction {
     ..base_tx(),
@@ -1254,8 +1321,7 @@ fn run_denylist_add(tx: Transaction) -> Bool {
   v_denylist.mint.mint(
     gs_policy,
     oref(99),
-    denylist_script_hash,
-    pu_script_hash,
+    denylist_spend_hash,
     AddToDenylist {
       user_pkh: dl_frozen_key,
       anchor_node_output_index: 0,
@@ -1271,34 +1337,6 @@ fn run_denylist_add(tx: Transaction) -> Bool {
 test denylist_insert_succeeds_for_an_admin_power_user_in_the_list() {
   run_denylist_add(
     dl_insert_tx(pu_node_input(1, power_user(True, False, False, False, False))),
-  )
-}
-
-/// Same node, same NFT, same `is_admin` datum — in a wallet. The
-/// `expect Script(..)` pattern match traps, hence `fail`.
-test wallet_held_power_user_node_cannot_authorise_a_sanction() fail {
-  run_denylist_add(
-    dl_insert_tx(
-      pu_node_at(
-        1,
-        power_user(True, False, False, False, False),
-        VerificationKey(attacker_wallet),
-      ),
-    ),
-  )
-}
-
-/// And parked at some other SCRIPT address, which reaches the equality
-/// assertion rather than the pattern match.
-test misplaced_power_user_node_cannot_authorise_a_sanction() fail {
-  run_denylist_add(
-    dl_insert_tx(
-      pu_node_at(
-        1,
-        power_user(True, False, False, False, False),
-        Script(denylist_script_hash),
-      ),
-    ),
   )
 }
 
@@ -1971,8 +2009,7 @@ fn run_denylist_init(outputs: List<Output>) -> Bool {
   v_denylist.mint.mint(
     gs_policy,
     oref(50),
-    denylist_script_hash,
-    pu_script_hash,
+    denylist_spend_hash,
     DenylistInit { root_output_index: 0 },
     denylist_policy,
     Transaction {
@@ -2088,7 +2125,7 @@ test denylist_init_refuses_a_root_at_the_key_hash_of_the_list_script() fail {
       Output {
         ..dl_root_output(None),
         address: Address {
-          payment_credential: VerificationKey(denylist_script_hash),
+          payment_credential: VerificationKey(denylist_spend_hash),
           stake_credential: None,
         },
       },
@@ -2104,7 +2141,7 @@ test denylist_init_accepts_a_root_with_a_stake_credential() {
       Output {
         ..dl_root_output(None),
         address: Address {
-          payment_credential: Script(denylist_script_hash),
+          payment_credential: Script(denylist_spend_hash),
           stake_credential: Some(Inline(VerificationKey(admin))),
         },
       },
@@ -2130,8 +2167,7 @@ fn run_denylist_deinit(tx: Transaction) -> Bool {
   v_denylist.mint.mint(
     gs_policy,
     oref(99),
-    denylist_script_hash,
-    pu_script_hash,
+    denylist_spend_hash,
     DenylistDeinit { global_state_ref_input_index: 0 },
     denylist_policy,
     tx,
@@ -2210,7 +2246,6 @@ test denylist_spend_refuses_a_node_to_a_wallet_without_a_list_mint() {
   let no_datum: Option<Data> = None
   !v_denylist.denylist_validator.spend(
     gs_policy,
-    pu_script_hash,
     no_datum,
     DenylistStateTransition,
     oref(0),
@@ -2229,7 +2264,6 @@ test denylist_spend_refuses_a_node_to_a_wallet_with_only_a_foreign_mint() {
   let no_datum: Option<Data> = None
   !v_denylist.denylist_validator.spend(
     gs_policy,
-    pu_script_hash,
     no_datum,
     DenylistStateTransition,
     oref(0),

@@ -23,11 +23,11 @@ use minting_authority as v_authority
 use minting_logic_script as v_minting_proxy
 use tests/global_state_fixtures.{
   rotated, t_admin, t_data_of_raw_length, t_datum, t_datum_size, t_dl_ll_policy,
-  t_gs_logic, t_gs_policy, t_gs_script_hash, t_input, t_many_entities,
-  t_max_datum_bytes, t_metadata_len_at_cap, t_metadata_len_over_cap,
-  t_minting_script, t_new_gs_logic, t_out_ref, t_output, t_pu_ll_policy,
-  t_reference_script, t_root32, t_security_info_len_at_cap,
-  t_security_info_len_over_cap, t_tx, t_vkey_10,
+  t_gs_logic, t_gs_policy, t_input, t_many_entities, t_max_datum_bytes,
+  t_metadata_len_at_cap, t_metadata_len_over_cap, t_minting_script,
+  t_new_gs_logic, t_out_ref, t_output, t_pu_ll_policy, t_reference_script,
+  t_root32, t_security_info_len_at_cap, t_security_info_len_over_cap, t_tx,
+  t_vkey_10,
 }
 use types/global_state.{
   AddTrustedEntity, DeactivateContract, GlobalStateDatum, GlobalStateLocation,
@@ -123,7 +123,6 @@ fn run_logic(
     t_sec_name,
     t_issuance_policy,
     t_gs_policy,
-    t_pu_script_hash,
     t_max_datum_bytes,
     redeemer,
     Script(logic),
@@ -581,8 +580,6 @@ fn mint_security_composite(
     t_registry_policy,
     t_minting_proxy_hash,
     t_issuance_policy,
-    #"d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0",
-    t_pu_script_hash,
     #"e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1",
     #"e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2",
     MintBurn {
@@ -860,13 +857,10 @@ test mint_security_allows_security_token_input_and_output() {
   run_spend(input_datum, mintsecurity_redeemer(), tx)
 }
 
-// ── PauseTransfers — the power-user gate and its list-address pin ───────────
+// ── PauseTransfers — the power-user gate ────────────────────────────────────
 //
-// The address pin this branch carries matters more here than in the swappable
-// consumers: a GlobalState logic is replaced only by an admin rotation,
-// so the assertion is the primary defence rather than a belt-and-braces one.
-// Keep all three tests together — the positive control is what makes the two
-// negatives meaningful.
+// The operator's node is authenticated by the power-users list policy alone
+// (`utils.authenticated_power_user`); its address is the list's own guarantee.
 
 const t_pause_pu_cred: ByteArray =
   #"0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c"
@@ -881,8 +875,7 @@ fn t_pause_datum(transfers_paused: Bool) -> GlobalStateDatum {
   }
 }
 
-/// A power-user node with `can_pause`, at `payment` — varied so the address
-/// pin can be exercised in both directions.
+/// A power-user node with `can_pause`, at `payment`.
 fn t_pu_node_at(payment: Credential) -> Input {
   let pu = PowerUser {
     credential_hash: t_pause_pu_cred,
@@ -934,8 +927,7 @@ fn t_pause_redeemer() -> GlobalStateSpendRedeemer {
   }
 }
 
-/// The positive control. Without it the two negatives below would also pass
-/// if the branch were broken outright.
+/// The positive control for the pause tests below.
 test pause_succeeds_for_a_can_pause_power_user_in_the_list() {
   run_spend(
     t_pause_datum(False),
@@ -1004,35 +996,6 @@ test pause_rejects_an_operator_that_is_the_global_state_logic() {
       ),
       reference_inputs: [t_pu_node_at(Script(t_pu_script_hash))],
     },
-  )
-}
-
-/// The same node, same NFT, same datum — parked at a SCRIPT address
-/// that is not the power-users list. `expect ... == power_user_list_script_hash`
-/// traps, hence `fail`.
-test pause_fails_when_the_power_user_node_is_at_the_wrong_script() fail {
-  run_spend(
-    t_pause_datum(False),
-    t_pause_redeemer(),
-    t_pause_tx(t_pu_node_at(Script(t_gs_script_hash))),
-  )
-}
-
-/// The reachable shape: the node NFT carried out of the list into a private
-/// wallet, where element authentication would otherwise still accept whatever
-/// role flags its holder writes. The `expect Script(..)` pattern match traps on
-/// a `VerificationKey` credential.
-test pause_fails_when_the_power_user_node_is_in_a_wallet() fail {
-  run_spend(
-    t_pause_datum(False),
-    t_pause_redeemer(),
-    t_pause_tx(
-      t_pu_node_at(
-        VerificationKey(
-          #"0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e",
-        ),
-      ),
-    ),
   )
 }
 
@@ -2412,7 +2375,6 @@ test logic_accepts_register_credential() {
     t_sec_name,
     t_issuance_policy,
     t_gs_policy,
-    t_pu_script_hash,
     t_max_datum_bytes,
     builtin.constr_data(0, []),
     RegisterCredential { credential: Script(t_gs_logic), deposit: Never },
@@ -2425,7 +2387,6 @@ test logic_rejects_unregister_credential() {
     t_sec_name,
     t_issuance_policy,
     t_gs_policy,
-    t_pu_script_hash,
     t_max_datum_bytes,
     builtin.constr_data(0, []),
     UnregisterCredential { credential: Script(t_gs_logic), refund: Never },
@@ -3145,7 +3106,6 @@ fn run_logic_capped(
     t_sec_name,
     t_issuance_policy,
     t_gs_policy,
-    t_pu_script_hash,
     cap,
     redeemer,
     Script(t_gs_logic),
@@ -3550,7 +3510,6 @@ test logic_built_for_another_global_state_policy_fails_genesis() fail {
     t_sec_name,
     t_issuance_policy,
     #"c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
-    t_pu_script_hash,
     t_max_datum_bytes,
     deactivate_redeemer(),
     Script(t_gs_logic),
@@ -3878,8 +3837,6 @@ test zero_amount_mint_burn_cannot_carry_an_admin_rotation() {
     t_registry_policy,
     t_minting_proxy_hash,
     t_issuance_policy,
-    #"d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0",
-    t_pu_script_hash,
     #"e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1",
     #"e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2",
     MintBurn {
@@ -3963,8 +3920,6 @@ test zero_mint_mint_security_cannot_move_the_counter() {
     t_registry_policy,
     t_minting_proxy_hash,
     t_issuance_policy,
-    #"d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0",
-    t_pu_script_hash,
     #"e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1",
     #"e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2",
     MintBurn {

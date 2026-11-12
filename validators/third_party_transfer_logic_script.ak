@@ -77,20 +77,6 @@ validator third_party_transfer_logic_validator(
   /// names me" identity assertion was never load-bearing, since registry
   /// field 4 is a FREE CIP-113 field a decoy node could name too.
   security_policy_id: ByteArray,
-  /// The DENYLIST SPEND VALIDATOR's script hash, which every denylist element
-  /// a party cites must sit at. See `absence.with_denylist_element`.
-  denylist_script_hash: ByteArray,
-  /// The POWER-USERS SPEND VALIDATOR's script hash — not the list
-  /// policy id (they are separate validators with separate hashes).
-  ///
-  /// Element authentication ignores the address, so a power-user NFT carried
-  /// out of the list into a private wallet keeps authenticating whatever datum
-  /// its holder writes. The node's KEY stays pinned to the NFT asset name — so
-  /// the signature gate still binds — but the ROLE FLAGS come from the datum,
-  /// which means a revoked operator retains whichever powers their old key hash
-  /// signs for. Requiring the node to still live at the list's script address
-  /// is what makes revocation stick.
-  power_user_list_script_hash: ByteArray,
 ) {
   withdraw(
     redeemer: ThirdPartyTransferLogicScriptWithdrawRedeemer,
@@ -157,7 +143,6 @@ validator third_party_transfer_logic_validator(
       gs_datum.requires_receiver_kyc,
       gs_datum,
       security_policy_id,
-      denylist_script_hash,
       self,
     )
 
@@ -169,7 +154,6 @@ validator third_party_transfer_logic_validator(
     let (power_user_node_key, power_user_data) = utils.authenticated_power_user(
       power_user_ref_input.output,
       gs_datum.power_user_linked_list_policy_id,
-      power_user_list_script_hash,
     )
 
     // H-3(b): a force transfer must actually seize something — at least one
@@ -292,7 +276,7 @@ const p_third_party_hash: ByteArray =
 
 // The two list SPEND validators' hashes — distinct from the list
 // POLICY ids (mint and spend are separate validators). Node fixtures live here.
-const p_denylist_script_hash: ByteArray =
+const p_denylist_spend_hash: ByteArray =
   #"d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0"
 
 const p_pu_script_hash: ByteArray =
@@ -407,7 +391,7 @@ fn p_denylist_node_ref_input(key: ByteArray) -> Input {
     output_reference: p_out_ref(2),
     output: Output {
       address: Address {
-        payment_credential: Script(p_denylist_script_hash),
+        payment_credential: Script(p_denylist_spend_hash),
         stake_credential: None,
       },
       value: merge(
@@ -433,7 +417,7 @@ fn p_denylist_root_ref_input() -> Input {
     output_reference: p_out_ref(2),
     output: Output {
       address: Address {
-        payment_credential: Script(p_denylist_script_hash),
+        payment_credential: Script(p_denylist_spend_hash),
         stake_credential: None,
       },
       value: merge(
@@ -594,8 +578,6 @@ fn run_third_party(
     p_sec_name,
     p_gs_policy,
     p_issuance_policy,
-    p_denylist_script_hash,
-    p_pu_script_hash,
     redeemer,
     Script(p_third_party_hash),
     tx,
@@ -1182,8 +1164,6 @@ fn run_cip68_third_party(
     p_cip68_sec_name,
     p_gs_policy,
     p_issuance_policy,
-    p_denylist_script_hash,
-    p_pu_script_hash,
     redeemer,
     Script(p_third_party_hash),
     tx,
@@ -1394,8 +1374,6 @@ test seizure_publish_rejects_credential_deregistration() {
     p_sec_name,
     p_gs_policy,
     p_issuance_policy,
-    p_denylist_script_hash,
-    p_pu_script_hash,
     builtin.constr_data(0, []),
     certificate.UnregisterCredential {
       credential: Script(p_third_party_hash),

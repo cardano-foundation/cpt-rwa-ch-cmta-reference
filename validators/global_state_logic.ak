@@ -135,14 +135,6 @@ validator global_state_logic(
   security_asset_name: ByteArray,
   issuance_policy_id: ByteArray,
   global_state_policy_id: ByteArray,
-  /// The POWER-USERS SPEND VALIDATOR's script hash — not the list
-  /// policy id. Element authentication ignores the address, so a power-user
-  /// NFT carried out of the list into a private wallet keeps authenticating
-  /// whatever ROLE FLAGS its holder writes into the datum. Here that would let
-  /// a revoked operator keep pausing the protocol. Not circular: the
-  /// power-users validators depend on the GlobalState MINT hash, never on this
-  /// logic's.
-  power_user_list_script_hash: ByteArray,
   /// Aggregate cap on the CBOR-serialised GlobalState datum, in bytes (F09),
   /// checked on every action. A write that does not grow the datum always
   /// passes, so an over-cap datum can be shrunk.
@@ -464,7 +456,6 @@ validator global_state_logic(
                 let (power_user_credential_hash, power_user_data) = utils.authenticated_power_user(
                   power_user_node_ref_input.output,
                   input_datum.power_user_linked_list_policy_id,
-                  power_user_list_script_hash,
                 )
 
                 let expected_output_datum = set_transfers_paused(

@@ -55,7 +55,6 @@ pub fn verify_parties(
   requires_kyc: Bool,
   gs_datum: GlobalStateDatum,
   issuance_policy_id: ByteArray,
-  denylist_script_hash: ByteArray,
   self: Transaction,
 ) -> Bool {
   when parties is {
@@ -74,7 +73,6 @@ pub fn verify_parties(
               action.denylist_ref_input_index,
               self.reference_inputs,
               gs_datum.denylist_linked_list_policy_id,
-              denylist_script_hash,
               on_partially_frozen,
             )
           // Several parties: authenticate this party's element and start the
@@ -85,7 +83,6 @@ pub fn verify_parties(
               element_index,
               self.reference_inputs,
               gs_datum.denylist_linked_list_policy_id,
-              denylist_script_hash,
               fn(element_key, element_link, element_data) {
                 and {
                   // The denylist keys on the BARE HASH: listing a hash must
@@ -105,7 +102,6 @@ pub fn verify_parties(
                     requires_kyc,
                     gs_datum,
                     issuance_policy_id,
-                    denylist_script_hash,
                     self,
                     element_index,
                     element_key,
@@ -193,7 +189,6 @@ fn vet_remembering(
   requires_kyc: Bool,
   gs_datum: GlobalStateDatum,
   issuance_policy_id: ByteArray,
-  denylist_script_hash: ByteArray,
   self: Transaction,
   last_index: Int,
   last_key: Option<ByteArray>,
@@ -230,7 +225,6 @@ fn vet_remembering(
                 requires_kyc,
                 gs_datum,
                 issuance_policy_id,
-                denylist_script_hash,
                 self,
                 last_index,
                 last_key,
@@ -243,7 +237,6 @@ fn vet_remembering(
               element_index,
               self.reference_inputs,
               gs_datum.denylist_linked_list_policy_id,
-              denylist_script_hash,
               fn(element_key, element_link, element_data) {
                 and {
                   // The denylist keys on the BARE HASH: listing a hash must list
@@ -263,7 +256,6 @@ fn vet_remembering(
                     requires_kyc,
                     gs_datum,
                     issuance_policy_id,
-                    denylist_script_hash,
                     self,
                     element_index,
                     element_key,

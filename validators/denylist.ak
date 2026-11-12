@@ -37,7 +37,6 @@ fn power_user_from_refs(
   global_state_ref_input_index: Int,
   global_state_policy_id: ByteArray,
   power_user_node_ref_input_index: Int,
-  power_user_list_script_hash: ByteArray,
 ) -> (ByteArray, PowerUser) {
   let gs = gs_core_from_ref_input(
     self.reference_inputs,
@@ -53,7 +52,6 @@ fn power_user_from_refs(
   let (power_user_credential_hash, power_user_data) = utils.authenticated_power_user(
     power_user_node_ref_input.output,
     gs.power_user_linked_list_policy_id,
-    power_user_list_script_hash,
   )
   // Never the GlobalState logic named in field 0: its withdrawal would sign
   // for the operator. Today it cannot appear here — it needs GlobalState
@@ -64,18 +62,14 @@ fn power_user_from_refs(
   (power_user_credential_hash, power_user_data)
 }
 
-/// Parameters follow `mint`'s order: the GlobalState policy first, the
-/// power-users spend hash last. This list's own policy id is not a parameter:
-/// the mint takes this validator's hash, so the spend reads the policy off the
-/// element it spends.
+/// The only parameter is the GlobalState policy, `mint`'s first. This list's
+/// own policy id is not a parameter: the mint takes this validator's hash, so
+/// the spend reads the policy off the element it spends.
 validator denylist_validator(
   /// Needed only by `UpdateDenylistEntry`, which — unlike Add/Remove — runs no
   /// mint and so must authorise the sanctions officer here. Not circular: the
   /// GlobalState policy depends on neither denylist hash.
   global_state_policy_id: ByteArray,
-  /// The POWER-USERS SPEND VALIDATOR's script hash, for the same reason. Not
-  /// circular: the power-users validators never depend on the denylist.
-  power_user_list_script_hash: ByteArray,
 ) {
   spend(
     _datum_opt: Option<Data>,
@@ -126,7 +120,6 @@ validator denylist_validator(
           global_state_ref_input_index,
           global_state_policy_id,
           power_user_node_ref_input_index,
-          power_user_list_script_hash,
         )
         and {
           power_user_data.is_admin?,
@@ -195,12 +188,8 @@ validator mint(
   /// The DENYLIST SPEND VALIDATOR's script hash: where every NFT of this
   /// policy must live. Not circular: the spend validator reads the list policy
   /// off the element it spends, so its hash depends only on the GlobalState
-  /// policy and the power-users spend hash.
+  /// policy.
   list_script_hash: ByteArray,
-  /// The POWER-USERS SPEND VALIDATOR's script hash. Not circular: the
-  /// power-users validators depend on the GlobalState mint hash, never on the
-  /// denylist policy id.
-  power_user_list_script_hash: ByteArray,
 ) {
   mint(redeemer: MintRedeemer, policy_id: PolicyId, self: Transaction) {
     when redeemer is {
@@ -232,8 +221,7 @@ validator mint(
           //
           // Not circular: the spend validator takes no list policy id (it
           // reads the policy off the element it spends), so its hash depends
-          // only on the GlobalState policy and the power-users spend hash, and
-          // this mint takes that hash.
+          // only on the GlobalState policy, and this mint takes that hash.
           init(
             nonce_validated,
             root_output,
@@ -310,7 +298,6 @@ validator mint(
           global_state_ref_input_index,
           global_state_policy_id,
           power_user_node_ref_input_index,
-          power_user_list_script_hash,
         )
         let anchor_output = utils.safe_list_at(
           self.outputs,
@@ -397,7 +384,6 @@ validator mint(
           global_state_ref_input_index,
           global_state_policy_id,
           power_user_node_ref_input_index,
-          power_user_list_script_hash,
         )
         // `remove` finds both spent elements itself; the index only says
         // WHICH of the two is the anchor.
@@ -738,7 +724,6 @@ test denylist_spend_accepts_a_genuine_node_spend_alongside_a_mutation() {
   }
   denylist_validator.spend(
     t_gs_policy,
-    t_pu_script_hash,
     no_datum,
     StateTransition,
     t_oref(0),
@@ -765,7 +750,6 @@ test denylist_spend_rejects_a_stray_no_token_utxo_swept_alongside_a_mutation() f
   }
   denylist_validator.spend(
     t_gs_policy,
-    t_pu_script_hash,
     no_datum,
     StateTransition,
     t_oref(0),
@@ -794,7 +778,6 @@ fn t_run_dl_state_transition(own_input: Input) -> Bool {
   let no_datum: Option<Data> = None
   denylist_validator.spend(
     t_gs_policy,
-    t_pu_script_hash,
     no_datum,
     StateTransition,
     t_oref(0),
@@ -848,7 +831,6 @@ test denylist_spend_accepts_a_foreign_utxo_under_its_own_mint() {
   }
   denylist_validator.spend(
     t_gs_policy,
-    t_pu_script_hash,
     no_datum,
     StateTransition,
     t_oref(0),
@@ -881,7 +863,6 @@ fn t_run_denylist_add(key: ByteArray, tx: Transaction) -> Bool {
     t_gs_policy,
     t_oref(99),
     t_dl_script_hash,
-    t_pu_script_hash,
     AddToDenylist {
       user_pkh: key,
       anchor_node_output_index: 0,
@@ -967,7 +948,6 @@ fn t_run_denylist_remove(key: ByteArray, tx: Transaction) -> Bool {
     t_gs_policy,
     t_oref(99),
     t_dl_script_hash,
-    t_pu_script_hash,
     RemoveFromDenylist {
       user_pkh: key,
       anchor_node_input_index: 0,
@@ -1110,7 +1090,6 @@ fn t_run_update(tx: Transaction) -> Bool {
   let no_datum: Option<Data> = None
   denylist_validator.spend(
     t_gs_policy,
-    t_pu_script_hash,
     no_datum,
     UpdateDenylistEntry {
       own_input_index: 0,
@@ -1164,27 +1143,6 @@ test denylist_update_rejects_a_deactivated_protocol() fail {
     reference_inputs: [
       t_gs_utxo(0, t_gs_datum(True)),
       t_pu_node_input(1, t_power_user(True)),
-    ],
-  }
-  t_run_update(tx)
-}
-
-test denylist_update_rejects_a_power_user_node_outside_its_list() fail {
-  let pu = t_pu_node_input(1, t_power_user(True))
-  let tx = Transaction {
-    ..t_update_tx(t_entry(None), t_entry(Some(10)), 2_000_000),
-    reference_inputs: [
-      t_gs_utxo(0, t_gs_datum(False)),
-      Input {
-        ..pu,
-        output: Output {
-          ..pu.output,
-          address: Address {
-            payment_credential: VerificationKey(t_pu_cred),
-            stake_credential: None,
-          },
-        },
-      },
     ],
   }
   t_run_update(tx)
@@ -1267,7 +1225,6 @@ test denylist_update_rejects_two_spends_sharing_one_continuation() fail {
   }
   denylist_validator.spend(
     t_gs_policy,
-    t_pu_script_hash,
     no_datum,
     UpdateDenylistEntry {
       own_input_index: 1,
@@ -1375,7 +1332,6 @@ test denylist_update_accepts_distinct_input_and_output_indices() {
   }
   denylist_validator.spend(
     t_gs_policy,
-    t_pu_script_hash,
     no_datum,
     UpdateDenylistEntry {
       own_input_index: 1,
