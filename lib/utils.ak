@@ -215,6 +215,49 @@ pub fn count_inputs_with_policy(inputs: List<Input>, policy_id: PolicyId) -> Int
   )
 }
 
+/// The policy id of the one NFT a linked-list element carries, read off the
+/// element's own value.
+///
+/// The value must be lovelace plus exactly one other policy, holding exactly
+/// one asset name at quantity 1 — the shape the library gives every element.
+/// Any other shape traps: no token at all, a second policy, a second name, or
+/// a quantity other than 1.
+///
+/// A list spend validator calls this on the UTxO it is spending, in place of
+/// taking its list policy id as a parameter. It cannot take one: the list mint
+/// takes the spend validator's hash, so the dependency would be circular. A
+/// UTxO at the list address holding some other policy's token yields that
+/// other policy; it is not list state, and no reader treats it as such.
+pub fn sole_nft_policy_id(value: Assets) -> PolicyId {
+  expect [Pair(ada_policy, _), Pair(policy_id, names)] = assets.to_pairs(value)
+  expect ada_policy == assets.ada_policy_id
+  expect [Pair(_, 1)] = dict.to_pairs(names)
+  policy_id
+}
+
+/// Whether every output carrying any token of `policy_id` pays to the script
+/// `script_hash`. The whole payment credential is compared, so a key
+/// credential with the same hash does not qualify; the stake part is free.
+///
+/// One fold over the outputs. A list mint runs it on every branch, beside the
+/// library's own per-element checks, so that no list NFT it lets through can
+/// land anywhere but the list spend script.
+pub fn policy_only_at_script(
+  outputs: List<Output>,
+  policy_id: PolicyId,
+  script_hash: ByteArray,
+) -> Bool {
+  list.all(
+    outputs,
+    fn(output) {
+      or {
+        output.address.payment_credential == Script(script_hash),
+        dict.is_empty(tokens(output.value, policy_id)),
+      }
+    },
+  )
+}
+
 /// Rebuild a Constr field list, replacing the element at `index` with
 /// `new_value`. Every other field is carried through as opaque `Data` (no unwrap/rewrap).
 pub fn replace_data_field(

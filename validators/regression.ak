@@ -979,6 +979,7 @@ fn run_denylist_remove(anchor_ix: Int, tx: Transaction) -> Bool {
   v_denylist.mint.mint(
     gs_policy,
     oref(99),
+    denylist_script_hash,
     pu_script_hash,
     RemoveFromDenylist {
       user_pkh: dl_frozen_key,
@@ -1011,6 +1012,7 @@ test denylist_remove_is_bound_to_the_declared_key() fail {
   v_denylist.mint.mint(
     gs_policy,
     oref(99),
+    denylist_script_hash,
     pu_script_hash,
     RemoveFromDenylist {
       user_pkh: dl_sanctioned_key,
@@ -1044,6 +1046,7 @@ test denylist_init_succeeds_on_the_nonce_utxo() {
   v_denylist.mint.mint(
     gs_policy,
     oref(50),
+    denylist_script_hash,
     pu_script_hash,
     DenylistInit { root_output_index: 0 },
     denylist_policy,
@@ -1066,6 +1069,7 @@ test denylist_init_rejects_a_missing_nonce() fail {
   v_denylist.mint.mint(
     gs_policy,
     oref(50),
+    denylist_script_hash,
     pu_script_hash,
     DenylistInit { root_output_index: 0 },
     denylist_policy,
@@ -1104,6 +1108,7 @@ test denylist_deinit_succeeds_for_the_admin_after_deactivation() {
   v_denylist.mint.mint(
     gs_policy,
     oref(99),
+    denylist_script_hash,
     pu_script_hash,
     DenylistDeinit { global_state_ref_input_index: 0 },
     denylist_policy,
@@ -1125,6 +1130,7 @@ test denylist_deinit_accepts_a_global_state_with_a_reshaped_tail() {
   v_denylist.mint.mint(
     gs_policy,
     oref(99),
+    denylist_script_hash,
     pu_script_hash,
     DenylistDeinit { global_state_ref_input_index: 0 },
     denylist_policy,
@@ -1152,6 +1158,7 @@ test denylist_deinit_rejects_a_live_protocol() {
   !v_denylist.mint.mint(
     gs_policy,
     oref(99),
+    denylist_script_hash,
     pu_script_hash,
     DenylistDeinit { global_state_ref_input_index: 0 },
     denylist_policy,
@@ -1173,6 +1180,7 @@ test denylist_deinit_rejects_a_missing_admin_signature() {
   !v_denylist.mint.mint(
     gs_policy,
     oref(99),
+    denylist_script_hash,
     pu_script_hash,
     DenylistDeinit { global_state_ref_input_index: 0 },
     denylist_policy,
@@ -1198,7 +1206,6 @@ test denylist_spend_handler_is_pure_delegation() {
   let no_datum: Option<Data> = None
   v_denylist.denylist_validator.spend(
     gs_policy,
-    denylist_policy,
     pu_script_hash,
     no_datum,
     DenylistStateTransition,
@@ -1247,6 +1254,7 @@ fn run_denylist_add(tx: Transaction) -> Bool {
   v_denylist.mint.mint(
     gs_policy,
     oref(99),
+    denylist_script_hash,
     pu_script_hash,
     AddToDenylist {
       user_pkh: dl_frozen_key,
@@ -1328,6 +1336,7 @@ fn run_power_users_add(tx: Transaction) -> Bool {
   v_power_users.mint.mint(
     gs_policy,
     oref(99),
+    pu_script_hash,
     AddPowerUser {
       new_power_user_key: clean_stake,
       anchor_node_output_index: 0,
@@ -1392,6 +1401,7 @@ fn run_power_users_remove(anchor_ix: Int, tx: Transaction) -> Bool {
   v_power_users.mint.mint(
     gs_policy,
     oref(99),
+    pu_script_hash,
     RemovePowerUser {
       power_user_key_to_remove: clean_stake,
       anchor_node_input_index: anchor_ix,
@@ -1420,6 +1430,7 @@ test power_user_remove_is_bound_to_the_declared_key() fail {
   v_power_users.mint.mint(
     gs_policy,
     oref(99),
+    pu_script_hash,
     RemovePowerUser {
       power_user_key_to_remove: pu_cred,
       anchor_node_input_index: 0,
@@ -1446,7 +1457,6 @@ test power_user_spend_handler_is_pure_delegation() {
   let no_datum: Option<Data> = None
   v_power_users.power_users_validator.spend(
     gs_policy,
-    pu_policy,
     no_datum,
     PuStateTransition,
     oref(0),
@@ -1961,6 +1971,7 @@ fn run_denylist_init(outputs: List<Output>) -> Bool {
   v_denylist.mint.mint(
     gs_policy,
     oref(50),
+    denylist_script_hash,
     pu_script_hash,
     DenylistInit { root_output_index: 0 },
     denylist_policy,
@@ -2025,14 +2036,13 @@ test denylist_insert_rejects_an_operator_that_is_the_global_state_logic() fail {
 
 // ── A list NFT never leaves the list script ─────────────────────────────────
 //
-// The denylist's Deinit path and both lists' `StateTransition` spend gate
-// (`Init` has none: where genesis places the root is verified off-chain, see
-// the comment on the `Init` branch of each list's mint); the other paths are
-// pinned beside their fixtures in `validators/denylist.ak` and
-// `validators/power_users.ak`. Each is an accepted fixture above with only the
-// NFT's destination changed; its accepted control is named in its comment. A
-// `fail` test here is written `… || True`, so a validator that merely returns
-// False cannot pass it — only a trap can.
+// The denylist's Init and Deinit paths and both lists' `StateTransition` spend
+// gate; the other paths are pinned beside their fixtures in
+// `validators/denylist.ak` and `validators/power_users.ak`. Each is an
+// accepted fixture above with only the NFT's destination changed; its
+// accepted control is named in its comment. A `fail` test here is written
+// `… || True`, so a validator that merely returns False cannot pass it — only
+// a trap can.
 
 fn at_wallet(output: Output) -> Output {
   Output {
@@ -2042,6 +2052,65 @@ fn at_wallet(output: Output) -> Output {
       stake_credential: None,
     },
   }
+}
+
+// Init: control `denylist_init_succeeds_on_the_nonce_utxo`, the same
+// transaction with the root at the list script.
+test denylist_init_refuses_a_root_at_a_wallet() fail {
+  run_denylist_init(
+    [
+      at_wallet(dl_root_output(None)),
+      gs_output(2_000_000, gs_datum(False, False, False, False)),
+    ],
+  ) || True
+}
+
+test denylist_init_refuses_a_root_at_another_script() fail {
+  run_denylist_init(
+    [
+      Output {
+        ..dl_root_output(None),
+        address: Address {
+          payment_credential: Script(pu_script_hash),
+          stake_credential: None,
+        },
+      },
+      gs_output(2_000_000, gs_datum(False, False, False, False)),
+    ],
+  ) || True
+}
+
+// The list script's hash under a key credential: the whole credential is
+// compared, not just its hash.
+test denylist_init_refuses_a_root_at_the_key_hash_of_the_list_script() fail {
+  run_denylist_init(
+    [
+      Output {
+        ..dl_root_output(None),
+        address: Address {
+          payment_credential: VerificationKey(denylist_script_hash),
+          stake_credential: None,
+        },
+      },
+      gs_output(2_000_000, gs_datum(False, False, False, False)),
+    ],
+  ) || True
+}
+
+// The root at the list script with a stake part: the stake part is free.
+test denylist_init_accepts_a_root_with_a_stake_credential() {
+  run_denylist_init(
+    [
+      Output {
+        ..dl_root_output(None),
+        address: Address {
+          payment_credential: Script(denylist_script_hash),
+          stake_credential: Some(Inline(VerificationKey(admin))),
+        },
+      },
+      gs_output(2_000_000, gs_datum(False, False, False, False)),
+    ],
+  )
 }
 
 // Deinit: control `denylist_deinit_succeeds_for_the_admin_after_deactivation`.
@@ -2061,6 +2130,7 @@ fn run_denylist_deinit(tx: Transaction) -> Bool {
   v_denylist.mint.mint(
     gs_policy,
     oref(99),
+    denylist_script_hash,
     pu_script_hash,
     DenylistDeinit { global_state_ref_input_index: 0 },
     denylist_policy,
@@ -2118,6 +2188,19 @@ test denylist_deinit_refuses_minting_the_root_key_in_place_of_burning_it() fail 
   ) || True
 }
 
+// The control with two of the root key burnt instead of one: the name is
+// right and the quantity is a burn, so only the library's exact-quantity
+// check refuses it, by trapping. In-process only: one root is spent, so the
+// ledger could not balance the burn.
+test denylist_deinit_refuses_burning_two_of_the_root_key() fail {
+  run_denylist_deinit(
+    Transaction {
+      ..dl_deinit_tx(),
+      mint: from_asset(denylist_policy, constants.linked_list_root_key, -2),
+    },
+  ) || True
+}
+
 // StateTransition: control `denylist_spend_handler_is_pure_delegation`, the
 // same spend with a denylist mint present. With no list-policy mint at all the
 // library's structural gate returns False, hence `!`. (With a mint present the
@@ -2127,7 +2210,6 @@ test denylist_spend_refuses_a_node_to_a_wallet_without_a_list_mint() {
   let no_datum: Option<Data> = None
   !v_denylist.denylist_validator.spend(
     gs_policy,
-    denylist_policy,
     pu_script_hash,
     no_datum,
     DenylistStateTransition,
@@ -2147,7 +2229,6 @@ test denylist_spend_refuses_a_node_to_a_wallet_with_only_a_foreign_mint() {
   let no_datum: Option<Data> = None
   !v_denylist.denylist_validator.spend(
     gs_policy,
-    denylist_policy,
     pu_script_hash,
     no_datum,
     DenylistStateTransition,
@@ -2167,7 +2248,6 @@ test power_users_spend_refuses_a_node_to_a_wallet_without_a_list_mint() {
   let no_datum: Option<Data> = None
   !v_power_users.power_users_validator.spend(
     gs_policy,
-    pu_policy,
     no_datum,
     PuStateTransition,
     oref(0),
@@ -2185,7 +2265,6 @@ test power_users_spend_refuses_a_node_to_a_wallet_with_only_a_foreign_mint() {
   let no_datum: Option<Data> = None
   !v_power_users.power_users_validator.spend(
     gs_policy,
-    pu_policy,
     no_datum,
     PuStateTransition,
     oref(0),
