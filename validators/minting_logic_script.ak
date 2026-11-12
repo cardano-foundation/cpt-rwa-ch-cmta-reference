@@ -20,18 +20,26 @@ use utils.{must_run_script_withdrawal}
 /// Every registry node's `minting_logic_script` field is frozen to this
 /// script's hash forever, and the token's own issuance policy id is derived
 /// from that hash — so nothing in this file can ever change after deployment
-/// without minting a different token. It therefore contains as close to
-/// nothing as is possible: it resolves GlobalState, reads which script is
-/// currently the minting authority, and requires that script to be running
-/// in this transaction. That is the whole validator.
+/// without minting a different token. It therefore decides the delegation
+/// and nothing else: it resolves GlobalState, reads which script is currently
+/// the minting authority, and requires that script to be running in this
+/// transaction. That is the whole validator.
 ///
-/// EVERY substantive rule — the supply cap, power-user roles, KYC, denylist,
-/// mint destinations, the CIP-113 registration's structural invariants, the
-/// admin gate, and the guard against riding along on a registry-node update
-/// — lives in validators/minting_authority.ak, which the admin can replace
-/// at any time via `RotateMintingScript`. Maximum upgradability, by
-/// construction: the only thing that can never be fixed is this file, so
-/// this file decides as little as possible.
+/// EVERY substantive rule — the supply debit of `mintable_amount`, power-user
+/// roles, KYC, denylist, mint destinations, which asset names may be minted,
+/// the CIP-113 registration's structural invariants, the admin gate, and the
+/// guard against riding along on a registry-node update — lives in
+/// validators/minting_authority.ak, which the admin can replace at any time
+/// via `RotateMintingScript`. Maximum upgradability, by construction: the only
+/// thing that can never be fixed is this file, so this file decides as little
+/// as possible.
+///
+/// WHY THE SUPPLY DEBIT IS DELIBERATELY NOT HERE. This file's hash is the
+/// token's issuance policy id, so a defect in a rule written here could never
+/// be fixed. The authority can be rotated. Until `LockUpgrades` the admin can
+/// already set the cap with `SetMintableAmount`; after `LockUpgrades`,
+/// `RotateMintingScript` is closed and the installed authority, its debit
+/// included, is permanent too.
 ///
 /// The corollary, stated plainly because it is the price of that design: a
 /// replacement authority inherits the FULL burden of correctness. Nothing
@@ -40,11 +48,9 @@ use utils.{must_run_script_withdrawal}
 validator minting_logic_validator(global_state_policy_id: ByteArray) {
   /// The redeemer is exactly `GlobalStateLocation` — the proxy needs one thing
   /// from the caller, where to find GlobalState, and every other decision
-  /// belongs to the authority (see types/minting_authority.ak). It had a
-  /// private two-constructor type of its own until that type and
-  /// `GlobalStateLocation` became byte-for-byte the same declaration; the
-  /// shared one is now the single encoding of "which list is GlobalState in"
-  /// for every validator where the choice is free.
+  /// belongs to the authority (see types/minting_authority.ak). The shared
+  /// type is the single encoding of "which list is GlobalState in" for every
+  /// validator where the choice is free.
   withdraw(
     redeemer: GlobalStateLocation,
     credential: Credential,
@@ -56,16 +62,24 @@ validator minting_logic_validator(global_state_policy_id: ByteArray) {
     // `resolve_global_state` (which also decodes the full v1 layout, where
     // this script must read only the frozen core).
     //
-    // This one file may not change its compiled bytes. Its hash is frozen into
-    // every registry node this deployment has ever inserted, and the token's
-    // issuance policy id is derived from it — so a different hash is a
-    // different token, and every already-issued one becomes unreachable. Going
-    // through the shared helper was measured to move the hash
-    // (6defc595… -> b6e4e07a…): same behaviour, different UPLC. The redeemer
-    // TYPE is shared, because a type name is not compiled; the resolution is
-    // not. Do not "tidy" this into the helper without re-checking the hash.
-    // (Pre-launch, the frozen-core layout of 2026-10-15 did change this file's
-    // reads and hash; after launch it must never change again.)
+    // This one file may not change its compiled bytes after launch. Its hash
+    // is frozen into this token's registry node, and the token's issuance
+    // policy id is derived from it — so a different hash is a different
+    // token, and every already-issued one becomes unreachable. Going through
+    // the shared helper was measured to move the hash (6defc595… ->
+    // b6e4e07a…): same behaviour, different UPLC. The redeemer TYPE is
+    // shared, because a type name is not compiled; the resolution is not. Do
+    // not "tidy" this into the helper without re-checking the hash.
+    //
+    // The compiled bytes also include every shared function and constant this
+    // file calls: `utils.safe_list_at`, `utils.must_run_script_withdrawal`,
+    // `gs_core_from_output` / `decode_global_state_core` / `GlobalStateCore`,
+    // and `constants.global_state_asset_name` with the `gs_core_field_count`
+    // it is read alongside, as well as the stdlib functions they use. After
+    // launch, editing any of them changes this hash and so the token. Before
+    // launch the hash changed deliberately when the frozen-core layout changed
+    // its reads (2026-10-15, and again when `mintable_amount` moved into the
+    // core).
     let gs_output: Output = when redeemer is {
       GlobalStateSpent { global_state_input_index } ->
         utils.safe_list_at(self.inputs, global_state_input_index).output
@@ -123,6 +137,14 @@ validator minting_logic_validator(global_state_policy_id: ByteArray) {
 // Tests — the whole validator is one delegation decision, so these cover
 // exactly that: can the gate be satisfied by anything other than the
 // currently-named authority genuinely running?
+//
+//   test foo()                     -> ACCEPTS.
+//   test foo() { !run_withdraw.. } -> REJECTS by returning False (a `?`
+//                                     conjunct).
+//   test foo() fail { run_withdraw(..) || True }
+//                                  -> TRAPS (an `expect` or an index). The
+//                                     `|| True` makes a False return pass the
+//                                     body, so only a trap fails it.
 // ============================================================================
 
 const test_gs_policy_id: ByteArray =
@@ -149,8 +171,10 @@ fn test_out_ref(ix: Int) -> OutputReference {
   }
 }
 
-fn make_gs_output(authority: ByteArray, deactivated: Bool) -> Output {
-  let gs_datum = GlobalStateDatum {
+// ── GlobalState ──────────────────────────────────────────────────────────────
+
+fn make_gs_datum(authority: ByteArray, deactivated: Bool) -> GlobalStateDatum {
+  GlobalStateDatum {
     global_state_script_credential_hash: #"9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a",
     transfers_paused: False,
     deactivated,
@@ -167,6 +191,11 @@ fn make_gs_output(authority: ByteArray, deactivated: Bool) -> Output {
     minting_script_credential_hash: authority,
     upgrades_locked: False,
   }
+}
+
+/// A GlobalState UTxO carrying `datum`, which is any Data so that fixtures can
+/// retype a field.
+fn gs_output_of(datum: Data) -> Output {
   Output {
     address: Address {
       payment_credential: Script(test_gs_policy_id),
@@ -176,16 +205,21 @@ fn make_gs_output(authority: ByteArray, deactivated: Bool) -> Output {
       from_lovelace(2_000_000),
       from_asset(test_gs_policy_id, constants.global_state_asset_name, 1),
     ),
-    datum: InlineDatum(gs_datum),
+    datum: InlineDatum(datum),
     reference_script: None,
   }
 }
 
+fn gs_input_of(datum: Data) -> Input {
+  Input { output_reference: test_out_ref(0), output: gs_output_of(datum) }
+}
+
+fn make_gs_output(authority: ByteArray, deactivated: Bool) -> Output {
+  gs_output_of(make_gs_datum(authority, deactivated))
+}
+
 fn make_gs_input(authority: ByteArray, deactivated: Bool) -> Input {
-  Input {
-    output_reference: test_out_ref(0),
-    output: make_gs_output(authority, deactivated),
-  }
+  gs_input_of(make_gs_datum(authority, deactivated))
 }
 
 fn base_tx() -> Transaction {
@@ -231,6 +265,15 @@ fn spent_tx(authority: ByteArray, withdrawal: Option<ByteArray>) -> Transaction 
   }
 }
 
+// GS referenced (reference input 0), and the named authority's withdraw-0.
+fn referenced_tx(gs_datum: GlobalStateDatum) -> Transaction {
+  Transaction {
+    ..base_tx(),
+    reference_inputs: [gs_input_of(gs_datum)],
+    withdrawals: [Pair(Script(gs_datum.minting_script_credential_hash), 0)],
+  }
+}
+
 fn run_withdraw(redeemer: GlobalStateLocation, tx: Transaction) {
   minting_logic_validator.withdraw(
     test_gs_policy_id,
@@ -240,8 +283,14 @@ fn run_withdraw(redeemer: GlobalStateLocation, tx: Transaction) {
   )
 }
 
+// The `spent_tx` shape: GS input 0.
 fn spent_redeemer() -> GlobalStateLocation {
   GlobalStateSpent { global_state_input_index: 0 }
+}
+
+// The `referenced_tx` shape: GS reference input 0.
+fn referenced_redeemer() -> GlobalStateLocation {
+  GlobalStateReferenced { global_state_ref_input_index: 0 }
 }
 
 // ── the delegation gate ──────────────────────────────────────────────────────
@@ -258,12 +307,8 @@ test succeeds_when_global_state_is_only_referenced() {
   // proxy accepts either — deciding which is appropriate for the operation
   // at hand is the authority's job, not this validator's.
   run_withdraw(
-    GlobalStateReferenced { global_state_ref_input_index: 0 },
-    Transaction {
-      ..base_tx(),
-      reference_inputs: [make_gs_input(test_minting_authority_hash, False)],
-      withdrawals: [Pair(Script(test_minting_authority_hash), 0)],
-    },
+    referenced_redeemer(),
+    referenced_tx(make_gs_datum(test_minting_authority_hash, False)),
   )
 }
 
@@ -346,7 +391,7 @@ test fails_when_global_state_is_forged() fail {
       inputs: [Input { output_reference: test_out_ref(0), output: forged }],
       withdrawals: [Pair(Script(test_new_minting_authority_hash), 0)],
     },
-  )
+  ) || True
 }
 
 test fails_when_index_points_at_a_non_global_state_utxo() fail {
@@ -365,7 +410,7 @@ test fails_when_index_points_at_a_non_global_state_utxo() fail {
       ..spent_tx(test_minting_authority_hash, Some(test_minting_authority_hash)),
       inputs: [Input { output_reference: test_out_ref(1), output: unrelated }],
     },
-  )
+  ) || True
 }
 
 // ── publish handler ──────────────────────────────────────────────────────────
@@ -409,7 +454,7 @@ test succeeds_when_global_state_has_trailing_fields() {
   )
 }
 
-// Frozen core: a later GlobalState logic may reshape every field after 0–4;
+// Frozen core: a later GlobalState logic may reshape every field after 0–5;
 // this permanent script reads only the core, so it keeps working.
 test succeeds_when_global_state_has_a_reshaped_tail() {
   run_withdraw(
@@ -450,18 +495,35 @@ test fails_when_deactivated_is_not_a_bool() fail {
         },
       ],
     },
-  )
+  ) || True
 }
 
 // ── Deactivation ─────────────────────────────────────────────────────────────
 /// The permanent proxy refuses a deactivated protocol on its own.
 test proxy_fails_when_deactivated() {
   !run_withdraw(
-    GlobalStateReferenced { global_state_ref_input_index: 0 },
-    Transaction {
-      ..base_tx(),
-      reference_inputs: [make_gs_input(test_minting_authority_hash, True)],
-      withdrawals: [Pair(Script(test_minting_authority_hash), 0)],
-    },
+    referenced_redeemer(),
+    referenced_tx(make_gs_datum(test_minting_authority_hash, True)),
   )
+}
+
+// A permanent reader traps on a retyped core field: `mintable_amount` as bytes
+// is refused by the core decoder, although this script never uses its value.
+test proxy_traps_on_a_non_int_mintable_amount() fail {
+  let raw: Data = make_gs_datum(test_minting_authority_hash, False)
+  let bad = builtin.constr_data(
+    0,
+    utils.replace_data_field(
+      builtin.unconstr_fields(raw),
+      global_state.idx_mintable_amount,
+      builtin.b_data(#"00"),
+    ),
+  )
+  run_withdraw(
+    spent_redeemer(),
+    Transaction {
+      ..spent_tx(test_minting_authority_hash, Some(test_minting_authority_hash)),
+      inputs: [gs_input_of(bad)],
+    },
+  ) || True
 }

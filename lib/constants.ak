@@ -51,36 +51,41 @@ pub const max_trusted_entity_metadata_bytes = 512
 pub const max_denylist_metadata_bytes = 512
 
 // ============================================================================
-// CIP-68 protected asset-name prefix
+// CIP-67 asset-name labels (CIP-68)
 // ============================================================================
 // CIP-67 encodes an asset-name label as four bytes: `0x00 | label(20 bits) |
-// checksum(8 bits) | 0x00`. A name carrying the prefix below is METADATA, not
-// value — it is exempt from the supply cap and from the denylist and KYC gates,
-// and it must therefore be prevented from moving like value.
+// checksum(8 bits) | 0x00`. The first four bytes of `security_asset_name`
+// alone decide which of four classes the token is in:
 //
-// ONE prefix, not a list. `(100)` is the only CIP-68 label that denotes a
-// metadata token; the USER-token labels — `(222)` `#"000de140"`, `(333)`
-// `#"0014df10"`, `(444)` `#"001bc280"` — must never be treated as protected,
-// because the security token carries one of them and protecting it would refuse
-// every seizure and every ordinary transfer. So the set is closed at one, and a
-// single constant lets `cip68.is_protected` be one comparison instead of a fold
-// over a one-element list — on a check that runs per token per output on the
-// transfer path.
+//   * a CIP-68 USER-token label — `(222)` NFT, `(333)` FT, `(444)` RFT. The
+//     token is a CIP-68 token, and its `(100)` reference NFT is
+//     `cip68_reference_label` followed by the same body;
+//   * the `(100)` reference label itself. Never a valid security name: the
+//     supply would be its own metadata token;
+//   * anything else — a PLAIN name, which has no reference NFT at all.
 //
-// `verify_registration_structure` asserts that `security_asset_name` does not
-// carry this prefix, so that misconfiguration fails closed at registration
-// rather than silently later.
-pub const cip68_protected_prefix: ByteArray = #"000643b0"
+// The reference name is DERIVED from `security_asset_name` (see
+// `cip68.reference_name`), never configured. A separately configured name
+// could disagree with the security name and point the shape and custody
+// rules at a token CIP-68 readers never look up; a derived one cannot, and
+// it gives each CIP-68 token exactly one metadata name.
+//
+// Only that exact name is protected. Another `(100)`-labelled name under the
+// issuance policy is not metadata of this token, and no rule here treats it as
+// such.
 
-/// Length of `cip68_protected_prefix`, in bytes.
-///
-/// CIP-67 fixes an asset-name label at four bytes, so `cip68.is_protected` takes
-/// that many rather than measuring the prefix on every comparison — the same
-/// reason `linked_list_node_key_prefix_length` sits beside its prefix above.
-///
-/// The cost of fixing it: a prefix of any OTHER length would be compared against
-/// a four-byte slice, match nothing, and leave metadata tokens silently
-/// unprotected. `cip68_protected_prefix_has_the_fixed_length` in `lib/cip68.ak`
-/// is the tripwire — change one without the other and the test fails instead of
-/// the security property.
-pub const cip68_protected_prefix_length = 4
+/// Length, in bytes, of a CIP-67 label. Every label below has this length;
+/// `cip68_labels_have_the_fixed_length` in `lib/cip68.ak` is the tripwire.
+pub const cip67_label_length = 4
+
+/// `(100)` — the CIP-68 reference (metadata) NFT label.
+pub const cip68_reference_label: ByteArray = #"000643b0"
+
+/// `(222)` — the CIP-68 NFT user-token label.
+pub const cip68_nft_label = #"000de140"
+
+/// `(333)` — the CIP-68 fungible user-token label.
+pub const cip68_ft_label = #"0014df10"
+
+/// `(444)` — the CIP-68 rich-fungible user-token label.
+pub const cip68_rft_label = #"001bc280"

@@ -76,7 +76,7 @@ validator third_party_transfer_logic_validator(
   /// whichever registry node invoked this withdraw-0; the old "this node
   /// names me" identity assertion was never load-bearing, since registry
   /// field 4 is a FREE CIP-113 field a decoy node could name too.
-  expected_issuance_policy_id: ByteArray,
+  security_policy_id: ByteArray,
   /// The DENYLIST SPEND VALIDATOR's script hash, which every denylist element
   /// a party cites must sit at. See `absence.with_denylist_element`.
   denylist_script_hash: ByteArray,
@@ -124,7 +124,7 @@ validator third_party_transfer_logic_validator(
         fn(output, result) {
           if value.quantity_of(
             assets.to_value(output.value),
-            expected_issuance_policy_id,
+            security_policy_id,
             security_asset_name,
           ) > 0 {
             // Carry the full `Credential`; the constructor is part of the
@@ -156,7 +156,7 @@ validator third_party_transfer_logic_validator(
       fn(_, _) { True },
       gs_datum.requires_receiver_kyc,
       gs_datum,
-      expected_issuance_policy_id,
+      security_policy_id,
       denylist_script_hash,
       self,
     )
@@ -183,36 +183,49 @@ validator third_party_transfer_logic_validator(
       fn(input) {
         value.quantity_of(
           assets.to_value(input.output.value),
-          expected_issuance_policy_id,
+          security_policy_id,
           security_asset_name,
         ) > 0
       },
     )
 
-    // The seizure path moves VALUE. A CIP-68 token under this same policy is
-    // METADATA — exempt from the supply cap and from the denylist and KYC gates
-    // — so every scan above is scoped to `security_asset_name` and none of them
-    // would ever look at it. Refusing outright to run over a transaction that
-    // spends one is what keeps an operator from carrying the token's metadata
-    // authority away under cover of an ordinary seizure.
+    // The seizure path moves VALUE. A CIP-68 token's reference NFT, under this
+    // same policy, is METADATA — exempt from the supply cap and from the
+    // denylist and KYC gates — so every scan above is scoped to
+    // `security_asset_name` and none of them would ever look at it. Refusing
+    // outright to run over a transaction that spends it is what keeps an
+    // operator from carrying the token's metadata authority away under cover
+    // of an ordinary seizure.
+    //
+    // Keyed on the EXACT reference name derived from `security_asset_name`,
+    // and only for a CIP-68 token: a plain-named token has no reference NFT,
+    // and any other `(100)`-labelled name under this policy is not this
+    // token's metadata.
     //
     // INPUTS, not outputs: a token can only change hands if its UTxO is spent.
     // Metadata updates are unaffected — they take the ordinary transfer path,
     // where the base layer requires the owner's own consent.
-    let no_protected_tokens_spent = !list.any(
-      self.inputs,
-      fn(input) {
-        cip68.value_has_protected(
-          input.output.value,
-          expected_issuance_policy_id,
+    let no_reference_nft_spent = when
+      cip68.reference_name(security_asset_name)
+    is {
+      Some(ref_name) ->
+        !list.any(
+          self.inputs,
+          fn(input) {
+            cip68.value_has_reference(
+              input.output.value,
+              security_policy_id,
+              ref_name,
+            )
+          },
         )
-      },
-    )
+      None -> True
+    }
 
     and {
       gs_datum.deactivated == False,
       at_least_one_seized_input,
-      no_protected_tokens_spent?,
+      no_reference_nft_spent?,
       all_destinations_ok,
       power_user_data.can_force_transfer,
       // Never the GlobalState logic named in field 0: when this seizure also
@@ -639,11 +652,10 @@ test force_transfer_works_while_paused() {
 
 // ── GlobalState may be spent instead of referenced ──────────────────────────
 //
-// The BURN shape. A burn must SPEND GlobalState — only then does
-// the GlobalState logic's `MintSecurity` branch run and credit the
-// burned supply back to `mintable_amount` — and it must also run THIS
-// withdrawal, because CIP-113's `ThirdPartyAct` is the only
-// programmable-logic-global branch a burn can take. Conway rejects a
+// The BURN shape. A burn must SPEND GlobalState — so that the minting
+// authority can credit the burned supply back to `mintable_amount` — and it
+// must also run THIS withdrawal, because CIP-113's `ThirdPartyAct` is the
+// only programmable-logic-global branch a burn can take. Conway rejects a
 // transaction whose `inputs` and `reference_inputs` overlap
 // (`BabbageNonDisjointRefInputs`, observed on chain), so while this validator
 // resolved GlobalState exclusively from `reference_inputs` the burn was
@@ -1113,9 +1125,14 @@ bench seizure_cost_by_destination_count(n via n_destinations) {
   expect run_third_party(redeemer, tx)
 }
 
-/// A CIP-67 `(100)` reference-token name under the policed policy — metadata,
-/// not value, and therefore protected.
+/// `(100)` + "Meta" under the policed policy. For the CIP-68 security name
+/// below it is THE reference NFT — metadata, not value, and therefore
+/// protected; for the plain "SEC" token it is just another name.
 const p_ref_name: ByteArray = #"000643b04d657461"
+
+/// `(333)` + "Meta" — a CIP-68 security name whose reference name is
+/// `p_ref_name`.
+const p_cip68_sec_name: ByteArray = #"0014df104d657461"
 
 /// A UTxO holding ONLY the CIP-68 reference token, owned by `owner_stake`.
 /// This is the shape `minting_authority` creates at registration.
@@ -1137,28 +1154,97 @@ fn p_reference_nft_input(ix: Int, owner_stake: ByteArray) -> Input {
   }
 }
 
-// ── Protected prefixes are out of the seizure path's reach ───────────────────
+/// `p_token_utxo` for the CIP-68-named security token.
+fn p_cip68_token_utxo(stake_hash: ByteArray, amount: Int) -> Output {
+  Output {
+    ..p_token_utxo(stake_hash, amount),
+    value: merge(
+      from_lovelace(2_000_000),
+      from_asset(p_issuance_policy, p_cip68_sec_name, amount),
+    ),
+  }
+}
+
+/// `p_seized_input` for the CIP-68-named security token.
+fn p_cip68_seized_input() -> Input {
+  Input {
+    output_reference: p_out_ref(10),
+    output: p_cip68_token_utxo(p_source_stake, 1_000),
+  }
+}
+
+/// `run_third_party` for a deployment whose security token is CIP-68-named.
+fn run_cip68_third_party(
+  redeemer: ThirdPartyTransferLogicScriptWithdrawRedeemer,
+  tx: Transaction,
+) -> Bool {
+  third_party_transfer_logic_validator.withdraw(
+    p_cip68_sec_name,
+    p_gs_policy,
+    p_issuance_policy,
+    p_denylist_script_hash,
+    p_pu_script_hash,
+    redeemer,
+    Script(p_third_party_hash),
+    tx,
+  )
+}
+
+// ── The reference NFT is out of the seizure path's reach ────────────────────
 //
 // THE DEFECT the guard closes. Every compliance scan here is scoped to
 // `security_asset_name`: the destination fold that feeds
-// `compliance.verify_parties`, and `at_least_one_seized_input`. A CIP-68 token
-// lives under the SAME issuance policy but a different asset name, so it was
-// invisible to both. A `can_force_transfer` operator could spend the
-// metadata UTxO alongside a unit of their own dust — the dust
+// `compliance.verify_parties`, and `at_least_one_seized_input`. A CIP-68
+// token's reference NFT lives under the SAME issuance policy but a different
+// asset name, so it was invisible to both. A `can_force_transfer` operator
+// could spend the metadata UTxO alongside a unit of their own dust — the dust
 // satisfying "must actually seize something" — and re-output it to any address
 // with any datum. No admin signature, no denylist check, no KYC check.
 //
-// THE GUARD. `no_protected_tokens_spent`: no INPUT may carry a protected-prefix
-// token under the policed policy. Inputs, not outputs, because the token can
-// only change hands if its UTxO is spent — so refusing the whole transaction is
-// both simpler and stricter than vetting where it lands. Metadata updates are
-// unaffected: they go through the ordinary transfer path, where the base layer
-// requires the owner's consent.
+// THE GUARD. `no_reference_nft_spent`: for a CIP-68 token, no INPUT may carry
+// its exact reference name under the policed policy. Inputs, not outputs,
+// because the token can only change hands if its UTxO is spent — so refusing
+// the whole transaction is both simpler and stricter than vetting where it
+// lands. Metadata updates are unaffected: they go through the ordinary transfer
+// path, where the base layer requires the owner's consent.
 
-/// THE ATTACK: a fully compliant seizure that ALSO spends the CIP-68 metadata
-/// UTxO and re-outputs it to the operator. Every other conjunct is satisfied,
-/// so this can only fail on the new guard.
-test seizure_cannot_spend_a_protected_prefix_token() {
+/// THE ATTACK: a fully compliant seizure of the CIP-68 token that ALSO spends
+/// its metadata UTxO and re-outputs it to the destination. Every other conjunct
+/// is satisfied, so this can only fail on the guard.
+test seizure_cannot_spend_the_reference_nft() {
+  let tx = Transaction {
+    ..p_tx(
+      False,
+      False,
+      False,
+      True,
+      [p_cip68_seized_input(), p_reference_nft_input(12, p_source_stake)],
+      [p_pu_cred],
+    ),
+    outputs: [
+      p_cip68_token_utxo(p_dest_stake, 1_000),
+      p_reference_nft_input(12, p_dest_stake).output,
+    ],
+  }
+  !run_cip68_third_party(p_redeemer(), tx)
+}
+
+/// POSITIVE CONTROL, same fixtures minus the reference-NFT input and output:
+/// an ordinary seizure of the CIP-68 token must still be accepted.
+test seizure_succeeds_when_the_reference_nft_is_not_spent() {
+  let tx = Transaction {
+    ..p_tx(False, False, False, True, [p_cip68_seized_input()], [p_pu_cred]),
+    outputs: [p_cip68_token_utxo(p_dest_stake, 1_000)],
+  }
+  run_cip68_third_party(p_redeemer(), tx)
+}
+
+/// DELIBERATE: a plain-named token has no reference name, so the seizure path
+/// does not refuse an input carrying a `(100)`-labelled name under the policed
+/// policy. Protection exists only for CIP-68 names: a replacement authority
+/// minting a stray `(100)` name would create a token neither the transfer nor
+/// the seizure path polices.
+test seizure_of_a_plain_token_does_not_police_reference_labelled_inputs() {
   let tx = Transaction {
     ..p_tx(
       False,
@@ -1172,16 +1258,6 @@ test seizure_cannot_spend_a_protected_prefix_token() {
       p_token_utxo(p_dest_stake, 1_000),
       p_reference_nft_input(12, p_dest_stake).output,
     ],
-  }
-  !run_third_party(p_redeemer(), tx)
-}
-
-/// POSITIVE CONTROL, same fixtures minus the protected input: an ordinary
-/// seizure must still be accepted.
-test seizure_succeeds_when_no_protected_token_is_spent() {
-  let tx = Transaction {
-    ..p_tx(False, False, False, True, [p_seized_input()], [p_pu_cred]),
-    outputs: [p_token_utxo(p_dest_stake, 1_000)],
   }
   run_third_party(p_redeemer(), tx)
 }

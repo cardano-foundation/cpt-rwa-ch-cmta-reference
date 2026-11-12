@@ -14,8 +14,8 @@ use types/party_action.{PartyAction}
 /// `MintBurn` never reads the registry at all: the issuance policy it
 /// polices is pinned at compile time, and the base layer already
 /// authenticates whichever registry node invoked this withdraw-0 in the
-/// first place. The other three variants still resolve a registry node —
-/// `RegisterMint`/`RegisterStructural` because the node does not exist as a
+/// first place. The other two variants still resolve a registry node —
+/// `Register` through `self.outputs`, because the node does not exist as a
 /// UTxO yet (it is being created), `UpgradeRegistryNode` because IT is the
 /// one path that may rewrite the node — for CIP-113 structural invariants
 /// only they enforce.
@@ -27,6 +27,11 @@ pub type MintingAuthorityWithdrawRedeemer {
     /// resolves (shared, transaction-wide data; a wrong index just fails the
     /// NFT check).
     global_state_input_index: Int,
+    /// Index into `self.outputs` — GlobalState's continuing output. `MintBurn`
+    /// requires it at GlobalState's address, with GlobalState's non-ADA
+    /// value, carrying the input datum with only field 5 (`mintable_amount`)
+    /// rewritten to `in − minted` (a burn raises it), never below zero.
+    global_state_output_index: Int,
     power_user_node_ref_input_index: Int,
     /// Amount minted (signed: positive for mint, negative for burn).
     minted_amount: Int,
@@ -38,29 +43,35 @@ pub type MintingAuthorityWithdrawRedeemer {
     /// is the eUTxO equivalent.
     destination_actions: List<PartyAction>,
   }
-  /// The first mint, carried by the CIP-113 registration that creates this
-  /// token's registry node. Identical authorisation to `MintBurn` — the node
-  /// is simply reached through `self.outputs`, because at insert time it is
-  /// an output of this very transaction rather than a pre-existing UTxO.
+  /// The CIP-113 registration that creates this token's registry node. The
+  /// node is reached through `self.outputs`, because at insert time it is an
+  /// output of this very transaction rather than a pre-existing UTxO. The
+  /// GlobalState admin alone authorises it, and the protocol must not be
+  /// deactivated.
   ///
-  /// The proxy still owns the registration's own structural invariants (that
-  /// the node names it, forbids unfracking, and pins this deployment's
-  /// GlobalState) and the admin gate on registering at all; this variant
-  /// authorises only the mint that rides along with it.
-  RegisterMint {
+  /// Name rules, decided by `security_asset_name` alone: a `(100)`-labelled
+  /// name is always refused; a CIP-68 user-token name (`(222)`, `(333)` or
+  /// `(444)`) needs a body of at least one byte; a plain name must not be
+  /// empty.
+  ///
+  /// Mint rule, in both directions and scoped to the issuance policy: a plain
+  /// name mints NOTHING under it; a CIP-68 name mints EXACTLY its reference NFT
+  /// (`cip68.reference_name(security_asset_name)`), quantity 1, into exactly
+  /// one well-formed carrier output. Supply is never minted here — the first
+  /// supply is a later `MintBurn`. Mints under other policies are not
+  /// constrained.
+  Register {
     /// Index into `self.outputs` — the registry node being created. An
     /// insert emits TWO registry-node outputs (the new node and the
     /// re-emitted covering node), so the index alone does not identify ours;
     /// the identity assertion against the proxy's hash disambiguates.
     registry_node_output_index: Int,
-    /// Index into `self.inputs` — GlobalState, SPENT so its `MintSecurity`
-    /// branch decrements and enforces `mintable_amount`.
-    global_state_input_index: Int,
-    power_user_node_ref_input_index: Int,
-    /// Quantity minted by this registration. Never negative — nothing exists
-    /// to burn yet.
-    minted_amount: Int,
-    destination_actions: List<PartyAction>,
+    /// Index into `self.reference_inputs` — the GlobalState UTxO, always
+    /// referenced, never spent. GlobalState always exists before a
+    /// registration, and it is read for the deactivation flag and the admin
+    /// credential only: no supply changes, so nothing here needs the GS spend
+    /// validator to run. A wrong index just fails the NFT check.
+    global_state_ref_input_index: Int,
   }
   /// The CIP-113 UPGRADE path for the OTHER logic scripts.
   ///
@@ -93,24 +104,10 @@ pub type MintingAuthorityWithdrawRedeemer {
     /// reference index: this variant makes no claim that depends on the GS
     /// spend validator having run, so pinning it to one list would only forbid
     /// upgrading a registry node in the same transaction that spends
-    /// GlobalState (Conway rejects the overlap). Contrast `MintBurn` and
-    /// `RegisterMint` below, whose bare `global_state_input_index` is
-    /// load-bearing: they MUST spend, or `MintSecurity` never runs and the
-    /// supply cap goes unenforced. The type carries that distinction.
-    global_state_location: GlobalStateLocation,
-  }
-  /// A CIP-113 registration that mints nothing — it only creates the registry
-  /// node. GlobalState is merely REFERENCED (there is no supply change, so
-  /// no cap to enforce and no reason to spend it), and the admin alone
-  /// authorises. Asserting that nothing is in fact minted is what keeps this
-  /// from being a way around `RegisterMint`'s power-user and receiver gates.
-  RegisterStructural {
-    /// Index into `self.outputs` — as in `RegisterMint`.
-    registry_node_output_index: Int,
-    /// WHERE GlobalState is — read for the admin credential only. A location
-    /// for the same reason as `UpgradeRegistryNode`: nothing here depends on
-    /// the GS spend validator running, and a structural registration should
-    /// not be barred from a transaction that also spends GlobalState.
+    /// GlobalState (Conway rejects the overlap). Contrast `MintBurn` above,
+    /// whose bare `global_state_input_index` is load-bearing: it MUST spend,
+    /// because it debits `mintable_amount` in GlobalState's continuing output,
+    /// which only a spend has. The type carries that distinction.
     global_state_location: GlobalStateLocation,
   }
 }

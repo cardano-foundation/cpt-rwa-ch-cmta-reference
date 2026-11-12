@@ -1120,7 +1120,7 @@ test denylist_deinit_succeeds_for_the_admin_after_deactivation() {
 }
 
 // Frozen core: Deinit's GlobalState read keeps working when a later logic
-// reshapes every field after 0–4.
+// reshapes every field after 0–5.
 test denylist_deinit_accepts_a_global_state_with_a_reshaped_tail() {
   v_denylist.mint.mint(
     gs_policy,
@@ -1480,21 +1480,30 @@ test power_user_spend_handler_is_pure_delegation() {
 /// closed the registry-confusion bypass, pause is no longer the only thing
 /// standing between an attacker and an uncontrolled transfer.
 test mint_succeeds_while_transfers_are_paused_by_design() {
+  let gs = gs_datum(True, False, False, False)
   let tx = Transaction {
     ..base_tx(),
-    inputs: [gs_utxo(0, 2_000_000, gs_datum(True, False, False, False))],
+    inputs: [gs_utxo(0, 2_000_000, gs)],
     reference_inputs: [
       pu_node_input(0, power_user(False, True, False, False, False)),
       registry_node_input(1, genuine_node()),
       dl_root_input(2),
     ],
-    outputs: [token_utxo(issuance_policy, clean_stake, 1_000)],
+    // GlobalState's continuing output, debited by the 1 000 minted.
+    outputs: [
+      gs_output(
+        2_000_000,
+        GlobalStateDatum { ..gs, mintable_amount: gs.mintable_amount - 1_000 },
+      ),
+      token_utxo(issuance_policy, clean_stake, 1_000),
+    ],
     mint: from_asset(issuance_policy, sec_name, 1_000),
     extra_signatories: [pu_cred],
   }
   run_authority(
     MintBurn {
       global_state_input_index: 0,
+      global_state_output_index: 0,
       power_user_node_ref_input_index: 0,
       minted_amount: 1_000,
       destination_actions: [mint_dst_action(2)],
@@ -1508,21 +1517,29 @@ test mint_succeeds_while_transfers_are_paused_by_design() {
 /// regulator-ordered burn must not have to wait for an unpause, which is the
 /// same reasoning that exempts forced transfers.
 test burn_succeeds_while_transfers_are_paused_by_design() {
+  let gs = gs_datum(True, False, False, False)
   let tx = Transaction {
     ..base_tx(),
-    inputs: [gs_utxo(0, 2_000_000, gs_datum(True, False, False, False))],
+    inputs: [gs_utxo(0, 2_000_000, gs)],
     reference_inputs: [
       pu_node_input(0, power_user(False, False, True, False, False)),
       registry_node_input(1, genuine_node()),
       dl_root_input(2),
     ],
-    outputs: [],
+    // GlobalState's continuing output, credited by the 1 000 burned.
+    outputs: [
+      gs_output(
+        2_000_000,
+        GlobalStateDatum { ..gs, mintable_amount: gs.mintable_amount + 1_000 },
+      ),
+    ],
     mint: from_asset(issuance_policy, sec_name, -1_000),
     extra_signatories: [pu_cred],
   }
   run_authority(
     MintBurn {
       global_state_input_index: 0,
+      global_state_output_index: 0,
       power_user_node_ref_input_index: 0,
       minted_amount: -1_000,
       destination_actions: [],
@@ -1627,7 +1644,7 @@ test transfer_rejects_one_action_covering_both_credential_forms() fail {
 // The mint-path "registry node keyed to a foreign policy" test formerly here
 // is gone: `MintBurn` no longer reads a registry node at all, so a decoy
 // node has nothing left to name. The policy this branch mints/burns is
-// pinned at compile time (`expected_issuance_policy_id`), and the base layer
+// pinned at compile time (`security_policy_id`), and the base layer
 // already authenticates whichever registry node invoked this withdraw-0.
 
 /// on the MINT path, which uses a DIFFERENT dedup implementation — the
@@ -1636,15 +1653,21 @@ test transfer_rejects_one_action_covering_both_credential_forms() fail {
 /// destinations sharing a hash behind different credential forms need two
 /// actions. POSITIVE control.
 test mint_treats_key_and_script_forms_of_one_hash_as_two_destinations() {
+  let gs = gs_datum(False, False, False, False)
   let tx = Transaction {
     ..base_tx(),
-    inputs: [gs_utxo(0, 2_000_000, gs_datum(False, False, False, False))],
+    inputs: [gs_utxo(0, 2_000_000, gs)],
     reference_inputs: [
       pu_node_input(0, power_user(False, True, False, False, False)),
       registry_node_input(1, genuine_node()),
       dl_root_input(2),
     ],
+    // GlobalState's continuing output, debited by the 1 000 minted.
     outputs: [
+      gs_output(
+        2_000_000,
+        GlobalStateDatum { ..gs, mintable_amount: gs.mintable_amount - 1_000 },
+      ),
       token_utxo_owned_by(VerificationKey(clean_stake), 500),
       token_utxo_owned_by(Script(clean_stake), 500),
     ],
@@ -1654,6 +1677,7 @@ test mint_treats_key_and_script_forms_of_one_hash_as_two_destinations() {
   run_authority(
     MintBurn {
       global_state_input_index: 0,
+      global_state_output_index: 0,
       power_user_node_ref_input_index: 0,
       minted_amount: 1_000,
       destination_actions: [mint_dst_action(2), mint_dst_action(2)],
@@ -1667,15 +1691,21 @@ test mint_treats_key_and_script_forms_of_one_hash_as_two_destinations() {
 /// destination and TRAPS — hence `fail`. This is what proves `seen` dedupes on
 /// the full `Credential` and not on the bare hash.
 test mint_rejects_one_action_covering_both_credential_forms() fail {
+  let gs = gs_datum(False, False, False, False)
   let tx = Transaction {
     ..base_tx(),
-    inputs: [gs_utxo(0, 2_000_000, gs_datum(False, False, False, False))],
+    inputs: [gs_utxo(0, 2_000_000, gs)],
     reference_inputs: [
       pu_node_input(0, power_user(False, True, False, False, False)),
       registry_node_input(1, genuine_node()),
       dl_root_input(2),
     ],
+    // GlobalState's continuing output, debited by the 1 000 minted.
     outputs: [
+      gs_output(
+        2_000_000,
+        GlobalStateDatum { ..gs, mintable_amount: gs.mintable_amount - 1_000 },
+      ),
       token_utxo_owned_by(VerificationKey(clean_stake), 500),
       token_utxo_owned_by(Script(clean_stake), 500),
     ],
@@ -1685,6 +1715,7 @@ test mint_rejects_one_action_covering_both_credential_forms() fail {
   run_authority(
     MintBurn {
       global_state_input_index: 0,
+      global_state_output_index: 0,
       power_user_node_ref_input_index: 0,
       minted_amount: 1_000,
       destination_actions: [mint_dst_action(2)],
@@ -1787,7 +1818,7 @@ test the_same_transfer_succeeds_once_unpaused() {
 // `derive_issuance_policy_id_from_registry_node`'s identity assertion was
 // the single binding the decoy-node bypass had to satisfy, and the whole
 // derivation is gone from this handler now — there is no node identity left
-// to assert. The compile-time policy pin (`expected_issuance_policy_id`) is
+// to assert. The compile-time policy pin (`security_policy_id`) is
 // the sole remaining authentication of which policy this script polices.
 
 // ============================================================================

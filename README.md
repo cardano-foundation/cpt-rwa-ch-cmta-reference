@@ -56,8 +56,10 @@ equivalency pre-assessment, all three linked from [Review and audit](#review-and
 Condition 1 is a deployment duty rather than a contract feature: `security_info` is opaque to every
 validator, as described under [Technical compliance status](#technical-compliance-status). Conditions 2
 and 3 are carried by the CIP-68 metadata token, described under
-[CIP-68 metadata tokens](#cip-68-metadata-tokens). For condition 4, the base-layer commit cited by the
-audit report is `9db7e0629a1509cc9d41d069f0ef0ed251601173`.
+[CIP-68 metadata tokens](#cip-68-metadata-tokens). A deployment has that token only if its
+`security_asset_name` carries a CIP-68 user-token label (`(333)` or `(444)` for a fungible security,
+`(222)` for an NFT): registration then mints it, and a plain name can never have one. For condition
+4, the base-layer commit cited by the audit report is `9db7e0629a1509cc9d41d069f0ef0ed251601173`.
 
 Provided those four elements are present at deployment, an issuer using this contract set for the
 tokenization of equity securities may refer to it as a smart contract "recognized by the CMTA" when
@@ -99,11 +101,11 @@ in this repository.
 |---|---|
 | [`validators/global_state.ak`](validators/global_state.ak) | Mints the one-shot GlobalState NFT at genesis, with a sanitised initial datum, into the permanent spend proxy. |
 | [`validators/global_state_proxy.ak`](validators/global_state_proxy.ak) | Permanent, unparameterised home of the GlobalState NFT. Reads only datum field 0 and requires that script's withdraw-0 in the same transaction. |
-| [`validators/global_state_logic.ak`](validators/global_state_logic.ak) | Replaceable GlobalState logic (the withdraw-0 script named by datum field 0) that controls the continuing state UTxO: remaining mintable supply, pause, KYC settings, trusted issuers, admin rotation, upgrades, logic rotation and deactivation. Its tests are in `global_state_logic_tests.ak`. |
+| [`validators/global_state_logic.ak`](validators/global_state_logic.ak) | Replaceable GlobalState logic (the withdraw-0 script named by datum field 0) that controls the continuing state UTxO. It permits the per-mint write of the remaining supply, governs the cap's amendments, and controls pause, KYC settings, trusted issuers, admin rotation, upgrades, logic rotation and deactivation. Its tests are in `global_state_logic_tests.ak`. |
 | [`validators/power_users.ak`](validators/power_users.ak) | Maintains the operator linked list. The GlobalState admin grants or changes the five independent role flags. |
 | [`validators/denylist.ak`](validators/denylist.ak) | Maintains the sanctions linked list. An `is_admin` power user can add or remove an entry, or update one in place (`UpdateDenylistEntry`). An entry's `frozen_amount` is `None` (fully frozen) or `Some(f)` (partially frozen: may receive, and may send only what it holds above `f`). |
-| [`validators/minting_logic_script.ak`](validators/minting_logic_script.ak) | Permanent CIP-113 minting proxy. It reads GlobalState and requires the currently named minting authority to run. Its hash, applied to the base layer's issuance template, yields this token's issuance policy ID. |
-| [`validators/minting_authority.ak`](validators/minting_authority.ak) | Replaceable authority for registration, mint, burn and registry-node upgrades. It checks supply-changing transactions against roles, destinations, the denylist and KYC. |
+| [`validators/minting_logic_script.ak`](validators/minting_logic_script.ak) | Permanent CIP-113 minting proxy. It reads GlobalState, authenticated by its NFT and not deactivated, and requires the currently named minting authority, never itself, to run; it decides nothing else. Its hash, applied to the base layer's issuance template, yields this token's issuance policy ID. |
+| [`validators/minting_authority.ak`](validators/minting_authority.ak) | Replaceable authority for registration, mint, burn and registry-node upgrades. It decides who may mint, to whom, which asset names and how much: its `MintBurn` debits every mint and burn of the security token from `mintable_amount` in the same transaction. It checks supply-changing transactions against roles, destinations, the denylist and KYC. |
 | [`validators/transfer_logic_script.ak`](validators/transfer_logic_script.ak) | Checks ordinary transfers for pause, deactivation, the sender and receiver denylist gates (absence, or a partial freeze the sender's transaction respects), and enabled KYC gates. |
 | [`validators/third_party_transfer_logic_script.ak`](validators/third_party_transfer_logic_script.ak) | Checks forced transfers: `can_force_transfer` authority and vetted destinations, while allowing a sanctioned or expired source and remaining available during a pause. |
 | [`lib/types/`](lib/types/) | On-chain datum and redeemer schemas consumed by transaction builders, including GlobalState, operator roles and KYC proofs. |
@@ -170,7 +172,11 @@ referenced by compact identifiers or hashes.
   **No Critical or High defect.** Two Mediums were found: §12 (dismantling a linked list could
   freeze a live protocol) was fixed; §13 (a seizure operator can move the CIP-68 reference NFT) was
   **accepted by decision**, with its rationale and an implemented-then-reverted fix recorded in the
-  same document. Several further items were reviewed and deliberately left unchanged, with the
+  same document. The current code refuses it: the seizure path cannot move the reference NFT (see
+  [§13](documents/security/security-fixes.md#13-cip-68-metadata-tokens-were-governed-by-an-exact-name-not-by-their-kind)
+  and
+  [§20](documents/security/security-fixes.md#20-a-cip-68-reference-token-was-never-paired-with-the-security-tokens-name)).
+  Several further items were reviewed and deliberately left unchanged, with the
   reasoning under *Acknowledged, and deliberately not changed*. Still not a substitute for the
   third-party audit.
 * **Third-party equivalency assessment** — an independent CMTAT mapping of this codebase is
@@ -255,8 +261,19 @@ referenced by compact identifiers or hashes.
   static (every such change is still signed, on-chain, power-user-gated and cap-enforced), and a
   holder minted to during a pause cannot move the tokens until it lifts — so do not mint to third
   parties mid-pause.
-* Minting is capped; burning returns headroom to the cap. The cap is remaining headroom, not total
-  supply: until `LockUpgrades`, the admin may also reset it to any non-negative absolute value
+* Minting is capped; burning returns headroom to the cap. With this repository's minting authority
+  installed, every mint or burn of the security token is debited from `mintable_amount` in the same
+  transaction, whichever GlobalState logic is installed: the authority's `MintBurn` checks it. A
+  replacement authority must keep the debit; nothing frozen re-checks it. Until `LockUpgrades` the
+  admin chooses the authority (`RotateMintingScript`) and can set the cap directly
+  (`SetMintableAmount`); after it, `RotateMintingScript` is closed, so the installed authority and
+  its debit are permanent. The debit is the authority's and not the minting proxy's because the
+  issuance policy ID is derived from the proxy's hash, so a defect there could never be fixed; the
+  authority can be rotated. That is not a promise that no rotation can change the cap. A write of `mintable_amount`
+  outside a mint or burn is a cap amendment, governed by the installed GlobalState logic: this
+  repository's logic allows only `SetMintableAmount`, admin-signed, until `LockUpgrades`, and never
+  beside a mint or burn. The cap is remaining headroom, not total supply: until `LockUpgrades`, the
+  admin may also reset it to any non-negative absolute value
   with `SetMintableAmount` (setting it below what is already minted simply stops further minting).
   There is no upper bound: off-chain readers must decode it as an arbitrary-precision integer. That action cannot share a transaction with a mint. **Burning existing supply spends a
   programmable-base UTxO, so the CIP-113 base layer makes the transfer logic run over it** — which
@@ -292,15 +309,20 @@ The GlobalState admin has three distinct upgrade paths, plus control over the su
 `upgrades_locked` is false:
 
 * `RotateMintingScript` changes `minting_script_credential_hash` in GlobalState. The permanent
-  minting proxy then requires the replacement authority's withdraw-0. The proxy checks delegation,
-  not the new authority's mint, burn or registration rules; review and test the replacement before
-  rotating. Nothing on chain checks that the new value names a working authority, so rebuild it
-  from source with every parameter and compare its hash before signing. Register its stake
-  credential before the first withdrawal. The new value must differ from the admin, from the
-  current authority and from the GlobalState logic. The outgoing authority does not have to
-  consent. A replacement authority must keep this build's newest invariant: **a `MintBurn` that
-  changes no supply authorises nothing**. Without it, any `can_mint` operator could make the
-  authority and the proxy run beside an unrelated action.
+  minting proxy then requires the replacement authority's withdraw-0. The proxy checks delegation
+  only, not the authority's rules — the supply debit, who may mint, to whom, which names,
+  registration; review and test the replacement before rotating. The replacement must keep the
+  debit: one that drops it mints past the cap. Only `security_asset_name` is debited. Which names may be
+  minted under the issuance policy is the minting authority's rule; a replacement authority that
+  drops it can mint other names there, uncapped. Only this token's exact reference name is protected.
+  A replacement authority that mints another `(100)`-labelled name under the issuance policy creates
+  a token that neither the transfer nor the seizure logic polices. Nothing on chain checks that the
+  new value names a working authority, so rebuild it from source with every parameter and compare
+  its hash before signing. Register its stake credential before the first withdrawal. The new value
+  must differ from the admin, from the current authority and from the GlobalState logic. The
+  outgoing authority does not have to consent. A replacement authority must keep this build's newest
+  invariant: **a `MintBurn` that changes no supply authorises nothing**. Without it, any `can_mint`
+  operator could make the authority and the proxy run beside an unrelated action.
 * `UpgradeRegistryNode` changes this token's CIP-113 transfer and/or third-party transfer logic
   credentials in its registry node. The admin signs and the minting authority verifies the
   continuing node, which must name exactly the transfer and seizure scripts that authority was built
@@ -321,9 +343,10 @@ The GlobalState admin has three distinct upgrade paths, plus control over the su
   the same `RotateGlobalStateScript` redeemer — which proves its script is producible, its stake
   credential registered and that it decodes a GlobalState rotation, but **not** that it is a correct
   GlobalState logic — and checks the datum it is about to govern (this version accepts exactly the
-  input with field 0 rewritten). **The new logic governs every
-  later GlobalState action, the supply cap included** — rotating to a permissive script hands
-  GlobalState to anyone, which is stronger than a permissive minting authority. Rotate only to a
+  input with field 0 rewritten). **The new logic governs every later GlobalState action, the cap's
+  amendments included**: a permissive logic can rewrite `mintable_amount` outside a mint or burn or
+  hand GlobalState to anyone, which is stronger than a permissive minting authority; it cannot let a
+  mint or burn skip the minting authority's debit. Rotate only to a
   reviewed build of this repository: before signing, rebuild the new logic from source at a pinned
   commit with every parameter and check that its hash equals `new_global_state_script_hash` (do the
   same for field 0 before genesis). Everything after the frozen core is the incoming logic's to
@@ -336,20 +359,28 @@ The GlobalState admin has three distinct upgrade paths, plus control over the su
   admin a native-script multisig with a registered stake credential: a script admin signs through
   its own zero-value withdrawal. The NFT never moves, and
   readers find GlobalState by its NFT, never its address. The datum has a **frozen core and a free
-  tail**. Fields 0–4 (logic hash, `deactivated`, admin, power-users list id, minting authority) are
-  the only fields the scripts that can never be redeployed read after genesis; they keep their
-  position and type forever. Fields 5+ belong to the installed logic: a new logic may drop, reorder,
-  retype or append them (within `max_global_state_datum_bytes`). The replaceable readers (minting
-  authority, transfer and third-party logic) decode the v1 tail, and would trap on or silently misread
-  a different one, so before installing a logic that changes the tail, first rotate them to versions
-  that accept **both** the current and the new layout: the authority through `RotateMintingScript`,
-  then the transfer scripts through the new authority's `UpgradeRegistryNode`, then the GlobalState
-  logic — all before `LockUpgrades`. The invariants every replacement logic must keep are listed in
-  `validators/global_state_logic.ak`.
+  tail**. Fields 0–5 (logic hash, `deactivated`, admin, power-users list id, minting authority,
+  `mintable_amount`) are the only fields the scripts that can never be redeployed read after
+  genesis; they keep their position and type forever. Fields 6+ belong to the installed logic: a new
+  logic may drop, reorder, retype or append them (within `max_global_state_datum_bytes`). The
+  replaceable readers (minting authority, transfer and third-party logic) decode the v1 tail, and
+  would trap on or silently misread a different one, so before installing a logic that changes the
+  tail, first rotate them to versions that accept **both** the current and the new layout: the
+  authority through `RotateMintingScript`, then the transfer scripts through the new authority's
+  `UpgradeRegistryNode`, then the GlobalState logic — all before `LockUpgrades`. The invariants every
+  replacement logic must keep are listed in `validators/global_state_logic.ak`.
 
 `LockUpgrades` is an admin-signed, one-way GlobalState action that closes **all four** for later
-transactions — after it, `mintable_amount` moves only through mint and burn and the GlobalState
-logic can no longer be replaced. It does not deactivate transfers, minting or burning. If a registry upgrade is bundled
+transactions — with this repository's GlobalState logic installed, after it `mintable_amount` moves
+only through mint and burn and the GlobalState logic can no longer be replaced.
+`LockUpgrades` is enforced by the installed GlobalState logic itself, which also closes
+`RotateMintingScript`; the lock's closure of `UpgradeRegistryNode` is enforced by the installed
+minting authority, which refuses the upgrade once `upgrades_locked` is set. So after the lock both
+the installed GlobalState logic (datum field 0) and the installed minting authority (field 4) are
+permanent, and "closes all four" holds only if both are reviewed builds of this repository:
+before locking, check datum fields 0 and 4 against rebuilds (see
+[Deployment checklist](#deployment-checklist)). It does not deactivate
+transfers, minting or burning. If a registry upgrade is bundled
 with the lock in one transaction, the upgrade reads the pre-lock GlobalState input and can still
 succeed; audit the whole transaction when deciding which rules were locked. The same pre-state rule
 applies to a registry upgrade bundled with admin rotation or deactivation.
@@ -399,7 +430,8 @@ the equivalent in your off-chain library) before deriving any hash or address.
 Two values come from the deployed CIP-113 base layer of the target network, not from this repo —
 obtain them before applying any parameters:
 
-* **`registry_policy_id`** — the CIP-113 registry mint policy id.
+* **`registry_policy_id`** — the CIP-113 registry mint policy id, a compile-time parameter of row
+  10 only.
 * **The issuance template** — `prefix_cbor_hex` and `postfix_cbor_hex` from the base layer's
   `IssuanceCborHex` datum (the reference UTxO carrying its `IssuanceCborHex` NFT). Applied to the
   minting proxy's hash (row 6) it yields this token's issuance policy ID; see
@@ -416,7 +448,9 @@ transfer and seizure alike (see
 Parameters have to be applied in dependency order — GlobalState proxy → GlobalState policy → the two lists →
 the minting-logic proxy → the rest — because each layer's policy ID or script hash feeds later
 validators. The table below is exhaustive and lists, for every validator, its parameters in the
-exact order the blueprint (`plutus.json`) declares them; apply top to bottom.
+exact order the blueprint (`plutus.json`) declares them; apply top to bottom. `security_asset_name`
+must be fixed before genesis: datum field 0 names a GlobalState logic built with it (row 7). It does
+not feed the issuance policy ID, because the minting proxy (row 6) does not take it.
 
 > `aiken blueprint apply` takes parameters **positionally, one at a time**, and shared parameters
 > are **not** in a shared order across validators — e.g. row 7 (`global_state_logic`)
@@ -432,11 +466,11 @@ exact order the blueprint (`plutus.json`) declares them; apply top to bottom.
 | 3 | `power_users.power_users_validator` (spend) | `global_state_policy_id`, `power_users_linked_list_policy_id` | Row 1; the hash of `power_users.mint` (row 2) — this is the **power-users policy ID**. |
 | 4 | `denylist.mint` | `global_state_policy_id`, `init_input_out_ref`, `power_user_list_script_hash` | Row 1; a genesis UTxO reserved for this list; the hash of `power_users_validator` (row 3, **spend** — not row 2's policy id). |
 | 5 | `denylist.denylist_validator` (spend) | `global_state_policy_id`, `denylist_linked_list_policy_id`, `power_user_list_script_hash` | Row 1; the hash of `denylist.mint` (row 4) — this is the **denylist policy ID**; row 3's hash (for `UpdateDenylistEntry`'s `is_admin` check). Same positions as row 4's parameters. |
-| 6 | `minting_logic_script.minting_logic_validator` | `global_state_policy_id` | Row 1. Its only parameter. |
+| 6 | `minting_logic_script.minting_logic_validator` | `global_state_policy_id` | Row 1. Nothing else, so the issuance policy ID derived from this hash depends on the GlobalState policy ID alone (see below). |
 | 7 | `global_state_logic.global_state_logic` (withdraw) | `security_asset_name`, `issuance_policy_id`, `global_state_policy_id`, `power_user_list_script_hash`, `max_global_state_datum_bytes` | Operator choice; the **issuance policy ID**, i.e. the security token's policy ID, derived from row 6's hash (see below; **not** row 6's hash itself); row 1; the hash of `power_users_validator` (row 3); the datum-size cap (same value as row 1; a rotated-in logic may choose another). Its hash goes into GlobalState datum **field 0** at genesis. |
-| 8 | `transfer_logic_script.transfer_logic_validator` | `security_asset_name`, `global_state_policy_id`, `expected_issuance_policy_id`, `denylist_script_hash` | Operator choice; row 1; the issuance policy ID (as row 7); the hash of `denylist_validator` (row 5). |
-| 9 | `third_party_transfer_logic_script.third_party_transfer_logic_validator` | `security_asset_name`, `global_state_policy_id`, `expected_issuance_policy_id`, `denylist_script_hash`, `power_user_list_script_hash` | Operator choice; row 1; the issuance policy ID (as row 7); row 5's hash; row 3's hash. (The power-users policy id is read from the GlobalState datum at run time, not compiled in.) |
-| 10 | `minting_authority.minting_authority_validator` | `security_asset_name`, `global_state_policy_id`, `registry_policy_id`, `minting_logic_script_credential_hash`, `expected_issuance_policy_id`, `denylist_script_hash`, `power_user_list_script_hash`, `transfer_logic_script_hash`, `third_party_transfer_logic_script_hash` | Operator choice; row 1; Prerequisites; row 6's hash; the issuance policy ID (as row 7 — it **differs** from row 6's hash, see below); row 5's hash; row 3's hash; row 8's hash; row 9's hash (the scripts registry fields 3 and 4 must name). The power-users policy id is read from the GlobalState datum at run time, not compiled in. |
+| 8 | `transfer_logic_script.transfer_logic_validator` | `security_asset_name`, `global_state_policy_id`, `security_policy_id`, `denylist_script_hash` | Operator choice; row 1; the issuance policy ID (as row 7); the hash of `denylist_validator` (row 5). |
+| 9 | `third_party_transfer_logic_script.third_party_transfer_logic_validator` | `security_asset_name`, `global_state_policy_id`, `security_policy_id`, `denylist_script_hash`, `power_user_list_script_hash` | Operator choice; row 1; the issuance policy ID (as row 7); row 5's hash; row 3's hash. (The power-users policy id is read from the GlobalState datum at run time, not compiled in.) |
+| 10 | `minting_authority.minting_authority_validator` | `security_asset_name`, `global_state_policy_id`, `registry_policy_id`, `minting_logic_script_credential_hash`, `security_policy_id`, `denylist_script_hash`, `power_user_list_script_hash`, `transfer_logic_script_hash`, `third_party_transfer_logic_script_hash` | Operator choice; row 1; Prerequisites; row 6's hash; the issuance policy ID (as row 7 — it **differs** from row 6's hash, see below); row 5's hash; row 3's hash; row 8's hash; row 9's hash (the scripts registry fields 3 and 4 must name). The power-users policy id is read from the GlobalState datum at run time, not compiled in. |
 
 ### What the derived parameters must equal
 
@@ -448,27 +482,30 @@ exact order the blueprint (`plutus.json`) declares them; apply top to bottom.
   validator hashes (their policy ids).
 * `minting_logic_script_credential_hash` — the hash of `minting_logic_script.minting_logic_validator`
   (row 6), the permanent minting proxy.
-* `issuance_policy_id` (row 7) and `expected_issuance_policy_id` (rows 8–10) — the security token's
+* `issuance_policy_id` (row 7) and `security_policy_id` (rows 8–10) — the security token's
   policy ID, which is the base layer's issuance template applied to the proxy:
   `blake2b_224(0x03 ‖ prefix_cbor_hex ‖ proxy hash ‖ postfix_cbor_hex)`, with the template from
   Prerequisites. It is the key of this token's CIP-113 registry node, and it is **never** the proxy
-  hash itself. A deploy script should derive it this way and assert it differs from
-  `minting_logic_script_credential_hash`: the authority's registration fails closed on a wrong value,
-  but the GlobalState and transfer scripts cannot detect one — a transfer logic built with the wrong
-  policy ID finds no parties and skips the denylist and KYC checks for every transfer.
+  hash itself. No script refuses a wrong value — not the GlobalState logic, not the transfer
+  scripts, and not the minting authority, whose `Register` derives the policy from the registry
+  node rather than comparing it with this parameter — so the deploy script must derive the ID this
+  way and assert it, including that it differs from `minting_logic_script_credential_hash`. A
+  transfer logic built with the wrong policy ID finds no parties and skips the denylist and KYC
+  checks for every transfer.
 * `transfer_logic_script_hash` and `third_party_transfer_logic_script_hash` (row 10) — the hashes of
   rows 8 and 9, in that order. Registration and every `UpgradeRegistryNode` require registry fields 3
   and 4 to name exactly these (F08), and the two must differ. The pin is only as good as row 10's
   build: assert the order in the deploy script, and include "a seizure without a
   `can_force_transfer` operator is rejected" in the post-deploy smoke test.
-* `security_asset_name` — an operator choice, with one constraint: it must **not** carry a protected
-  CIP-67 prefix (see [CIP-68 metadata tokens](#cip-68-metadata-tokens)). Registration asserts this
-  and fails closed if it is violated, because a protected supply name would make every rule meant
-  for metadata fire on the supply itself. Follow the CIP-68 label convention and the constraint is
-  automatic: `(333)` or `(444)` for the security token, never `(100)`.
-* There is **no** `reference_asset_name` parameter. The CIP-68 token is identified by its label
-  prefix, not by an exact name, so nothing has to be configured per deployment and no two validators
-  can drift apart on it.
+* `security_asset_name` — an operator choice, and its first four bytes, compared byte for byte,
+  decide its class: `(222)`, `(333)` and `(444)` make it a CIP-68 name (see
+  [CIP-68 metadata tokens](#cip-68-metadata-tokens)); `(100)` is refused at registration, because the
+  supply would be its own metadata token; anything else makes it a plain name. A CIP-68 name needs at
+  least one byte after the label; a plain name must not be empty. Registration fails closed on a name
+  that breaks these rules. The name is built into rows 7–10 and must be byte-identical in all four.
+* There is still **no** parameter for the reference name. A CIP-68 token's reference name is `(100)`
+  followed by the same body, derived from `security_asset_name` by `cip68.reference_name` alone, so
+  nothing is configured: scripts built with byte-identical `security_asset_name` bytes cannot disagree on it.
 * `tx0` / `index0` / `init_input_out_ref` — one-shot genesis UTxOs, each spent once during
   initialisation (see [Initialising a token](#initialising-a-token)).
 
@@ -476,16 +513,16 @@ exact order the blueprint (`plutus.json`) declares them; apply top to bottom.
 
 Five validators are withdraw-0 scripts, i.e. they run as zero-value withdrawals rather than as the
 spending or minting script of any UTxO: `global_state_logic` (every GlobalState action — the proxy
-holding the NFT requires it), `transfer_logic_validator` (~6.8 KB, every transfer),
-`third_party_transfer_logic_validator` (~7.1 KB, every seizure), `minting_authority_validator`
-(~9.3 KB, every mint and burn) and the minting proxy `minting_logic_validator` (~1.0 KB, also every
+holding the NFT requires it), `transfer_logic_validator` (~7.2 KB, every transfer),
+`third_party_transfer_logic_validator` (~7.4 KB, every seizure), `minting_authority_validator`
+(~9.3 KB, every mint and burn) and the minting proxy `minting_logic_validator` (~0.8 KB, also every
 mint and burn — the proxy's withdraw-0 is what the CIP-113 registry node invokes, and it in turn
-requires the authority's). The four large ones (`global_state_logic` is ~5.9 KB and runs in every
+requires the authority's). The four large ones (`global_state_logic` is ~5.7 KB and runs in every
 mint and burn too) must be published once as reference-script UTxOs and
 supplied via reference inputs — not inlined (a transaction is capped at 16 KiB); the proxy is small
 enough to inline but is simplest to publish alongside them. The two list `mint` validators
-(~5.2–5.8 KB) must be treated the same way: the genesis transaction runs both, the GlobalState
-mint and `global_state_logic` — ≈ 19.3 KB of scripts against the 16 KiB limit — so publish them
+(~5.1–5.8 KB) must be treated the same way: the genesis transaction runs both, the GlobalState
+mint and `global_state_logic` — ≈ 19.0 KB of scripts against the 16 KiB limit — so publish them
 and `global_state_logic` before genesis (step 0 of [Initialising a token](#initialising-a-token)).
 
 All five withdraw-0 scripts need their **stake credential registered** on chain before the first
@@ -514,6 +551,33 @@ runs, so forgetting the proxy's registration makes every mint and burn fail from
 > them under it, with no compile-time copy, so a wrong field 3 hands those roles to whoever
 > controls that policy.
 
+### Deployment checklist
+
+1. **One name, byte-identical, in rows 7–10.** Each script polices only the `security_asset_name`
+   it was built with. Transfer or seizure scripts built with a name other than the authority's find
+   no parties, so the minted token goes unpoliced. A GlobalState logic built with another name
+   refuses every mint, which fails closed. Check by rebuilding each script from source and comparing
+   hashes. After deployment, smoke-test that a mint whose GlobalState output is not debited is
+   rejected, and that a transfer of the minted token without a denylist proof is rejected.
+2. **The name passes the registration rules** (see `security_asset_name` under
+   [What the derived parameters must equal](#what-the-derived-parameters-must-equal)). Check it
+   before genesis, because a refused name is found only at registration: by then datum field 0
+   already names a GlobalState logic built with the name.
+3. **A CIP-68 name.** Choose the metadata authority (see
+   [CIP-68 metadata tokens](#cip-68-metadata-tokens)), and keep the reference NFT's datum within the
+   base layer's `max_inline_datum_bytes`.
+4. **Before `LockUpgrades`.** Rebuild `global_state_logic` and `minting_authority` from source at
+   the audited commit with every parameter, and check their hashes against datum fields 0 and 4
+   respectively. The lock is enforced by the installed GlobalState logic itself, so after it the cap
+   is final only if that logic is a reviewed build of this repository (see
+   [Upgrading and locking the rules](#upgrading-and-locking-the-rules)). The lock makes the
+   installed authority permanent too: it cannot be rotated afterwards, and it enforces the
+   registry-upgrade lock itself.
+5. **The base-layer commit.** Record the CIP-113 base-layer commit the reliance was checked against
+   alongside the deployment parameters; this is recognition condition 4 (see
+   [CMTA recognition](#cmta-recognition)). On any CIP-113 version change, re-verify
+   [What is delegated to the CIP-113 base layer](#what-is-delegated-to-the-cip-113-base-layer) first.
+
 ### What is delegated to the CIP-113 base layer
 
 This deployment's own scripts do not re-check everything the CIP-113 base layer already enforces
@@ -521,6 +585,10 @@ independently. In plain terms, the base layer guarantees:
 
 * **Custody on mint.** `issuance_mint`'s `no_escape` rule keeps every newly minted token inside the
   programmable base and forces an inline stake credential onto every programmable-base output.
+* **Every mint or burn runs the token's minting logic.** `issuance_mint` requires the withdraw-0 of
+  the minting-logic credential it is parameterised by, on every mint and burn of its policy. This is
+  why a mint or burn of this token always runs the permanent minting proxy, which requires the
+  installed minting authority to run, so that authority's same-transaction debit applies.
 * **Custody on ordinary transfer.** The transfer path requires programmable-base outputs to hold, per
   policy, at least as much as programmable-base inputs (`tokens.contains(PLB outputs, PLB inputs)`),
   which — combined with ledger value conservation — keeps the token inside the base.
@@ -532,7 +600,8 @@ independently. In plain terms, the base layer guarantees:
   path.
 * **Registry integrity.** A registry node's key is cryptographically bound to its
   `minting_logic_script` field, and on an in-place upgrade the base layer itself keeps `key`, `next`
-  and `minting_logic_script` frozen.
+  and `minting_logic_script` frozen. Registry keys are unique: the base layer forbids a duplicate
+  key.
 * **No supply change on an upgrade.** `registry_spend` hoists
   `!mint_has_policy(self.mint, spent_node.key)` above its `when`, so it covers both the in-place
   update and the covering-node spend: a transaction that spends a registry node can never mint or
@@ -540,9 +609,18 @@ independently. In plain terms, the base layer guarantees:
 * **Which registry node gets to invoke a logic script.** The base layer authenticates the registry
   node it uses to dispatch to a logic script's withdraw-0.
 
-Because of the registry-dispatch point, this deployment's transfer, seizure and mint/burn logic no
-longer read or re-derive a registry node at all on those paths — the issuance policy each one polices
-is pinned at compile time instead. Because of the three custody points, none of the mint,
+The minting authority's `Register` and `UpgradeRegistryNode` derive the issuance policy ID from the
+registry node that names the proxy, and neither compares the ID with the authority's compile-time
+`security_policy_id`. That is sound only because the base layer derives a node's key from its field
+2 and keeps keys unique. The minting authority's supply debit applies only because every mint or burn
+runs the token's minting logic (above). These are relied on, not re-checked; re-verify them on any
+change of the CIP-113 version.
+
+Because of the registry-dispatch point, this deployment's transfer and seizure logic and the minting
+authority's `MintBurn` read no registry node on those paths — the issuance policy each one polices
+is pinned at compile time instead, in their `security_policy_id` parameter. The minting proxy reads
+none either; only `Register` and `UpgradeRegistryNode` read one, as described above. Because of
+the three custody points, none of the mint,
 ordinary-transfer or seizure paths re-check programmable-base custody themselves any more; all three
 rely on the base layer's own guarantees. And because of the no-supply-change point, the upgrade path
 no longer re-checks that a spend-and-update transaction mints or burns nothing; it relies on
@@ -587,44 +665,53 @@ Neither is a defect; both bite when composing transactions:
 
 A CIP-68 token is **metadata, not value**: it is exempt from the supply cap and from the denylist and
 KYC gates, because none of those questions mean anything about a metadata record. That exemption is
-only safe if such a token can never be moved *like* value — which is what the protected-prefix rules
-enforce.
+only safe if such a token can never be moved *like* value — which is what the rules below enforce.
 
-**The protected prefix.** `constants.cip68_protected_prefix` is the CIP-67 asset-name label that marks
-a token as metadata: `(100)` = `#"000643b0"`. A name under the issuance policy carrying it is
-*protected*. One prefix, not a list — `(100)` is the only CIP-68 label that denotes a metadata token,
-so the set is closed at one and the check is a single comparison rather than a fold.
+**Which tokens are CIP-68.** `security_asset_name` alone decides. Its first four bytes are compared
+byte for byte with the three CIP-68 user-token labels — `(222)` `#"000de140"`, `(333)` `#"0014df10"`
+and `(444)` `#"001bc280"`; a name that starts with one of them is a CIP-68 name, and anything else is
+a plain name (a `(100)` name is refused at registration). A CIP-68 token's metadata token is its
+reference NFT, named `(100)` `#"000643b0"` followed by the same body. `cip68.reference_name` is the
+only place that name is built, so every script derives the same one.
 
-The user-token labels — `(222)` `#"000de140"`, `(333)` `#"0014df10"`, `(444)` `#"001bc280"` — must
-never be protected. The security token carries one of them, and protecting it would refuse every
-seizure and every ordinary transfer. Registration asserts that `security_asset_name` does not carry
-the protected prefix, so that misconfiguration fails closed at the one moment it is still cheap to
-catch.
+**Registration.** For a CIP-68 name, `Register` must mint exactly its reference NFT, quantity 1,
+under the issuance policy; for a plain name it must mint nothing there. It never mints supply. A
+CIP-68 name cannot opt out of its metadata token, and the token is CIP-68 for life: the name is built
+into the scripts.
 
 Three rules follow, and together they are an invariant rather than a posture at genesis:
 
-1. **At most one metadata token, minted once.** Only `RegisterMint` may mint a protected name, at
-   quantity exactly one, and at most one protected name per transaction. Steady-state mint and burn
-   refuse protected names outright, so a metadata token cannot be re-minted after the token is live.
-2. **Its UTxO holds ADA plus that token, and nothing else.** Checked when it is minted, and re-checked
-   on **every later move** by the transfer logic — because the transfer path is how a metadata update
-   happens. The datum must decode as CIP-68's `Constr 0 [metadata, version, extra]`; the contents are
-   not interpreted. The owner is the output's inline stake credential and may be a separate metadata
-   authority from the GlobalState admin.
-3. **The seizure path may not touch it.** A forced transfer is refused outright if any input carries a
-   protected token. Seizure moves value; metadata is out of its reach, so a `can_force_transfer`
-   operator cannot carry the token's metadata authority away under cover of an ordinary seizure.
+1. **Minted once, at registration.** The reference NFT is minted only by `Register` and is never
+   re-minted or burned by this repository's minting authority: `MintBurn` mints and burns only `security_asset_name`, so a metadata token
+   cannot be re-minted after the token is live.
+2. **Its UTxO holds ADA plus that token, and nothing else.** The carrier holds ADA plus that one
+   token, has an inline owner stake credential, and carries a CIP-68
+   `Constr 0 [metadata, version, extra]` datum; the contents are not interpreted. The value and
+   datum shape is checked when the NFT is minted and on **every later move** through the transfer
+   logic — because the transfer path is how a metadata update happens; the inline stake credential
+   is checked when it is minted, and the base layer requires one on every programmable-base output.
+   The owner may be a separate metadata authority from the GlobalState admin. Only the exact
+   reference name is checked.
+3. **The seizure path may not touch it.** A forced transfer is refused outright if any input carries
+   the exact reference name. Seizure moves value; metadata is out of its reach, so a
+   `can_force_transfer` operator cannot carry the token's metadata authority away under cover of an
+   ordinary seizure.
 
 A metadata update is therefore the metadata authority spending that UTxO — an ordinary CIP-113
 owner-consent transfer — and re-outputting the token with a new inline datum, in the same shape.
 Updates pass through the transfer logic's gates, so they are blocked while transfers are paused and
 after deactivation.
 
+Only this token's exact reference name is protected. A replacement authority that mints another
+`(100)`-labelled name under the issuance policy creates a token that neither the transfer nor the
+seizure logic polices.
+
 Operational rules:
 
-* Follow the CIP-68 label convention: `(100)` for the metadata token, `(333)` or `(444)` for the
-  fungible security token. Rule 1 and the registration assertion both depend on it.
-* A deployment that wants no metadata token simply never mints one — there is nothing to configure.
+* Follow the CIP-68 label convention: `(333)` or `(444)` for a fungible security token, `(222)` for
+  an NFT; the metadata token's `(100)` name is derived, never chosen. A `(222)` issuer sets
+  `mintable_amount = 1` at genesis; nothing on chain requires it.
+* A deployment that wants no metadata token uses a plain name.
 * `RotateAdmin` does not rotate metadata custody. If the metadata authority should change, the current
   owner transfers the metadata token to the new authority with an ordinary owner transfer.
 * The metadata token cannot be burned. It is minted once and no branch burns it, so decommissioning
@@ -632,11 +719,22 @@ Operational rules:
 * On a base layer at `9db7e06` or later, its inline datum must fit `max_inline_datum_bytes` (see
   [What is delegated to the CIP-113 base layer](#what-is-delegated-to-the-cip-113-base-layer)).
 
+**Choosing the metadata authority.** The carrier's inline stake credential is the only key to the
+token's metadata. The transfer gates vet only holders of the security token, so the authority is not
+checked against the denylist or KYC, and denylisting it does not stop updates; a pause or
+deactivation does. This repository's seizure logic cannot recover the token, and it can never be
+burned: a lost credential freezes the metadata forever, and a compromised one lets its holder rewrite
+the metadata, though the shape rule still holds. Use a dedicated key or a native multisig under the
+issuer's control, recorded with the deployment parameters. A native-multisig owner is authorised by
+a withdrawal of its stake credential, so that stake credential must be registered before the first
+metadata update. Never use a script of this deployment: the transfer logic,
+above all, runs in every metadata update.
+
 ### Execution budget and transaction sizing
 
 Figures below are measured with `aiken bench` (`aiken bench -m "transfer_logic_script.{..}"
 --max-size 40`; the per-test execution units `aiken check` prints are the other source) against the
-current, cost-optimised implementation. The bench table was re-measured on 2026-11-02 under Aiken
+current, cost-optimised implementation. The bench table was re-measured on 2026-11-10 under Aiken
 v1.1.24 with the builtin-`Value` lookups; the per-party figures in the bullets predate that and are
 slightly high. They are for this deployment's scripts alone — the CIP-113
 base layer shares the same per-transaction budget, 10 000 M CPU / 14 M memory, and **memory is the
@@ -669,16 +767,45 @@ node; `seizure_cost_by_destination_count`: one seized input, `n` destinations, d
 
 | n | transfer mem | transfer CPU | seizure mem | seizure CPU |
 |---:|---:|---:|---:|---:|
-| 1 | 654,920 | 199,468,357 | 634,452 | 196,656,988 |
-| 4 | 1,250,219 | 395,682,454 | 882,558 | 281,887,204 |
-| 8 | 2,116,207 | 712,661,658 | 1,249,494 | 423,207,696 |
-| 16 | 4,126,391 | 1,543,165,858 | 2,122,470 | 804,121,576 |
+| 1 | 647,956 | 197,895,933 | 617,609 | 192,233,904 |
+| 4 | 1,223,356 | 389,491,923 | 862,715 | 276,984,120 |
+| 8 | 2,062,812 | 700,313,651 | 1,225,651 | 417,664,612 |
+| 16 | 4,019,932 | 1,518,502,899 | 2,090,627 | 797,298,492 |
 
 > **Conservative maxima, at 25% of the budget:** ordinary transfer ≤ 12 unique parties per side
 > denylist-only, ≤ 8 per side with attestation KYC on both sides; seizure ≤ 23 destinations
 > denylist-only, ≤ 15 with receiver KYC. The KYC figures add ≈ 76 K memory per attestation proof to
 > the benches above. Split larger distributions; keep parties that share a
 > covering node adjacent in the action lists — they follow input/output order.
+
+#### Mint and burn
+
+A mint or burn runs four of this deployment's scripts: the GlobalState proxy and logic
+(`MintSecurity`), the minting proxy and the minting authority. Only the authority's cost grows with
+the number of destinations. Measured with `aiken bench -m "minting_authority.{..}"` and
+`aiken bench -m "global_state_logic_tests.{..}"` (`--seed 42`). These benches build their
+transaction in the sampler, so fixture construction is excluded. They call the handlers with
+already-decoded arguments, so the on-chain entry point's redeemer decoding is not included (it grows
+with the number of destination actions), and the GlobalState figure assumes GlobalState is the first
+transaction input (each input before it adds about 11.5 K mem); the transfer and seizure
+benches above build theirs in the bench body, which adds the fixture's cost to their figures.
+
+Per mint or burn, whatever the destination count: the minting proxy 86,667 mem / 31,601,583 CPU,
+the GlobalState proxy and logic 271,623 mem / 117,393,487 CPU.
+
+| n | authority mem | authority CPU | whole mint mem | whole mint CPU |
+|---:|---:|---:|---:|---:|
+| 1 | 453,428 | 156,081,166 | 811,718 | 305,076,236 |
+| 4 | 733,199 | 261,585,403 | 1,091,489 | 410,580,473 |
+| 8 | 1,146,799 | 430,920,647 | 1,505,089 | 579,915,717 |
+| 16 | 2,113,103 | 867,864,031 | 2,471,393 | 1,016,859,101 |
+
+`mint_cost_by_destination_count` is one `MintBurn` to `n` distinct destinations, denylist-only,
+every destination citing the empty denylist root; "whole mint" adds the two constant figures above.
+A burn (`burn_cost`, no destinations): authority 251,595 mem / 87,910,950 CPU, whole burn 609,885
+mem / 236,906,020 CPU. Sixteen destinations use about 18% of the memory budget before redeemer
+decoding, somewhat more with it; the CIP-113 base layer's own scripts in the same transaction are
+not included.
 
 ## KYC proof formats
 
@@ -749,7 +876,7 @@ dependent transaction after the preceding output is available.
 0. **Prepare.** Register the stake credential of `global_state_logic`, applied with this
    deployment's parameters (its `publish` handler accepts `RegisterCredential`), and publish it
    and both list `mint` validators as reference-script UTxOs: the genesis transaction runs those
-   three and the GlobalState mint, ≈ 19.3 KB of scripts, which cannot all be inlined under the
+   three and the GlobalState mint, ≈ 19.0 KB of scripts, which cannot all be inlined under the
    16 KiB transaction limit. No transaction before genesis may spend one of the three reserved
    one-shot inputs, so exclude them from coin selection: they are baked into the mint parameters,
    and spending one means choosing a new input and re-applying every parameter that depends on it.
@@ -759,9 +886,9 @@ dependent transaction after the preceding output is available.
    same transaction. Put the GlobalState NFT at `global_state_proxy` (the mint validator enforces
    this) with an inline `GlobalStateDatum` in exactly this field order: the frozen core — 0 the hash of
    `global_state_logic`, 1 `deactivated = False`, 2 the admin credential, 3 the power-users list
-   policy ID, 4 the initial minting-authority hash — then the v1 tail: 5 `transfers_paused = False`,
-   6 the supply cap, 7 the denylist policy ID, 8 `security_info`, 9 the trusted entity keys,
-   10 `member_root_hash`, 11/12 the sender/receiver KYC flags, 13 the network ID and
+   policy ID, 4 the initial minting-authority hash, 5 `mintable_amount` (the supply cap) — then the
+   v1 tail: 6 `transfers_paused = False`, 7 the denylist policy ID, 8 `security_info`, 9 the trusted
+   entity keys, 10 `member_root_hash`, 11/12 the sender/receiver KYC flags, 13 the network ID and
    14 `upgrades_locked = False`. Put each root at its own list
    spend validator. Each list's `Init` rejects a GlobalState datum that does not name it. The
    GlobalState mint also requires the withdraw-0 of the logic field 0 names: add it with a
@@ -777,15 +904,20 @@ dependent transaction after the preceding output is available.
    An unregistered withdrawal fails at ledger phase 1. Each script's `publish` handler accepts
    `RegisterCredential` and rejects deregistration.
 3. **Assign power users** by inserting one node per operator, with the role flags needed for later
-   actions. A `can_mint` operator must exist before a registration that mints initial supply.
+   actions. A `can_mint` operator must exist before the first issuance (step 5).
 4. **Register in the CIP-113 registry.** Insert the node keyed by the issuance policy ID, naming
    the proxy, exactly the transfer and third-party transfer logic scripts the minting authority was
-   built with (rows 8 and 9), and the GlobalState policy. Use
-   `RegisterStructural` with no issuance-policy mint, or use `RegisterMint` if minting the initial
-   supply in this transaction.
-5. **Mint the initial supply**, unless it was minted with `RegisterMint` in step 4. `MintBurn`
-   spends GlobalState to decrement the cap and mints to destinations that pass the denylist and
-   enabled KYC gates.
+   built with (rows 8 and 9), and the GlobalState policy. The authority's `Register` needs the
+   admin's signature; GlobalState is a reference input, never spent, and must not be deactivated.
+   The insert runs the minting proxy and the authority. Under the issuance policy it mints nothing
+   for a plain name and exactly the reference NFT for a CIP-68 name (see
+   [CIP-68 metadata tokens](#cip-68-metadata-tokens)), and never supply.
+5. **Mint the initial supply.** First issuance is a separate `MintBurn` once the node exists;
+   this repository's `Register` refuses any supply, so a registry insert cannot carry one (the base
+   layer alone would allow a first mint there). It spends GlobalState, and the minting authority's
+   `MintBurn` debits the cap. This token's registry node is a reference input, because the base
+   layer's issuance logic needs a registry proof; the minting proxy does not read it. Destinations
+   must pass the denylist and the enabled KYC gates.
 
 For the exact transaction shapes and index fields, follow the
 [practical integration guide](documents/integration-guide.md#bootstrap-a-token).
@@ -798,9 +930,10 @@ denylist holders, and add or modify power users.
 Uniqueness derives from the genesis UTxO. `tx0`/`index0` are applied to `global_state_mint_validator`,
 which makes the GlobalState policy ID unique to that deployment; every other validator except the
 unparameterised `global_state_proxy` takes that policy ID (directly or transitively) as a parameter.
-The proxy's address is therefore shared by every deployment — locate GlobalState by its NFT. Together with `security_asset_name`, this means
+The proxy's address is therefore shared by every deployment — locate GlobalState by its NFT. This means
 each deployment compiles to different validator hashes — and therefore to a different security token
-policy ID — even for identical source code.
+policy ID — even for identical source code. The policy ID follows from the genesis UTxO, through the
+GlobalState policy ID the minting proxy takes, not from `security_asset_name`.
 
 ## How to retrieve information
 

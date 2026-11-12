@@ -7,14 +7,14 @@
 use aiken/builtin
 use aiken/collection/list
 use aiken/collection/pairs
+use aiken/fuzz
 use aiken/primitive/bytearray
 use aiken_design_patterns/linked_list.{Element, Node}
 use cardano/address.{Address, Credential, Script, VerificationKey}
 use cardano/assets.{Assets, from_asset, from_lovelace, merge, zero}
 use cardano/certificate.{RegisterCredential, UnregisterCredential}
 use cardano/transaction.{
-  InlineDatum, Input, Mint, NoDatum, Output, ScriptPurpose, Transaction,
-  Withdraw,
+  InlineDatum, Input, NoDatum, Output, ScriptPurpose, Transaction, Withdraw,
 }
 use constants
 use global_state_logic as v_logic
@@ -23,20 +23,20 @@ use minting_authority as v_authority
 use minting_logic_script as v_minting_proxy
 use tests/global_state_fixtures.{
   rotated, t_admin, t_data_of_raw_length, t_datum, t_datum_size, t_dl_ll_policy,
-  t_gs_logic, t_gs_policy, t_gs_script_hash, t_many_entities, t_max_datum_bytes,
-  t_metadata_len_at_cap, t_metadata_len_over_cap, t_minting_script,
-  t_new_gs_logic, t_out_ref, t_output, t_pu_ll_policy, t_reference_script,
-  t_root32, t_security_info_len_at_cap, t_security_info_len_over_cap, t_tx,
-  t_vkey_10,
+  t_gs_logic, t_gs_policy, t_gs_script_hash, t_input, t_many_entities,
+  t_max_datum_bytes, t_metadata_len_at_cap, t_metadata_len_over_cap,
+  t_minting_script, t_new_gs_logic, t_out_ref, t_output, t_pu_ll_policy,
+  t_reference_script, t_root32, t_security_info_len_at_cap,
+  t_security_info_len_over_cap, t_tx, t_vkey_10,
 }
 use types/global_state.{
-  AddTrustedEntity, DeactivateContract, GlobalStateDatum,
+  AddTrustedEntity, DeactivateContract, GlobalStateDatum, GlobalStateLocation,
   GlobalStateSpendRedeemer, GlobalStateSpent, LockUpgrades, MintSecurity,
   ModifySecurityInfo, PauseTransfers, RemoveTrustedEntity, RotateAdmin,
   RotateGlobalStateScript, RotateMintingScript, SetMintableAmount,
   SetRequiresReceiverKyc, SetRequiresSenderKyc, TrustedEntityMetadata,
   UpdateMemberRootHash, UpdateTrustedEntity, gs_core_field_count,
-  idx_deactivated, idx_mintable_amount, set_security_info,
+  idx_deactivated, idx_mintable_amount, idx_transfers_paused, set_security_info,
 }
 use types/minting_authority.{MintBurn}
 use types/power_users.{PowerUser}
@@ -511,8 +511,9 @@ test deactivated_input_rejects_modify_security_info() fail {
 // ── Post-deactivation: burns allowed, mints rejected ────────────────────────
 
 // A MintSecurity transaction: `mint_delta` of the security token (negative =
-// burn, positive = mint) plus the issuance-policy Mint redeemer the branch
-// requires, on top of the shared GS input/output.
+// burn, positive = mint) on top of the shared GS input/output. Enough for the
+// GlobalState half alone; `mint_security_composite` adds what the minting
+// proxy and the minting authority need.
 fn t_mintsecurity_tx(
   input_datum: GlobalStateDatum,
   output_datum: GlobalStateDatum,
@@ -522,15 +523,79 @@ fn t_mintsecurity_tx(
   Transaction {
     ..t_tx(input_datum, output_datum, signatories),
     mint: from_asset(t_issuance_policy, t_sec_name, mint_delta),
-    redeemers: [Pair(Mint(t_issuance_policy), builtin.constr_data(0, []))],
   }
 }
 
 fn mintsecurity_redeemer() -> GlobalStateSpendRedeemer {
   GlobalStateSpendRedeemer {
     global_state_output_index: 0,
-    action: MintSecurity { issuance_policy_redeemer_index: 0 },
+    action: MintSecurity,
   }
+}
+
+// The same MintSecurity transaction as the ledger runs it end to end, with the
+// frozen minting proxy and the minting authority run on it too. Both datums
+// name `t_pu_ll_policy` as the power-user list and `t_authority_hash` as the
+// minting authority. A `can_mint` and `can_burn` operator, keyed at a hash no
+// script in this transaction has, sits at reference input 0 (this token's
+// registry node follows it) and signs; the authority's withdrawal is added.
+// No output carries the minted units, so no destination is vetted.
+// Returns (GlobalState proxy and logic, minting proxy, minting authority).
+// The GlobalState logic and the minting proxy do not count; the minting
+// authority's debit is what decides how much.
+fn mint_security_composite(
+  input_datum: GlobalStateDatum,
+  output_datum: GlobalStateDatum,
+  mint_delta: Int,
+) -> (Bool, Bool, Bool) {
+  let wired = fn(d: GlobalStateDatum) {
+    GlobalStateDatum {
+      ..d,
+      power_user_linked_list_policy_id: t_pu_ll_policy,
+      minting_script_credential_hash: t_authority_hash,
+    }
+  }
+  let input_datum = wired(input_datum)
+  let output_datum = wired(output_datum)
+  let tx = Transaction {
+    ..t_mintsecurity_tx(
+      input_datum,
+      output_datum,
+      mint_delta,
+      [t_admin, t_minter_hash],
+    ),
+    reference_inputs: [t_supply_operator_node(), t_registry_node_ref_input()],
+    withdrawals: [
+      Pair(Script(t_minting_script), 0),
+      Pair(Script(t_authority_hash), 0),
+    ],
+  }
+  let gs_ok = run_spend(input_datum, mintsecurity_redeemer(), tx)
+  let proxy_ok = run_minting_proxy(
+    GlobalStateSpent { global_state_input_index: 0 },
+    tx,
+  )
+  let authority_ok = v_authority.minting_authority_validator.withdraw(
+    t_sec_name,
+    t_gs_policy,
+    t_registry_policy,
+    t_minting_proxy_hash,
+    t_issuance_policy,
+    #"d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0",
+    t_pu_script_hash,
+    #"e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1",
+    #"e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2",
+    MintBurn {
+      global_state_input_index: 0,
+      global_state_output_index: 0,
+      power_user_node_ref_input_index: 0,
+      minted_amount: mint_delta,
+      destination_actions: [],
+    },
+    Script(t_authority_hash),
+    tx,
+  )
+  (gs_ok, proxy_ok, authority_ok)
 }
 
 // ── Security-token guard — shared fixtures ──────────────────────────────────
@@ -610,7 +675,7 @@ fn with_security_token_minted_into_an_output(tx: Transaction) -> Transaction {
   }
 }
 
-/// The supply-cap branch must change exactly `mintable_amount` and nothing
+/// The MintSecurity branch must change exactly `mintable_amount` and nothing
 /// else. It is the highest-value branch to pin: a mint is the one routine
 /// operation that legitimately rewrites the datum, so if it could carry a
 /// second edit it would be the natural vehicle for one — rotating the admin,
@@ -633,7 +698,8 @@ test mint_security_cannot_smuggle_another_field_change() {
   )
 }
 
-/// The control: the same transaction WITHOUT the smuggled edit is accepted.
+/// The control: the same transaction WITHOUT the smuggled edit is accepted,
+/// by the GlobalState half, the minting proxy and the minting authority.
 /// Without this, the test above would pass even if the whole branch were
 /// broken.
 test mint_security_accepts_a_clean_cap_decrement() {
@@ -643,25 +709,87 @@ test mint_security_accepts_a_clean_cap_decrement() {
     ..input_datum,
     mintable_amount: input_datum.mintable_amount - mint,
   }
-  run_spend(
+  let (gs_ok, proxy_ok, authority_ok) = mint_security_composite(
     input_datum,
-    mintsecurity_redeemer(),
-    t_mintsecurity_tx(input_datum, output_datum, mint, [t_admin]),
+    output_datum,
+    mint,
   )
+  gs_ok && proxy_ok && authority_ok
 }
 
 /// The cap must actually be decremented. Here the datum is reproduced
 /// unchanged while 100 tokens are issued, which would leave headroom for the
-/// full original cap on top of live supply — the simplest form of the
-/// inflation this branch exists to prevent.
-test mint_security_rejects_a_cap_that_does_not_decrement() {
+/// full original cap on top of live supply. The GlobalState logic accepts it
+/// (only field 5 may change, and it is still an Int) and the minting proxy
+/// checks no amount; the minting authority's debit refuses it, so the
+/// transaction as a whole is refused.
+test a_cap_that_does_not_decrement_is_refused_by_the_minting_authority() {
   let input_datum = t_datum(False, False)
   let output_datum = input_datum
-  !run_spend(
+  let (gs_ok, proxy_ok, authority_ok) = mint_security_composite(
+    input_datum,
+    output_datum,
+    100,
+  )
+  gs_ok && proxy_ok && !authority_ok
+}
+
+/// The burn direction: 100 are burned and the datum is reproduced unchanged,
+/// so the counter is not credited. The GlobalState logic and the minting proxy
+/// accept; the minting authority's debit refuses.
+test a_burn_that_does_not_credit_is_refused_by_the_minting_authority() {
+  let input_datum = t_datum(False, False)
+  let output_datum = input_datum
+  let (gs_ok, proxy_ok, authority_ok) = mint_security_composite(
+    input_datum,
+    output_datum,
+    -100,
+  )
+  gs_ok && proxy_ok && !authority_ok
+}
+
+/// The GlobalState logic does not count. Here 100 are minted while the
+/// counter is RAISED by 5, and the GlobalState half alone accepts: how much
+/// the counter moves is the minting authority's same-transaction debit, which
+/// refuses this transaction (see
+/// `a_cap_that_does_not_decrement_is_refused_by_the_minting_authority`).
+test mint_security_leaves_the_amount_to_the_minting_authority() {
+  let input_datum = t_datum(False, False)
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    mintable_amount: input_datum.mintable_amount + 5,
+  }
+  run_spend(
     input_datum,
     mintsecurity_redeemer(),
     t_mintsecurity_tx(input_datum, output_datum, 100, [t_admin]),
   )
+}
+
+/// Field 5 must stay an Int: the output's `mintable_amount` as bytes, with 100
+/// minted, TRAPS when MintSecurity reads it (`get_mintable_amount`). Paired
+/// with `mint_security_leaves_the_amount_to_the_minting_authority`, the same
+/// transaction with an Int there. Trap-only: `|| True` makes a False return
+/// pass the body.
+test mint_security_rejects_a_retyped_mintable_amount() fail {
+  let input_datum = t_datum(False, False)
+  let input_data: Data = input_datum
+  let retyped = builtin.constr_data(
+    0,
+    utils.replace_data_field(
+      builtin.unconstr_fields(input_data),
+      idx_mintable_amount,
+      builtin.b_data(#"00"),
+    ),
+  )
+  run_spend(
+    input_datum,
+    mintsecurity_redeemer(),
+    with_raw_output(
+      t_mintsecurity_tx(input_datum, input_datum, 100, [t_admin]),
+      retyped,
+    ),
+  ) || True
 }
 
 test deactivated_input_rejects_burn() fail {
@@ -706,11 +834,12 @@ test live_contract_still_allows_mint() {
     ..input_datum,
     mintable_amount: input_datum.mintable_amount - mint,
   }
-  run_spend(
+  let (gs_ok, proxy_ok, authority_ok) = mint_security_composite(
     input_datum,
-    mintsecurity_redeemer(),
-    t_mintsecurity_tx(input_datum, output_datum, mint, [t_admin]),
+    output_datum,
+    mint,
   )
+  gs_ok && proxy_ok && authority_ok
 }
 
 /// MintSecurity is deliberately EXEMPT from the security-token guard — it
@@ -2075,8 +2204,9 @@ test set_mintable_amount_succeeds_when_security_token_absent_from_tx() {
 }
 
 test set_mintable_amount_rejects_concurrent_security_mint() {
-  // Load-bearing here: without it a mint could ride along on a cap write
-  // without being decremented from the cap.
+  // Load-bearing here: without it a mint could ride along on a cap write,
+  // making one absolute value both a cap amendment and the minting
+  // authority's debit.
   let input_datum = t_datum(False, False)
   !run_spend(
     input_datum,
@@ -2163,9 +2293,12 @@ test deactivated_input_rejects_set_mintable_amount() fail {
 
 // ── Burns after SetMintableAmount — headroom semantics ───────────────────────
 //
-// The GlobalState validator never sees circulating supply, only headroom: a
-// MintSecurity spend writes `mintable_amount - minted`, and a burn mints a
-// NEGATIVE quantity. So a cap of 0, or one set below what is already in
+// Supply is never seen on chain, only headroom: the minting authority
+// requires the GlobalState output to carry `mintable_amount - minted`, never
+// below zero, and a burn mints a NEGATIVE quantity. The GlobalState logic
+// accepts each of these (it checks only that field 5 alone changed) and the
+// minting proxy checks no amount; the authority decides. So a cap of 0, or
+// one set below what is already in
 // circulation (indistinguishable on chain), never blocks a burn — and every
 // burn hands its quantity back as headroom that can be minted again.
 
@@ -2175,11 +2308,12 @@ test burn_succeeds_when_mintable_amount_is_zero() {
     mintable_amount: 0,
   }
   let output_datum = GlobalStateDatum { ..input_datum, mintable_amount: 100 }
-  run_spend(
+  let (gs_ok, proxy_ok, authority_ok) = mint_security_composite(
     input_datum,
-    mintsecurity_redeemer(),
-    t_mintsecurity_tx(input_datum, output_datum, -100, [t_admin]),
+    output_datum,
+    -100,
   )
+  gs_ok && proxy_ok && authority_ok
 }
 
 test mint_rejected_when_mintable_amount_is_zero() {
@@ -2188,11 +2322,12 @@ test mint_rejected_when_mintable_amount_is_zero() {
     mintable_amount: 0,
   }
   let output_datum = GlobalStateDatum { ..input_datum, mintable_amount: -1 }
-  !run_spend(
+  let (gs_ok, proxy_ok, authority_ok) = mint_security_composite(
     input_datum,
-    mintsecurity_redeemer(),
-    t_mintsecurity_tx(input_datum, output_datum, 1, [t_admin]),
+    output_datum,
+    1,
   )
+  gs_ok && proxy_ok && !authority_ok
 }
 
 // After a burn of 100 at a zero cap, exactly the burned 100 may be re-minted…
@@ -2202,11 +2337,12 @@ test mint_up_to_burned_headroom_succeeds_after_zero_cap() {
     mintable_amount: 100,
   }
   let output_datum = GlobalStateDatum { ..input_datum, mintable_amount: 0 }
-  run_spend(
+  let (gs_ok, proxy_ok, authority_ok) = mint_security_composite(
     input_datum,
-    mintsecurity_redeemer(),
-    t_mintsecurity_tx(input_datum, output_datum, 100, [t_admin]),
+    output_datum,
+    100,
   )
+  gs_ok && proxy_ok && authority_ok
 }
 
 // …and not one unit more.
@@ -2216,11 +2352,12 @@ test mint_beyond_burned_headroom_rejected_after_zero_cap() {
     mintable_amount: 100,
   }
   let output_datum = GlobalStateDatum { ..input_datum, mintable_amount: -1 }
-  !run_spend(
+  let (gs_ok, proxy_ok, authority_ok) = mint_security_composite(
     input_datum,
-    mintsecurity_redeemer(),
-    t_mintsecurity_tx(input_datum, output_datum, 101, [t_admin]),
+    output_datum,
+    101,
   )
+  gs_ok && proxy_ok && !authority_ok
 }
 
 // ── global_state_logic — installed-logic, admin and credential guards ────────
@@ -2473,7 +2610,7 @@ test rotate_gs_logic_fails_when_the_new_logic_is_merely_signed_for() {
 test rotate_to_the_current_logic_fails_with_admin() {
   let output_datum = GlobalStateDatum {
     ..t_datum(False, False),
-    mintable_amount: 999_999_999,
+    network_id: 999,
   }
   !outgoing(t_gs_logic, t_rotate_tx(output_datum))
 }
@@ -2484,7 +2621,7 @@ test incoming_side_rejects_self_rotation() {
     ..t_datum(False, False),
     admin_credential_hash: t_new_admin,
     upgrades_locked: False,
-    mintable_amount: 999_999_999,
+    network_id: 999,
   }
   !outgoing(
     t_gs_logic,
@@ -2538,9 +2675,7 @@ test rotate_gs_logic_succeeds_with_the_consistent_fixture() {
 test rotate_to_the_current_logic_fails_with_its_own_redeemer() {
   let r: Data = rotate_gs_redeemer(t_gs_logic)
   let tx = Transaction {
-    ..t_rotate_tx(
-      GlobalStateDatum { ..t_datum(False, False), mintable_amount: 999_999_999 },
-    ),
+    ..t_rotate_tx(GlobalStateDatum { ..t_datum(False, False), network_id: 999 }),
     withdrawals: [Pair(Script(t_gs_logic), 0)],
     redeemers: [Pair(Withdraw(Script(t_gs_logic)), r)],
   }
@@ -2621,11 +2756,18 @@ test rotate_gs_logic_fails_when_the_minting_script_changes() {
   )
 }
 
+test rotate_gs_logic_fails_when_the_mintable_amount_changes() {
+  !outgoing(
+    t_new_gs_logic,
+    t_rotate_tx(GlobalStateDatum { ..t_rotated_datum(), mintable_amount: 7 }),
+  )
+}
+
 // A retyped known field would make the frozen readers trap for good.
 test rotate_gs_logic_fails_when_the_output_is_not_readable() fail {
   // Frozen core (2026-10-15): the tail is the successor's to retype, so the
   // unreadable output is now one whose CORE cannot be read — here constructor
-  // 1, which only the outgoing core decode catches (fields 1–4 are pinned by
+  // 1, which only the outgoing core decode catches (fields 1–5 are pinned by
   // `unchanged` anyway). The proxy would trap on it forever.
   let raw: Data = t_rotated_datum()
   let fields = builtin.unconstr_fields(raw)
@@ -2670,7 +2812,7 @@ test rotate_gs_logic_fails_with_a_reference_script_on_the_output() {
 test rotate_gs_logic_outgoing_allows_another_field_to_change() {
   outgoing(
     t_new_gs_logic,
-    t_rotate_tx(GlobalStateDatum { ..t_rotated_datum(), mintable_amount: 7 }),
+    t_rotate_tx(GlobalStateDatum { ..t_rotated_datum(), network_id: 7 }),
   )
 }
 
@@ -3101,7 +3243,7 @@ test datum_cap_counts_appended_fields() {
   }
 }
 
-// A burn through MintSecurity raises `mintable_amount` (0 -> 100 takes one
+// A burn's MintSecurity write raises `mintable_amount` (0 -> 100 takes one
 // more CBOR byte), so it is capped like every other write.
 fn burn_case(cap_offset: Int) -> Bool {
   let input_datum = GlobalStateDatum {
@@ -3148,7 +3290,7 @@ fn rotated_core_with_tail(tail: List<Data>) -> Data {
   )
 }
 
-// A successor may give the datum a different shape after the core — here 10
+// A successor may give the datum a different shape after the core — here 11
 // fields, the tail retyped — and the outgoing logic hands over.
 test rotate_gs_logic_outgoing_allows_a_reshaped_tail() {
   outgoing(
@@ -3168,12 +3310,12 @@ test rotate_gs_logic_outgoing_allows_a_reshaped_tail() {
   )
 }
 
-// A v1 tail field retyped (mintable_amount as bytes) is the successor's call.
+// A v1 tail field retyped (transfers_paused as bytes) is the successor's call.
 test rotate_gs_logic_outgoing_allows_a_retyped_tail_field() {
   let raw: Data = t_rotated_datum()
   let fields = utils.replace_data_field(
     builtin.unconstr_fields(raw),
-    idx_mintable_amount,
+    idx_transfers_paused,
     builtin.b_data(#"00"),
   )
   outgoing(
@@ -3195,7 +3337,7 @@ test rotate_gs_logic_outgoing_allows_the_core_alone() {
 }
 
 // A core field retyped would make the permanent readers trap for good. (Fields
-// 1–4 are also pinned by `unchanged`, so this is not evidence for the decoder
+// 1–5 are also pinned by `unchanged`, so this is not evidence for the decoder
 // — `rotate_gs_logic_fails_when_the_output_is_not_readable` is.)
 test rotate_gs_logic_fails_when_a_core_field_is_retyped() fail {
   let raw: Data = t_rotated_datum()
@@ -3390,21 +3532,13 @@ test pause_cannot_smuggle_another_field_change() {
   )
 }
 
-/// A stranger spends GlobalState under MintSecurity with nothing minted and no
-/// signature (e.g. to churn the UTxO or take its surplus ADA). Only the
-/// issuance-mint redeemer check refuses it.
-test mint_security_rejects_a_spend_without_an_issuance_mint() fail {
+/// A stranger spends GlobalState under MintSecurity with nothing minted, the
+/// datum unchanged and no signature (e.g. to churn the UTxO or take its
+/// surplus ADA). Only the non-zero-mint conjunct, `(security_delta != 0)?`,
+/// refuses it (returns False).
+test mint_security_requires_a_security_mint() {
   let d = t_datum(False, False)
-  run_spend(
-    d,
-    mintsecurity_redeemer(),
-    Transaction {
-      ..t_tx(d, d, []),
-      redeemers: [
-        Pair(Withdraw(Script(t_gs_logic)), builtin.constr_data(0, [])),
-      ],
-    },
-  )
+  !run_spend(d, mintsecurity_redeemer(), t_tx(d, d, []))
 }
 
 // ── The admin and the minting authority stay two credentials ─────────────────
@@ -3463,12 +3597,22 @@ const t_minter_hash: ByteArray =
 
 /// A `can_mint` node keyed at `t_minter_hash`, in the list the pause datum names.
 fn t_minter_node() -> Input {
+  t_minter_node_with(False)
+}
+
+/// `t_minter_node` that may also burn: the operator of
+/// `mint_security_composite`.
+fn t_supply_operator_node() -> Input {
+  t_minter_node_with(True)
+}
+
+fn t_minter_node_with(can_burn: Bool) -> Input {
   let base = t_pu_node_at(Script(t_pu_script_hash))
   let pu = PowerUser {
     credential_hash: t_minter_hash,
     is_admin: False,
     can_mint: True,
-    can_burn: False,
+    can_burn,
     can_pause: False,
     can_force_transfer: False,
   }
@@ -3493,6 +3637,81 @@ fn t_minter_node() -> Input {
   }
 }
 
+/// The CIP-113 registry policy: the literal the composites pass to the
+/// authority as `registry_policy_id`.
+const t_registry_policy: ByteArray =
+  #"c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0"
+
+/// Faithful mirror of the CIP-113 registry node layout. Field order is
+/// load-bearing: minting=2, transfer=3, third-party=4, unfracking=5, gs_cs=6.
+type RegNode {
+  key: ByteArray,
+  next: ByteArray,
+  minting_logic_script: Credential,
+  transfer_logic_script: Credential,
+  third_party_transfer_logic_script: Credential,
+  unfracking_logic_script: Credential,
+  global_state_cs: ByteArray,
+}
+
+/// This token's registry node: keyed by its issuance policy id, naming the
+/// minting proxy at field 2.
+fn t_registry_node() -> RegNode {
+  RegNode {
+    key: t_issuance_policy,
+    next: #"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    minting_logic_script: Script(t_minting_proxy_hash),
+    transfer_logic_script: Script(
+      #"f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2",
+    ),
+    third_party_transfer_logic_script: Script(
+      #"f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3",
+    ),
+    unfracking_logic_script: VerificationKey(#""),
+    global_state_cs: t_gs_policy,
+  }
+}
+
+/// A node UTxO as CIP-113 produces it: at the registry address, holding ADA
+/// and exactly one registry NFT named by the node's key, with an inline datum.
+fn t_registry_node_output_of(node: RegNode) -> Output {
+  Output {
+    address: Address {
+      payment_credential: Script(t_registry_policy),
+      stake_credential: None,
+    },
+    value: merge(
+      from_lovelace(2_000_000),
+      from_asset(t_registry_policy, node.key, 1),
+    ),
+    datum: InlineDatum(node),
+    reference_script: None,
+  }
+}
+
+fn t_registry_node_output() -> Output {
+  t_registry_node_output_of(t_registry_node())
+}
+
+/// This token's node as a transaction input, at an out ref no other fixture
+/// uses.
+fn t_registry_node_ref_input() -> Input {
+  Input { output_reference: t_out_ref(7), output: t_registry_node_output() }
+}
+
+/// The minting proxy as this deployment builds it.
+fn run_minting_proxy(
+  global_state_location: GlobalStateLocation,
+  tx: Transaction,
+) -> Bool {
+  v_minting_proxy.minting_logic_validator.withdraw(
+    t_gs_policy,
+    global_state_location,
+    Script(t_minting_proxy_hash),
+    tx,
+  )
+}
+
 test zero_amount_mint_burn_cannot_carry_an_admin_rotation() {
   let input_datum = GlobalStateDatum {
     ..t_pause_datum(False),
@@ -3508,7 +3727,7 @@ test zero_amount_mint_burn_cannot_carry_an_admin_rotation() {
   let redeemer_data: Data = redeemer
   let tx = Transaction {
     ..t_tx(input_datum, output_datum, [t_minter_hash]),
-    reference_inputs: [t_minter_node()],
+    reference_inputs: [t_minter_node(), t_registry_node_ref_input()],
     withdrawals: [
       Pair(Script(t_gs_logic), 0),
       Pair(Script(t_minting_proxy_hash), 0),
@@ -3521,16 +3740,14 @@ test zero_amount_mint_burn_cannot_carry_an_admin_rotation() {
     t_out_ref(0),
     tx,
   ) && run_logic(t_gs_logic, redeemer, tx)
-  let proxy_ok = v_minting_proxy.minting_logic_validator.withdraw(
-    t_gs_policy,
+  let proxy_ok = run_minting_proxy(
     GlobalStateSpent { global_state_input_index: 0 },
-    Script(t_minting_proxy_hash),
     tx,
   )
   let authority_ok = v_authority.minting_authority_validator.withdraw(
     t_sec_name,
     t_gs_policy,
-    #"c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+    t_registry_policy,
     t_minting_proxy_hash,
     t_issuance_policy,
     #"d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0",
@@ -3539,6 +3756,7 @@ test zero_amount_mint_burn_cannot_carry_an_admin_rotation() {
     #"e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2",
     MintBurn {
       global_state_input_index: 0,
+      global_state_output_index: 0,
       power_user_node_ref_input_index: 0,
       minted_amount: 0,
       destination_actions: [],
@@ -3564,7 +3782,7 @@ test zero_amount_mint_burn_composite_control_global_state_and_proxy_pass() {
   let redeemer = rotate_admin_redeemer(t_minter_hash)
   let tx = Transaction {
     ..t_tx(input_datum, output_datum, [t_minter_hash]),
-    reference_inputs: [t_minter_node()],
+    reference_inputs: [t_minter_node(), t_registry_node_ref_input()],
     withdrawals: [
       Pair(Script(t_gs_logic), 0),
       Pair(Script(t_minting_proxy_hash), 0),
@@ -3573,11 +3791,195 @@ test zero_amount_mint_burn_composite_control_global_state_and_proxy_pass() {
   }
   and {
     run_logic(t_gs_logic, redeemer, tx),
-    v_minting_proxy.minting_logic_validator.withdraw(
-      t_gs_policy,
-      GlobalStateSpent { global_state_input_index: 0 },
-      Script(t_minting_proxy_hash),
-      tx,
-    ),
+    run_minting_proxy(GlobalStateSpent { global_state_input_index: 0 }, tx),
   }
+}
+
+/// MintSecurity with NOTHING minted cannot move the counter, even after
+/// `LockUpgrades` and even with a `can_mint` operator running the authority
+/// and the minting proxy beside it. Here the counter is raised by 1_000_000
+/// with no mint at all. The minting proxy checks no amount, so it passes; the
+/// honest GlobalState logic (its non-zero-mint conjunct) and the honest
+/// authority (its zero-amount refusal) each refuse on their own.
+test zero_mint_mint_security_cannot_move_the_counter() {
+  let input_datum = GlobalStateDatum {
+    ..t_pause_datum(False),
+    upgrades_locked: True,
+    minting_script_credential_hash: t_authority_hash,
+  }
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    mintable_amount: input_datum.mintable_amount + 1_000_000,
+  }
+  let redeemer = mintsecurity_redeemer()
+  let input_data: Data = input_datum
+  let redeemer_data: Data = redeemer
+  let tx = Transaction {
+    ..t_tx(input_datum, output_datum, [t_minter_hash]),
+    reference_inputs: [t_minter_node(), t_registry_node_ref_input()],
+    withdrawals: [
+      Pair(Script(t_gs_logic), 0),
+      Pair(Script(t_minting_proxy_hash), 0),
+      Pair(Script(t_authority_hash), 0),
+    ],
+  }
+  let gs_ok = v_proxy.global_state_proxy.spend(
+    Some(input_data),
+    redeemer_data,
+    t_out_ref(0),
+    tx,
+  ) && run_logic(t_gs_logic, redeemer, tx)
+  let authority_ok = v_authority.minting_authority_validator.withdraw(
+    t_sec_name,
+    t_gs_policy,
+    t_registry_policy,
+    t_minting_proxy_hash,
+    t_issuance_policy,
+    #"d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0",
+    t_pu_script_hash,
+    #"e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1",
+    #"e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2",
+    MintBurn {
+      global_state_input_index: 0,
+      global_state_output_index: 0,
+      power_user_node_ref_input_index: 0,
+      minted_amount: 0,
+      destination_actions: [],
+    },
+    Script(t_authority_hash),
+    tx,
+  )
+  let proxy_ok = run_minting_proxy(
+    GlobalStateSpent { global_state_input_index: 0 },
+    tx,
+  )
+  !gs_ok && !authority_ok && proxy_ok
+}
+
+/// A registry-node upgrade and an admin GlobalState action in one transaction.
+/// GlobalState is spent for `LockUpgrades` and this token's node is spent for
+/// a CIP-113 in-place update (a continuing node with a re-pointed transfer
+/// logic). Nothing of the security token is minted, and the proxy checks no
+/// amount, so both halves pass.
+test registry_upgrade_and_an_admin_action_share_one_transaction() {
+  let input_datum = t_datum(False, False)
+  let tx = Transaction {
+    ..t_tx(input_datum, t_datum_locked(), [t_admin]),
+    inputs: [t_input(input_datum), t_registry_node_ref_input()],
+    outputs: [
+      t_output(t_datum_locked()),
+      t_registry_node_output_of(
+        RegNode {
+          ..t_registry_node(),
+          transfer_logic_script: Script(
+            #"f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4",
+          ),
+        },
+      ),
+    ],
+    withdrawals: [
+      Pair(Script(t_minting_proxy_hash), 0),
+      Pair(Script(t_minting_script), 0),
+    ],
+  }
+  and {
+    run_spend(input_datum, lock_upgrades_redeemer(), tx),
+    run_minting_proxy(GlobalStateSpent { global_state_input_index: 0 }, tx),
+  }
+}
+
+// ── Benchmarks — the GlobalState and minting-proxy cost of a mint or burn ────
+//
+// `aiken bench -m "global_state_logic_tests.{..}"`. The transaction a security
+// mint (or burn) of `delta` runs: GlobalState spent at input 0 and continued
+// at output 0 with `mintable_amount - delta`, this token's registry node at
+// reference input 0, and the withdrawals of the GlobalState logic and of the
+// minting authority. Built in the SAMPLER, so the figures are the scripts'
+// runs alone. Neither cost grows with the size.
+
+type SecuritySupplyCase {
+  logic: ByteArray,
+  input_data: Data,
+  redeemer: GlobalStateSpendRedeemer,
+  redeemer_data: Data,
+  tx: Transaction,
+}
+
+fn t_bench_supply_case(delta: Int) -> SecuritySupplyCase {
+  let input_datum = t_datum(False, False)
+  let input_data: Data = input_datum
+  let redeemer = mintsecurity_redeemer()
+  let redeemer_data: Data = redeemer
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    mintable_amount: input_datum.mintable_amount - delta,
+  }
+  let tx = t_mintsecurity_tx(input_datum, output_datum, delta, [t_admin])
+  SecuritySupplyCase {
+    logic: input_datum.global_state_script_credential_hash,
+    input_data,
+    redeemer,
+    redeemer_data,
+    tx: Transaction {
+      ..tx,
+      inputs: list.map(
+        tx.inputs,
+        fn(input) {
+          if input.output_reference == t_out_ref(0) {
+            Input {
+              ..input,
+              output: Output { ..input.output, datum: InlineDatum(input_data) },
+            }
+          } else {
+            input
+          }
+        },
+      ),
+      reference_inputs: [t_registry_node_ref_input()],
+      withdrawals: [
+        Pair(Script(input_datum.global_state_script_credential_hash), 0),
+        Pair(Script(t_minting_script), 0),
+      ],
+    },
+  }
+}
+
+fn a_security_mint(_size: Int) -> Fuzzer<SecuritySupplyCase> {
+  fuzz.constant(t_bench_supply_case(100))
+}
+
+fn a_security_burn(_size: Int) -> Fuzzer<SecuritySupplyCase> {
+  fuzz.constant(t_bench_supply_case(-100))
+}
+
+fn run_global_state_on(case: SecuritySupplyCase) -> Bool {
+  and {
+    v_proxy.global_state_proxy.spend(
+      Some(case.input_data),
+      case.redeemer_data,
+      t_out_ref(0),
+      case.tx,
+    ),
+    run_logic(case.logic, case.redeemer, case.tx),
+  }
+}
+
+fn run_minting_proxy_on(case: SecuritySupplyCase) -> Bool {
+  run_minting_proxy(GlobalStateSpent { global_state_input_index: 0 }, case.tx)
+}
+
+bench global_state_cost_of_a_security_mint(case via a_security_mint) {
+  expect run_global_state_on(case)
+}
+
+bench global_state_cost_of_a_security_burn(case via a_security_burn) {
+  expect run_global_state_on(case)
+}
+
+bench minting_proxy_cost_of_a_security_mint(case via a_security_mint) {
+  expect run_minting_proxy_on(case)
+}
+
+bench minting_proxy_cost_of_a_security_burn(case via a_security_burn) {
+  expect run_minting_proxy_on(case)
 }

@@ -890,7 +890,7 @@ test denylist_insert_accepts_a_global_state_with_trailing_fields() {
 }
 
 // Frozen core: the sanctions path keeps working when a later logic reshapes
-// every field after 0–4.
+// every field after 0–5.
 test denylist_insert_accepts_a_global_state_with_a_reshaped_tail() {
   t_run_denylist_add(
     t_key_28,

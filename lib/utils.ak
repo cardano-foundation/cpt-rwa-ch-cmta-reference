@@ -254,14 +254,16 @@ pub fn expect_inline_datum(output: Output) -> Data {
 /// Derive this token's issuance policy id from a CIP-113 registry node, and
 /// prove the node is the one that names `expected_script_hash`.
 ///
-/// Takes the node as an `Output` so one function serves both shapes: in steady
-/// state the caller resolves a reference input, and during a CIP-113 insert the
-/// node is an OUTPUT of the very transaction creating it and does not exist as
-/// a spendable UTxO yet. Neither source is weaker — `has_any_nft_strict`
-/// requires a genuine registry NFT, and such an NFT can only enter an output by
-/// being minted (`registry_mint` runs, enforcing CIP-113's cryptographic
-/// `key` ↔ `minting_logic_script` binding) or by being carried forward from an
-/// existing node (`registry_spend` runs, enforcing its own rules).
+/// Takes the node as an `Output` so one function serves all three shapes: in
+/// steady state the caller resolves a reference input; during a CIP-113 insert
+/// the node is an OUTPUT of the very transaction creating it and does not exist
+/// as a spendable UTxO yet; and during a CIP-113 in-place update the node is a
+/// spent input. No source is weaker — `has_any_nft_strict` requires a genuine
+/// registry NFT, and such an NFT can only enter an output by being minted
+/// (`registry_mint` runs, enforcing CIP-113's cryptographic `key` ↔
+/// `minting_logic_script` binding) or by being carried forward from an existing
+/// node (`registry_spend` runs, enforcing its own rules); a spent or referenced
+/// UTxO carrying it is such an output.
 ///
 /// THE NODE IS ADDRESSED BY INDEX at every call site, never located by search.
 /// Searching on the registry policy alone returns the FIRST matching reference
@@ -290,9 +292,9 @@ pub fn expect_inline_datum(output: Output) -> Data {
 /// those callers the identity assertion below proves only "some node names me",
 /// not "this is MY node", and the derived policy id is attacker-chosen.
 ///
-/// Every on-chain caller passes field index 2 today, all of them in the minting
-/// authority: `verify_registration_structure` (for `RegisterMint` and
-/// `RegisterStructural`) and both nodes of `UpgradeRegistryNode`. The transfer
+/// Every on-chain caller passes field index 2 today, and every one is in the
+/// minting authority: `verify_registration_structure` (for `Register`) and
+/// both nodes of `UpgradeRegistryNode`. The transfer
 /// and seizure validators no longer call this: their issuance policy is pinned
 /// at compile time. Only a test fixture (`lib/tests.ak`) passes field 3. A
 /// FUTURE CALLER PASSING FIELD INDEX 3 OR 4 MUST compare the returned policy id

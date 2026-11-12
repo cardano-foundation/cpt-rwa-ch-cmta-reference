@@ -69,7 +69,7 @@ validator transfer_logic_validator(
   /// foreign policy made every scan below vacuous. The compile-time pin is
   /// what closes that; nothing about "did some node name me" was ever
   /// load-bearing.
-  expected_issuance_policy_id: ByteArray,
+  security_policy_id: ByteArray,
   /// The DENYLIST SPEND VALIDATOR's script hash, which every denylist element
   /// a party cites must sit at. See `absence.with_denylist_element`.
   denylist_script_hash: ByteArray,
@@ -123,7 +123,7 @@ validator transfer_logic_validator(
         fn(input, acc_stake_credentials) {
           if value.quantity_of(
             assets.to_value(input.output.value),
-            expected_issuance_policy_id,
+            security_policy_id,
             security_asset_name,
           ) > 0 {
             // Senders must also sit INSIDE the programmable-logic base.
@@ -146,6 +146,10 @@ validator transfer_logic_validator(
 
     // 3. Aggregate unique destination stake-cred hashes from outputs carrying
     //    the security token.
+    //
+    // The CIP-68 reference NFT name, derived once from the security name.
+    // `None` for a plain-named token, which has no metadata token to police.
+    let reference_name = cip68.reference_name(security_asset_name)
     let outputs_user_credentials = list.reverse(
       list.foldl(
         self.outputs,
@@ -153,24 +157,30 @@ validator transfer_logic_validator(
         fn(output, result) {
           // ONE lookup of this policy's tokens per output, answering both
           // questions this fold has: is the output a destination, and does it
-          // carry a CIP-68 metadata token whose shape must hold?
-          let policy_tokens = assets.tokens(
-            output.value,
-            expected_issuance_policy_id,
-          )
+          // carry this token's CIP-68 reference NFT, whose shape must hold?
+          let policy_tokens = assets.tokens(output.value, security_policy_id)
 
-          // The metadata token's shape is an INVARIANT, not a posture at
+          // The reference NFT's shape is an INVARIANT, not a posture at
           // genesis. `minting_authority` pins it when it is minted; this is
           // what keeps it true afterwards, because the ordinary transfer path
           // is how a metadata update happens — the owner spends the UTxO and
           // re-outputs the token with a new datum. Without this, an update
           // could co-locate it with supply or write an unparseable datum.
+          //
+          // Keyed on the EXACT reference name, and only for a CIP-68 token.
+          // Any other `(100)`-labelled name under this policy is not this
+          // token's metadata and is not checked.
           expect
-            cip68.enforce_if_protected(
-              policy_tokens,
-              output,
-              expected_issuance_policy_id,
-            )
+            when reference_name is {
+              Some(ref_name) ->
+                cip68.enforce_if_reference(
+                  policy_tokens,
+                  output,
+                  security_policy_id,
+                  ref_name,
+                )
+              None -> True
+            }
 
           let security_quantity = when
             dict.get(policy_tokens, security_asset_name)
@@ -231,7 +241,7 @@ validator transfer_logic_validator(
       fn(holder_hash, frozen_amount) {
         let paid_back = paid_back_to_holder(
           self.outputs,
-          expected_issuance_policy_id,
+          security_policy_id,
           security_asset_name,
           holder_hash,
         )
@@ -246,14 +256,14 @@ validator transfer_logic_validator(
         // credential.
         paid_back >= frozen_amount || paid_back >= paid_back_to_holder(
           list.map(self.inputs, fn(input) { input.output }),
-          expected_issuance_policy_id,
+          security_policy_id,
           security_asset_name,
           holder_hash,
         )
       },
       gs_datum.requires_sender_kyc,
       gs_datum,
-      expected_issuance_policy_id,
+      security_policy_id,
       denylist_script_hash,
       self,
     )
@@ -264,7 +274,7 @@ validator transfer_logic_validator(
       fn(_, _) { True },
       gs_datum.requires_receiver_kyc,
       gs_datum,
-      expected_issuance_policy_id,
+      security_policy_id,
       denylist_script_hash,
       self,
     )
@@ -1233,10 +1243,33 @@ bench transfer_cost_by_party_count(n via n_parties) {
 // nothing would object.
 //
 // The check therefore lives in the output fold this handler already runs, and
-// costs one prefix comparison per token of the policed policy.
+// costs one key lookup per output. It applies only to a CIP-68 token, and only
+// to its exact reference name — `cip68.reference_name(security_asset_name)`.
 
-/// CIP-67 label `(100)` — a protected, metadata name under the policed policy.
+/// `(100)` + "Meta" — under the policed policy. For the CIP-68 security name
+/// below it is THE reference NFT; for the plain "SEC" token it is just another
+/// name.
 const t_cip68_name: ByteArray = #"000643b04d657461"
+
+/// `(333)` + "Meta" — a CIP-68 security name whose reference name is
+/// `t_cip68_name`.
+const t_cip68_sec_name: ByteArray = #"0014df104d657461"
+
+/// `run_transfer` for a deployment whose security token is CIP-68-named.
+fn run_cip68_transfer(
+  redeemer: TransferLogicScriptWithdrawRedeemer,
+  tx: Transaction,
+) -> Bool {
+  transfer_logic_validator.withdraw(
+    t_cip68_sec_name,
+    t_gs_policy,
+    t_issuance_policy,
+    t_denylist_script_hash,
+    redeemer,
+    Script(t_transfer_hash),
+    tx,
+  )
+}
 
 fn t_cip68_datum() -> Data {
   let d = Cip68Datum {
@@ -1248,7 +1281,7 @@ fn t_cip68_datum() -> Data {
   raw
 }
 
-/// The metadata UTxO: ADA + exactly the one protected token, owned by `stake`.
+/// The metadata UTxO: ADA + exactly the one reference token, owned by `stake`.
 fn t_cip68_output(stake_hash: ByteArray, datum: Data) -> Output {
   Output {
     address: Address {
@@ -1291,7 +1324,7 @@ fn t_metadata_redeemer() -> TransferLogicScriptWithdrawRedeemer {
 
 /// POSITIVE CONTROL: a well-formed metadata update is accepted.
 test transfer_accepts_a_well_formed_cip68_output() {
-  run_transfer(
+  run_cip68_transfer(
     t_metadata_redeemer(),
     t_metadata_update_tx(t_cip68_output(t_dest_stake, t_cip68_datum())),
   )
@@ -1299,7 +1332,7 @@ test transfer_accepts_a_well_formed_cip68_output() {
 
 /// THE ATTACK: the update writes a datum that is not the CIP-68 constructor.
 test transfer_rejects_a_malformed_cip68_datum() fail {
-  run_transfer(
+  run_cip68_transfer(
     t_metadata_redeemer(),
     t_metadata_update_tx(
       t_cip68_output(t_dest_stake, builtin.constr_data(0, [])),
@@ -1310,14 +1343,14 @@ test transfer_rejects_a_malformed_cip68_datum() fail {
 /// THE ATTACK: the update co-locates the metadata token with security tokens,
 /// which would carry value through a path that never inspects it.
 ///
-/// The output DOES carry the security token, so it is a destination and must be
-/// vetted — the redeemer therefore supplies a destination action, and the
-/// denylist root at reference index 2 covers every key. Without that this test
-/// would trap on the missing action instead of on the shape, and would pass
-/// while proving nothing.
+/// The output DOES carry the (CIP-68-named) security token, so it is a
+/// destination and must be vetted — the redeemer therefore supplies a
+/// destination action, and the denylist root at reference index 2 covers every
+/// key. Without that this test would trap on the missing action instead of on
+/// the shape, and would pass while proving nothing.
 test transfer_rejects_a_cip68_output_holding_security_tokens() fail {
   let out = t_cip68_output(t_dest_stake, t_cip68_datum())
-  run_transfer(
+  run_cip68_transfer(
     TransferLogicScriptWithdrawRedeemer {
       ..t_metadata_redeemer(),
       destination_actions: [t_dest_action()],
@@ -1325,8 +1358,66 @@ test transfer_rejects_a_cip68_output_holding_security_tokens() fail {
     t_metadata_update_tx(
       Output {
         ..out,
-        value: merge(out.value, from_asset(t_issuance_policy, t_sec_name, 5)),
+        value: merge(
+          out.value,
+          from_asset(t_issuance_policy, t_cip68_sec_name, 5),
+        ),
       },
+    ),
+  )
+}
+
+/// POSITIVE CONTROL: an ordinary transfer of a CIP-68-named security token is
+/// accepted. Neither the destination output nor an ADA-only change output
+/// carries the reference name, so neither is shape-checked: the CIP-68 check
+/// keys on the exact reference name, never on "every output of the policy".
+test transfer_accepts_an_ordinary_transfer_of_a_cip68_named_token() {
+  let with_cip68_name = fn(out: Output) {
+    Output {
+      ..out,
+      value: merge(
+        from_lovelace(2_000_000),
+        from_asset(t_issuance_policy, t_cip68_sec_name, 1_000),
+      ),
+    }
+  }
+  let base = t_transfer_tx(False, False, False, False)
+  run_cip68_transfer(
+    t_redeemer(),
+    Transaction {
+      ..base,
+      inputs: [
+        Input {
+          output_reference: t_out_ref(10),
+          output: with_cip68_name(t_token_utxo(t_sender_stake, 1_000)),
+        },
+      ],
+      outputs: [
+        with_cip68_name(t_token_utxo(t_dest_stake, 1_000)),
+        Output {
+          address: Address {
+            payment_credential: VerificationKey(t_sender_stake),
+            stake_credential: None,
+          },
+          value: from_lovelace(1_500_000),
+          datum: NoDatum,
+          reference_script: None,
+        },
+      ],
+    },
+  )
+}
+
+/// DELIBERATE: a plain-named token has no reference name, so its outputs are
+/// never shape-checked — not even one carrying a `(100)`-labelled name under the
+/// policed policy, with a datum no CIP-68 reader can parse. Protection exists
+/// only for CIP-68 names: a replacement authority minting a stray `(100)` name
+/// would create a token neither the transfer nor the seizure path polices.
+test transfer_does_not_shape_check_outputs_of_a_plain_token() {
+  run_transfer(
+    t_metadata_redeemer(),
+    t_metadata_update_tx(
+      t_cip68_output(t_dest_stake, builtin.constr_data(0, [])),
     ),
   )
 }
