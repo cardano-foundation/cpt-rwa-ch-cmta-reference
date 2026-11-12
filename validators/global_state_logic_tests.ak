@@ -9,7 +9,7 @@ use aiken/collection/list
 use aiken/collection/pairs
 use aiken/fuzz
 use aiken/primitive/bytearray
-use aiken_design_patterns/linked_list.{Element, Node}
+use aiken_design_patterns/linked_list.{Element, Node, Root}
 use cardano/address.{Address, Credential, Script, VerificationKey}
 use cardano/assets.{Assets, from_asset, from_lovelace, merge, zero}
 use cardano/certificate.{RegisterCredential, UnregisterCredential}
@@ -31,9 +31,9 @@ use tests/global_state_fixtures.{
 }
 use types/global_state.{
   AddTrustedEntity, DeactivateContract, GlobalStateDatum, GlobalStateLocation,
-  GlobalStateSpendRedeemer, GlobalStateSpent, LockUpgrades, MintSecurity,
-  ModifySecurityInfo, PauseTransfers, RemoveTrustedEntity, RotateAdmin,
-  RotateGlobalStateScript, RotateMintingScript, SetMintableAmount,
+  GlobalStateSpendRedeemer, GlobalStateSpent, LockUpgrades, MigrateLists,
+  MintSecurity, ModifySecurityInfo, PauseTransfers, RemoveTrustedEntity,
+  RotateAdmin, RotateGlobalStateScript, RotateMintingScript, SetMintableAmount,
   SetRequiresReceiverKyc, SetRequiresSenderKyc, TrustedEntityMetadata,
   UpdateMemberRootHash, UpdateTrustedEntity, gs_core_field_count,
   idx_deactivated, idx_mintable_amount, idx_transfers_paused, set_security_info,
@@ -2251,6 +2251,398 @@ test deactivated_input_rejects_set_mintable_amount() fail {
     input_datum,
     set_mintable_amount_redeemer(42),
     t_set_mintable_tx(input_datum, 42, [t_admin]),
+  )
+}
+
+// ── MigrateLists — the admin switches the list policy ids, before the lock ───
+//
+// `t_migrate_tx` builds a switch that passes: the admin signs, reference
+// inputs 0 and 1 hold the roots of the power-users and denylist lists the
+// redeemer names, and the output is the input with fields 3 and 7 set to
+// those ids. Every negative is a one-change copy of it. The root checks trap
+// (the library `expect`s), so their refusals are `fail` tests; every other
+// refusal is a False return.
+
+const t_new_pu_ll_policy: ByteArray =
+  #"3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a"
+
+const t_new_dl_ll_policy: ByteArray =
+  #"4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b"
+
+// A list spend script, where the list mints keep their NFTs. Not checked by
+// the branch, which authenticates a root by its policy alone.
+const t_list_script_hash: ByteArray =
+  #"d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2"
+
+/// The input datum of every MigrateLists test: the current lists are
+/// `t_pu_ll_policy` and `t_dl_ll_policy`.
+fn t_migrate_datum() -> GlobalStateDatum {
+  GlobalStateDatum {
+    ..t_datum(False, False),
+    power_user_linked_list_policy_id: t_pu_ll_policy,
+    denylist_linked_list_policy_id: t_dl_ll_policy,
+  }
+}
+
+/// A list element under `policy` named `asset_name`, carrying `data`.
+fn t_list_element(
+  policy: ByteArray,
+  asset_name: ByteArray,
+  data: Element<Data, Data>,
+) -> Input {
+  Input {
+    output_reference: t_out_ref(6),
+    output: Output {
+      address: Address {
+        payment_credential: Script(t_list_script_hash),
+        stake_credential: None,
+      },
+      value: merge(from_lovelace(2_000_000), from_asset(policy, asset_name, 1)),
+      datum: InlineDatum(data),
+      reference_script: None,
+    },
+  }
+}
+
+/// The initialised root of the list minted under `policy`.
+fn t_list_root(policy: ByteArray) -> Input {
+  t_list_element(
+    policy,
+    constants.linked_list_root_key,
+    Element { data: Root { data: builtin.constr_data(0, []) }, link: None },
+  )
+}
+
+/// A node (not the root) of the list minted under `policy`.
+fn t_list_node(policy: ByteArray) -> Input {
+  t_list_element(
+    policy,
+    bytearray.concat(constants.linked_list_node_key_prefix, t_new_admin),
+    Element { data: Node { data: builtin.constr_data(0, []) }, link: None },
+  )
+}
+
+fn migrate_lists_redeemer(
+  new_pu: ByteArray,
+  new_dl: ByteArray,
+) -> GlobalStateSpendRedeemer {
+  GlobalStateSpendRedeemer {
+    global_state_output_index: 0,
+    action: MigrateLists {
+      new_power_user_linked_list_policy_id: new_pu,
+      new_denylist_linked_list_policy_id: new_dl,
+      power_user_root_ref_input_index: 0,
+      denylist_root_ref_input_index: 1,
+    },
+  }
+}
+
+fn t_migrated(
+  input_datum: GlobalStateDatum,
+  new_pu: ByteArray,
+  new_dl: ByteArray,
+) -> GlobalStateDatum {
+  GlobalStateDatum {
+    ..input_datum,
+    power_user_linked_list_policy_id: new_pu,
+    denylist_linked_list_policy_id: new_dl,
+  }
+}
+
+/// Admin-signed; reference inputs 0 and 1 are the roots of `new_pu` and
+/// `new_dl`; the output is the input with fields 3 and 7 switched to them.
+fn t_migrate_tx(
+  input_datum: GlobalStateDatum,
+  new_pu: ByteArray,
+  new_dl: ByteArray,
+) -> Transaction {
+  Transaction {
+    ..t_tx(input_datum, t_migrated(input_datum, new_pu, new_dl), [t_admin]),
+    reference_inputs: [t_list_root(new_pu), t_list_root(new_dl)],
+  }
+}
+
+fn migrate(
+  input_datum: GlobalStateDatum,
+  new_pu: ByteArray,
+  new_dl: ByteArray,
+  tx: Transaction,
+) -> Bool {
+  run_spend(input_datum, migrate_lists_redeemer(new_pu, new_dl), tx)
+}
+
+test migrate_lists_switches_both_policy_ids() {
+  let d = t_migrate_datum()
+  migrate(
+    d,
+    t_new_pu_ll_policy,
+    t_new_dl_ll_policy,
+    t_migrate_tx(d, t_new_pu_ll_policy, t_new_dl_ll_policy),
+  )
+}
+
+// The unchanged denylist cites its current root.
+test migrate_lists_switches_only_the_power_users_list() {
+  let d = t_migrate_datum()
+  migrate(
+    d,
+    t_new_pu_ll_policy,
+    t_dl_ll_policy,
+    t_migrate_tx(d, t_new_pu_ll_policy, t_dl_ll_policy),
+  )
+}
+
+// The unchanged power-users list cites its current root.
+test migrate_lists_switches_only_the_denylist() {
+  let d = t_migrate_datum()
+  migrate(
+    d,
+    t_pu_ll_policy,
+    t_new_dl_ll_policy,
+    t_migrate_tx(d, t_pu_ll_policy, t_new_dl_ll_policy),
+  )
+}
+
+test migrate_lists_fails_without_the_admin_signature() {
+  let d = t_migrate_datum()
+  !migrate(
+    d,
+    t_new_pu_ll_policy,
+    t_new_dl_ll_policy,
+    Transaction {
+      ..t_migrate_tx(d, t_new_pu_ll_policy, t_new_dl_ll_policy),
+      extra_signatories: [],
+    },
+  )
+}
+
+test migrate_lists_fails_once_upgrades_are_locked() {
+  // LockUpgrades makes the lists final, like the cap and the rules.
+  let d = GlobalStateDatum { ..t_migrate_datum(), upgrades_locked: True }
+  !migrate(
+    d,
+    t_new_pu_ll_policy,
+    t_new_dl_ll_policy,
+    t_migrate_tx(d, t_new_pu_ll_policy, t_new_dl_ll_policy),
+  )
+}
+
+// Both ids are the current ones, each citing its current root: the output
+// equals the input.
+test migrate_lists_fails_as_a_no_op() {
+  let d = t_migrate_datum()
+  !migrate(
+    d,
+    t_pu_ll_policy,
+    t_dl_ll_policy,
+    t_migrate_tx(d, t_pu_ll_policy, t_dl_ll_policy),
+  )
+}
+
+// A 27-byte id; the reference input holds a root under exactly that id, so
+// only the length check can refuse it.
+test migrate_lists_fails_on_a_short_power_users_policy_id() {
+  let d = t_migrate_datum()
+  let short = bytearray.drop(t_new_pu_ll_policy, 1)
+  !migrate(
+    d,
+    short,
+    t_new_dl_ll_policy,
+    t_migrate_tx(d, short, t_new_dl_ll_policy),
+  )
+}
+
+test migrate_lists_fails_on_a_short_denylist_policy_id() {
+  let d = t_migrate_datum()
+  let short = bytearray.drop(t_new_dl_ll_policy, 1)
+  !migrate(
+    d,
+    t_new_pu_ll_policy,
+    short,
+    t_migrate_tx(d, t_new_pu_ll_policy, short),
+  )
+}
+
+test migrate_lists_fails_when_both_ids_are_equal() {
+  let d = t_migrate_datum()
+  !migrate(
+    d,
+    t_new_pu_ll_policy,
+    t_new_pu_ll_policy,
+    t_migrate_tx(d, t_new_pu_ll_policy, t_new_pu_ll_policy),
+  )
+}
+
+// The power-users id is the issuance policy (with a root under it, so only
+// the policy check can refuse).
+test migrate_lists_fails_to_the_issuance_policy() {
+  let d = t_migrate_datum()
+  !migrate(
+    d,
+    t_issuance_policy,
+    t_new_dl_ll_policy,
+    t_migrate_tx(d, t_issuance_policy, t_new_dl_ll_policy),
+  )
+}
+
+test migrate_lists_fails_to_the_global_state_policy() {
+  let d = t_migrate_datum()
+  !migrate(
+    d,
+    t_gs_policy,
+    t_new_dl_ll_policy,
+    t_migrate_tx(d, t_gs_policy, t_new_dl_ll_policy),
+  )
+}
+
+// The same two refusals for the denylist id, one per check.
+test migrate_lists_fails_to_the_issuance_policy_as_the_denylist() {
+  let d = t_migrate_datum()
+  !migrate(
+    d,
+    t_new_pu_ll_policy,
+    t_issuance_policy,
+    t_migrate_tx(d, t_new_pu_ll_policy, t_issuance_policy),
+  )
+}
+
+test migrate_lists_fails_to_the_global_state_policy_as_the_denylist() {
+  let d = t_migrate_datum()
+  !migrate(
+    d,
+    t_new_pu_ll_policy,
+    t_gs_policy,
+    t_migrate_tx(d, t_new_pu_ll_policy, t_gs_policy),
+  )
+}
+
+// Reference input 0 is the OLD power-users list's root, not one under the new
+// id: the root check traps (no NFT under the new policy).
+test migrate_lists_fails_without_the_new_power_users_root() fail {
+  let d = t_migrate_datum()
+  migrate(
+    d,
+    t_new_pu_ll_policy,
+    t_new_dl_ll_policy,
+    Transaction {
+      ..t_migrate_tx(d, t_new_pu_ll_policy, t_new_dl_ll_policy),
+      reference_inputs: [
+        t_list_root(t_pu_ll_policy),
+        t_list_root(t_new_dl_ll_policy),
+      ],
+    },
+  )
+}
+
+test migrate_lists_fails_without_the_new_denylist_root() fail {
+  let d = t_migrate_datum()
+  migrate(
+    d,
+    t_new_pu_ll_policy,
+    t_new_dl_ll_policy,
+    Transaction {
+      ..t_migrate_tx(d, t_new_pu_ll_policy, t_new_dl_ll_policy),
+      reference_inputs: [
+        t_list_root(t_new_pu_ll_policy),
+        t_list_root(t_dl_ll_policy),
+      ],
+    },
+  )
+}
+
+// Reference input 0 is a genuine element of the new power-users list, but a
+// node: the root check traps on its asset name.
+test migrate_lists_fails_when_the_root_ref_is_a_node_not_the_root() fail {
+  let d = t_migrate_datum()
+  migrate(
+    d,
+    t_new_pu_ll_policy,
+    t_new_dl_ll_policy,
+    Transaction {
+      ..t_migrate_tx(d, t_new_pu_ll_policy, t_new_dl_ll_policy),
+      reference_inputs: [
+        t_list_node(t_new_pu_ll_policy),
+        t_list_root(t_new_dl_ll_policy),
+      ],
+    },
+  )
+}
+
+// The same for the denylist's root check.
+test migrate_lists_fails_when_the_denylist_root_ref_is_a_node_not_the_root() fail {
+  let d = t_migrate_datum()
+  migrate(
+    d,
+    t_new_pu_ll_policy,
+    t_new_dl_ll_policy,
+    Transaction {
+      ..t_migrate_tx(d, t_new_pu_ll_policy, t_new_dl_ll_policy),
+      reference_inputs: [
+        t_list_root(t_new_pu_ll_policy),
+        t_list_node(t_new_dl_ll_policy),
+      ],
+    },
+  )
+}
+
+test migrate_lists_fails_when_another_field_changes() {
+  let d = t_migrate_datum()
+  let tx = t_migrate_tx(d, t_new_pu_ll_policy, t_new_dl_ll_policy)
+  !migrate(
+    d,
+    t_new_pu_ll_policy,
+    t_new_dl_ll_policy,
+    Transaction {
+      ..tx,
+      outputs: [
+        t_output(
+          GlobalStateDatum {
+            ..t_migrated(d, t_new_pu_ll_policy, t_new_dl_ll_policy),
+            transfers_paused: True,
+          },
+        ),
+      ],
+    },
+  )
+}
+
+test migrate_lists_fails_when_a_field_is_appended() {
+  let d = t_migrate_datum()
+  !migrate(
+    d,
+    t_new_pu_ll_policy,
+    t_new_dl_ll_policy,
+    with_raw_output(
+      t_migrate_tx(d, t_new_pu_ll_policy, t_new_dl_ll_policy),
+      appended(t_migrated(d, t_new_pu_ll_policy, t_new_dl_ll_policy)),
+    ),
+  )
+}
+
+test migrate_lists_fails_with_a_concurrent_security_mint() {
+  let d = t_migrate_datum()
+  !migrate(
+    d,
+    t_new_pu_ll_policy,
+    t_new_dl_ll_policy,
+    with_security_token_minted_into_an_output(
+      t_migrate_tx(d, t_new_pu_ll_policy, t_new_dl_ll_policy),
+    ),
+  )
+}
+
+test migrate_lists_fails_on_a_deactivated_protocol() fail {
+  // Terminal `expect !deactivated` traps before dispatch.
+  let d = GlobalStateDatum {
+    ..t_migrate_datum(),
+    transfers_paused: True,
+    deactivated: True,
+  }
+  migrate(
+    d,
+    t_new_pu_ll_policy,
+    t_new_dl_ll_policy,
+    t_migrate_tx(d, t_new_pu_ll_policy, t_new_dl_ll_policy),
   )
 }
 

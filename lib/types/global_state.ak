@@ -44,7 +44,7 @@ pub type GlobalStateLocation {
 /// addresses the datum positionally through the shared `idx_*` constants, and
 /// `global_state_logic` rewrites exactly one field by index on every branch
 /// (the outgoing side of `RotateGlobalStateScript` rewrites field 0 and may
-/// append). Reordering, inserting or removing a field silently reads or writes
+/// append; `MigrateLists` rewrites fields 3 and 7 together). Reordering, inserting or removing a field silently reads or writes
 /// the wrong one — the tripwire test `gs_getters_read_correct_fields` exists to
 /// turn that into a build failure.
 ///
@@ -168,7 +168,7 @@ pub type GlobalStateDatum {
   // outgoing side of `RotateGlobalStateScript` keeps it too. A replacement
   // logic's own actions are its own (see THE LIMIT above).
   network_id: Int,
-  // ONE-WAY upgrade lock. While False (the genesis value) all four paths
+  // ONE-WAY upgrade lock. While False (the genesis value) all five paths
   // below are open; once set True by `LockUpgrades` it can never be cleared — no
   // branch writes it back, and every branch reproduces the datum wholesale,
   // so there is no path that unsets it. Setting it permanently freezes:
@@ -179,7 +179,9 @@ pub type GlobalStateDatum {
   //     `third_party_transfer_logic_script` can no longer be re-pointed, so
   //     the transfer rules in force become final; and
   //   * `SetMintableAmount` — the admin can no longer reset the supply
-  //     headroom, so `mintable_amount` moves only through mint and burn; and
+  //     headroom, so `mintable_amount` moves only through mint and burn;
+  //   * `MigrateLists` — the power-users and denylist lists can no longer be
+  //     replaced, so the two list policy ids become final; and
   //   * `RotateGlobalStateScript` — the GlobalState logic itself can no longer
   //     be replaced, so the rules of every GlobalState action become final.
   //
@@ -442,6 +444,27 @@ pub fn set_minting_script_credential_hash(
   )
 }
 
+// The one setter that replaces two fields: `MigrateLists` switches both list
+// policy ids (fields 3 and 7) in one write.
+pub fn set_list_policy_ids(
+  fields: List<Data>,
+  power_user_linked_list_policy_id: ByteArray,
+  denylist_linked_list_policy_id: ByteArray,
+) -> Data {
+  builtin.constr_data(
+    0,
+    utils.replace_data_field(
+      utils.replace_data_field(
+        fields,
+        idx_power_user_linked_list_policy_id,
+        builtin.b_data(power_user_linked_list_policy_id),
+      ),
+      idx_denylist_linked_list_policy_id,
+      builtin.b_data(denylist_linked_list_policy_id),
+    ),
+  )
+}
+
 /// Resolves GlobalState from wherever the caller says it is, authenticates it
 /// via the GS NFT, and returns its parsed inline datum in the full v1 layout.
 /// FOR THE REPLACEABLE READERS ONLY: a permanent script must use
@@ -664,7 +687,8 @@ pub type GlobalStateSpendAction {
   /// from the GlobalState logic.
   RotateMintingScript { new_minting_script_credential_hash: ByteArray }
   /// ONE-WAY upgrade lock — see `upgrades_locked`; closes `RotateMintingScript`,
-  /// registry-node upgrades, `SetMintableAmount` and `RotateGlobalStateScript`. Admin-signed, and
+  /// registry-node upgrades, `SetMintableAmount`, `RotateGlobalStateScript` and
+  /// `MigrateLists`. Admin-signed, and
   /// deliberately not reversible: a lock an admin can lift is not a
   /// commitment. Rejected if already locked, so the action is not a silent
   /// no-op.
@@ -744,6 +768,28 @@ pub type GlobalStateSpendAction {
   /// tooling must pin the target to a reviewed build. Appended last: the
   /// constructor index is the redeemer encoding.
   RotateGlobalStateScript { new_global_state_script_hash: ByteArray }
+  /// Points the token at new lists: rewrites field 3
+  /// (`power_user_linked_list_policy_id`) and field 7
+  /// (`denylist_linked_list_policy_id`), and nothing else. Readers authenticate
+  /// list elements by these policy ids alone, so this is the only way to
+  /// replace a list with a bug.
+  ///
+  /// Admin-signed and closed by `LockUpgrades`. Both new ids are 28 bytes,
+  /// differ from each other and from the issuance and GlobalState policies,
+  /// and at least one differs from its current value. Each reference input
+  /// named here must hold the genuine root element of its new list (an
+  /// unchanged list cites its current root), so an id with no initialised
+  /// list behind it is refused.
+  ///
+  /// It does not check what the new lists contain: copying the operators and
+  /// the sanctions over is the off-chain migration's duty. Appended last: the
+  /// constructor index is the redeemer encoding.
+  MigrateLists {
+    new_power_user_linked_list_policy_id: ByteArray,
+    new_denylist_linked_list_policy_id: ByteArray,
+    power_user_root_ref_input_index: Int,
+    denylist_root_ref_input_index: Int,
+  }
 }
 
 /// The redeemer of every `global_state_logic` withdraw-0. A rotation passes
@@ -933,6 +979,14 @@ test gs_setters_round_trip() {
     builtin.equals_data(
       set_upgrades_locked(fields, False),
       GlobalStateDatum { ..d, upgrades_locked: False },
+    ),
+    builtin.equals_data(
+      set_list_policy_ids(fields, #"f3", #"f7"),
+      GlobalStateDatum {
+        ..d,
+        power_user_linked_list_policy_id: #"f3",
+        denylist_linked_list_policy_id: #"f7",
+      },
     ),
   }
 }

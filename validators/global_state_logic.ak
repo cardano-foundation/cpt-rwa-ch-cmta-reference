@@ -10,6 +10,7 @@ use aiken/builtin
 use aiken/collection/list
 use aiken/collection/pairs
 use aiken/primitive/bytearray
+use aiken_design_patterns/linked_list.{get_root_element_info, run_root_with}
 use cardano/address.{Credential, Script}
 use cardano/assets.{without_lovelace}
 use cardano/certificate.{Certificate, RegisterCredential}
@@ -18,14 +19,14 @@ use cardano/value
 use constants
 use types/global_state.{
   AddTrustedEntity, DeactivateContract, GlobalStateDatum,
-  GlobalStateSpendRedeemer, LockUpgrades, MintSecurity, ModifySecurityInfo,
-  PauseTransfers, RemoveTrustedEntity, RotateAdmin, RotateGlobalStateScript,
-  RotateMintingScript, SetMintableAmount, SetRequiresReceiverKyc,
-  SetRequiresSenderKyc, UpdateMemberRootHash, UpdateTrustedEntity,
-  decode_global_state, decode_global_state_core, get_mintable_amount,
-  set_admin_credential_hash, set_deactivated,
-  set_global_state_script_credential_hash, set_member_root_hash,
-  set_mintable_amount, set_minting_script_credential_hash,
+  GlobalStateSpendRedeemer, LockUpgrades, MigrateLists, MintSecurity,
+  ModifySecurityInfo, PauseTransfers, RemoveTrustedEntity, RotateAdmin,
+  RotateGlobalStateScript, RotateMintingScript, SetMintableAmount,
+  SetRequiresReceiverKyc, SetRequiresSenderKyc, UpdateMemberRootHash,
+  UpdateTrustedEntity, decode_global_state, decode_global_state_core,
+  get_mintable_amount, set_admin_credential_hash, set_deactivated,
+  set_global_state_script_credential_hash, set_list_policy_ids,
+  set_member_root_hash, set_mintable_amount, set_minting_script_credential_hash,
   set_requires_receiver_kyc, set_requires_sender_kyc, set_security_info,
   set_transfers_paused, set_trusted_entity_vkeys, set_upgrades_locked,
 }
@@ -78,8 +79,8 @@ use utils.{must_be_signed_by_credential, must_run_script_withdrawal}
 //      re-check it, on purpose: a strict reader in the permanent scripts
 //      would turn a successor that breaks this rule into a brick.
 //   2. `deactivated` is terminal (no action once set) and `upgrades_locked`
-//      is one-way and closes rotation, minting-script rotation and
-//      `SetMintableAmount`.
+//      is one-way and closes rotation, minting-script rotation,
+//      `SetMintableAmount` and `MigrateLists`.
 //   3. Every action except MintSecurity rejects security-token mints, burns
 //      and movements. MintSecurity writes only field 6, and only in a
 //      transaction that mints or burns the security token; the amount is the
@@ -125,12 +126,26 @@ use utils.{must_be_signed_by_credential, must_run_script_withdrawal}
 //      redeemer unchanged — `GlobalStateSpendRedeemer` with
 //      `RotateGlobalStateScript` at constructor 14 — since the outgoing side
 //      requires both withdrawals to carry the same one.
-//  11. Field 3's VALUE (`power_user_linked_list_policy_id`) never changes after
-//      genesis — invariant 4 pins its value only across a rotation. It is the
-//      sole anchor for which list's nodes are power users: the minting
-//      authority, the denylist, the third-party transfer logic and
-//      PauseTransfers here all authenticate operators under it with no
-//      compile-time copy to check against.
+//  11. Field 3 (`power_user_linked_list_policy_id`) and field 7
+//      (`denylist_linked_list_policy_id`) change only through `MigrateLists`:
+//      admin-signed, closed by `LockUpgrades`, and only to the policy of a
+//      genuine initialised list root — invariant 4 pins their values across a
+//      rotation. They are the sole anchors for which list's nodes are power
+//      users and which are sanctions: the minting authority, the denylist, the
+//      third-party transfer logic and PauseTransfers here all authenticate
+//      operators under field 3, and the readers authenticate denylist entries
+//      under field 7, with no compile-time copy to check against.
+
+// `element` is the genuine root element of the list minted under `policy_id`,
+// authenticated by the library: ADA plus exactly the one root NFT
+// (`constants.linked_list_root_key`), an inline `Root` datum and no reference
+// script. Traps otherwise. The address is not checked: each list mint keeps
+// every NFT of its policy at its own spend script.
+fn holds_list_root(element: Output, policy_id: ByteArray) -> Bool {
+  get_root_element_info(element, fn(_address, _lovelace, _data, _link) { True })
+    |> run_root_with(policy_id, constants.linked_list_root_key)
+}
+
 validator global_state_logic(
   security_asset_name: ByteArray,
   issuance_policy_id: ByteArray,
@@ -238,8 +253,8 @@ validator global_state_logic(
 
       // Raw Data field list of the input datum — taken from the RAW datum, so
       // fields a later logic appended survive every write below. Each branch
-      // proves the output datum equals this with exactly one field replaced,
-      // sharing every unchanged field as opaque Data — no unwrap/rewrap, and no
+      // proves the output datum equals this with exactly one field replaced
+      // (`MigrateLists`: the two list policy ids), sharing every unchanged field as opaque Data — no unwrap/rewrap, and no
       // full-datum re-validation of the output.
       let input_fields = builtin.unconstr_fields(input_datum_data)
 
@@ -369,10 +384,11 @@ validator global_state_logic(
                 new_global_state_script_hash != input_datum.minting_script_credential_hash,
                 new_global_state_script_hash != input_datum.admin_credential_hash,
                 // Every other field keeps its own rules: `deactivated` and the
-                // admin, the power-users list fixed for life, the minting
-                // authority with its own rotation, the supply headroom moved
-                // only through `SetMintableAmount` and mint/burn, and the rest
-                // through their own actions — never through a rotation.
+                // admin, the two list policy ids moved only through
+                // `MigrateLists`, the minting authority with its own rotation,
+                // the supply headroom moved only through `SetMintableAmount`
+                // and mint/burn, and the rest through their own actions —
+                // never through a rotation.
                 (builtin.fst_pair(output_constr) == 0)?,
                 builtin.equals_data(
                   builtin.constr_data(
@@ -756,6 +772,63 @@ validator global_state_logic(
                     expected_output_datum,
                     global_state_output_datum,
                   ),
+                }
+              }
+              MigrateLists {
+                new_power_user_linked_list_policy_id,
+                new_denylist_linked_list_policy_id,
+                power_user_root_ref_input_index,
+                denylist_root_ref_input_index,
+              } -> {
+                let expected_output_datum = set_list_policy_ids(
+                  input_fields,
+                  new_power_user_linked_list_policy_id,
+                  new_denylist_linked_list_policy_id,
+                )
+                // Never a no-op (as PauseTransfers): at least one list switches.
+                let switches_a_list = or {
+                  new_power_user_linked_list_policy_id != input_datum.power_user_linked_list_policy_id,
+                  new_denylist_linked_list_policy_id != input_datum.denylist_linked_list_policy_id,
+                }
+                and {
+                  // The one-way upgrade lock makes the lists final as well.
+                  (!input_datum.upgrades_locked)?,
+                  must_be_signed_by_credential(
+                    self,
+                    input_datum.admin_credential_hash,
+                  )?,
+                  (bytearray.length(new_power_user_linked_list_policy_id) == 28)?,
+                  (bytearray.length(new_denylist_linked_list_policy_id) == 28)?,
+                  // One policy cannot be both lists, nor the security token's
+                  // or GlobalState's own.
+                  (new_power_user_linked_list_policy_id != new_denylist_linked_list_policy_id)?,
+                  (new_power_user_linked_list_policy_id != issuance_policy_id)?,
+                  (new_power_user_linked_list_policy_id != global_state_policy_id)?,
+                  (new_denylist_linked_list_policy_id != issuance_policy_id)?,
+                  (new_denylist_linked_list_policy_id != global_state_policy_id)?,
+                  switches_a_list?,
+                  // Each new id names an initialised list: the reference input
+                  // holds its genuine root (an unchanged list cites its current
+                  // root). A mistyped id has no root and traps here.
+                  holds_list_root(
+                    utils.safe_list_at(
+                      self.reference_inputs,
+                      power_user_root_ref_input_index,
+                    ).output,
+                    new_power_user_linked_list_policy_id,
+                  )?,
+                  holds_list_root(
+                    utils.safe_list_at(
+                      self.reference_inputs,
+                      denylist_root_ref_input_index,
+                    ).output,
+                    new_denylist_linked_list_policy_id,
+                  )?,
+                  // Fields 3 and 7 replaced, nothing else changed or appended.
+                  builtin.equals_data(
+                    expected_output_datum,
+                    global_state_output_datum,
+                  )?,
                 }
               }
               DeactivateContract -> {
