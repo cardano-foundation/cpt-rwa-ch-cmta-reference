@@ -1141,6 +1141,23 @@ test power_users_remove_refuses_a_removed_node_kept_under_another_list_mint() fa
   ) || True
 }
 
+// The same, burning another node's NFT instead: the quantity is right, so
+// only the library's burnt-name check refuses it, by trapping. In-process
+// only: no input carries that NFT, so the ledger could not balance the burn.
+test power_users_remove_refuses_burning_another_node_in_place_of_the_removed_one() fail {
+  t_run_pu_remove(
+    t_key_28,
+    Transaction {
+      ..t_pu_remove_tx(t_key_28),
+      mint: from_asset(t_pu_policy, t_ll_asset_name(t_other_key), -1),
+      outputs: [
+        t_pu_root_output(None),
+        t_at_wallet(t_pu_new_node_output(t_key_28)),
+      ],
+    },
+  ) || True
+}
+
 // Deinit: control `power_users_deinit_succeeds_for_the_admin_after_deactivation`.
 fn t_pu_deinit_tx() -> Transaction {
   Transaction {
@@ -1181,6 +1198,32 @@ test power_users_deinit_refuses_a_root_kept_under_another_list_mint() fail {
     Transaction {
       ..t_pu_deinit_tx(),
       mint: from_asset(t_pu_policy, t_ll_asset_name(t_other_key), 1),
+      outputs: [t_at_wallet(t_pu_root_input(0).output)],
+    },
+  ) || True
+}
+
+// The same, burning a node's NFT instead: the quantity is right, so only the
+// library's burnt-name check refuses it, by trapping. In-process only: no
+// input carries that NFT, so the ledger could not balance the burn.
+test power_users_deinit_refuses_burning_a_node_name_in_place_of_the_root() fail {
+  t_run_pu_deinit(
+    Transaction {
+      ..t_pu_deinit_tx(),
+      mint: from_asset(t_pu_policy, t_ll_asset_name(t_other_key), -1),
+      outputs: [t_at_wallet(t_pu_root_input(0).output)],
+    },
+  ) || True
+}
+
+// The same, minting the root key instead of burning it: the name is right, so
+// only the library's burnt-quantity check refuses it, by trapping. In-process
+// only: the minted copy needs an output too, which deinit never reads.
+test power_users_deinit_refuses_minting_the_root_key_in_place_of_burning_it() fail {
+  t_run_pu_deinit(
+    Transaction {
+      ..t_pu_deinit_tx(),
+      mint: from_asset(t_pu_policy, constants.linked_list_root_key, 1),
       outputs: [t_at_wallet(t_pu_root_input(0).output)],
     },
   ) || True

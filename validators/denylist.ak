@@ -1413,6 +1413,23 @@ test denylist_remove_refuses_a_removed_node_kept_under_another_list_mint() fail 
   ) || True
 }
 
+// The same, burning another node's NFT instead: the quantity is right, so
+// only the library's burnt-name check refuses it, by trapping. In-process
+// only: no input carries that NFT, so the ledger could not balance the burn.
+test denylist_remove_refuses_burning_another_node_in_place_of_the_removed_one() fail {
+  t_run_denylist_remove(
+    t_key_28,
+    Transaction {
+      ..t_dl_remove_tx(t_key_28),
+      mint: from_asset(t_dl_policy, t_ll_asset_name(t_other_key), -1),
+      outputs: [
+        t_dl_root_output(None),
+        t_at_wallet(t_dl_sanction_node_output(t_key_28)),
+      ],
+    },
+  ) || True
+}
+
 // UpdateDenylistEntry: control `denylist_update_relaxes_a_full_freeze_to_a_partial_one`,
 // the same transaction with the continuation at the list script. The wallet
 // case is `denylist_update_rejects_a_continuation_at_another_address`; here

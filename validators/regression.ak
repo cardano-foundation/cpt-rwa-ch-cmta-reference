@@ -2092,6 +2092,32 @@ test denylist_deinit_refuses_a_root_kept_under_another_list_mint() fail {
   ) || True
 }
 
+// The same, burning a node's NFT instead: the quantity is right, so only the
+// library's burnt-name check refuses it, by trapping. In-process only: no
+// input carries that NFT, so the ledger could not balance the burn.
+test denylist_deinit_refuses_burning_a_node_name_in_place_of_the_root() fail {
+  run_denylist_deinit(
+    Transaction {
+      ..dl_deinit_tx(),
+      mint: from_asset(denylist_policy, ll_asset_name(dl_pred_key), -1),
+      outputs: [at_wallet(dl_root_input(0).output)],
+    },
+  ) || True
+}
+
+// The same, minting the root key instead of burning it: the name is right, so
+// only the library's burnt-quantity check refuses it, by trapping. In-process
+// only: the minted copy needs an output too, which deinit never reads.
+test denylist_deinit_refuses_minting_the_root_key_in_place_of_burning_it() fail {
+  run_denylist_deinit(
+    Transaction {
+      ..dl_deinit_tx(),
+      mint: from_asset(denylist_policy, constants.linked_list_root_key, 1),
+      outputs: [at_wallet(dl_root_input(0).output)],
+    },
+  ) || True
+}
+
 // StateTransition: control `denylist_spend_handler_is_pure_delegation`, the
 // same spend with a denylist mint present. With no list-policy mint at all the
 // library's structural gate returns False, hence `!`. (With a mint present the
@@ -2114,6 +2140,27 @@ test denylist_spend_refuses_a_node_to_a_wallet_without_a_list_mint() {
   )
 }
 
+// The control's mint moved under the power-users policy: a mint under another
+// policy is not a denylist mint, so the gate's policy scoping alone returns
+// False, hence `!`.
+test denylist_spend_refuses_a_node_to_a_wallet_with_only_a_foreign_mint() {
+  let no_datum: Option<Data> = None
+  !v_denylist.denylist_validator.spend(
+    gs_policy,
+    denylist_policy,
+    pu_script_hash,
+    no_datum,
+    DenylistStateTransition,
+    oref(0),
+    Transaction {
+      ..base_tx(),
+      inputs: [dl_node_input(0, dl_sanctioned_key, None)],
+      mint: from_asset(pu_policy, ll_asset_name(dl_pred_key), 1),
+      outputs: [attacker_held_ll_nft(denylist_policy, dl_sanctioned_key)],
+    },
+  )
+}
+
 // Control `power_user_spend_handler_is_pure_delegation`; same reasoning
 // (`power_user_insert_rejects_a_smuggled_extra_node_input` with a mint).
 test power_users_spend_refuses_a_node_to_a_wallet_without_a_list_mint() {
@@ -2127,6 +2174,25 @@ test power_users_spend_refuses_a_node_to_a_wallet_without_a_list_mint() {
     Transaction {
       ..base_tx(),
       inputs: [pu_node_input(0, power_user(True, True, True, True, True))],
+      outputs: [attacker_held_ll_nft(pu_policy, pu_cred)],
+    },
+  )
+}
+
+// The control's mint moved under the denylist policy; same reasoning, hence
+// `!`.
+test power_users_spend_refuses_a_node_to_a_wallet_with_only_a_foreign_mint() {
+  let no_datum: Option<Data> = None
+  !v_power_users.power_users_validator.spend(
+    gs_policy,
+    pu_policy,
+    no_datum,
+    PuStateTransition,
+    oref(0),
+    Transaction {
+      ..base_tx(),
+      inputs: [pu_node_input(0, power_user(True, True, True, True, True))],
+      mint: from_asset(denylist_policy, ll_asset_name(clean_stake), 1),
       outputs: [attacker_held_ll_nft(pu_policy, pu_cred)],
     },
   )
