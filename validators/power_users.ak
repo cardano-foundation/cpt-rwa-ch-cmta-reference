@@ -1077,6 +1077,38 @@ test power_users_init_fails_with_another_utxo_spent_instead_of_the_nonce() fail 
   ) || True
 }
 
+/// A plain UTxO at output index `ix` of another transaction than the one every
+/// other fixture shares, so not the nonce even at the nonce's index.
+fn t_nonce_input_from_another_transaction(ix: Int) -> Input {
+  let input = t_nonce_input(ix)
+  Input {
+    ..input,
+    output_reference: OutputReference {
+      ..input.output_reference,
+      transaction_id: #"1111111111111111111111111111111111111111111111111111111111111111",
+    },
+  }
+}
+
+// The spent UTxO has the nonce's output index but another transaction id: the
+// nonce is the whole output reference, so `expect nonce_validated` traps, and
+// only a trap passes this `… || True` body.
+test power_users_init_fails_with_the_nonce_index_from_another_transaction() fail {
+  mint.mint(
+    t_gs_policy,
+    t_oref(50),
+    t_pu_script_hash,
+    Init { root_output_index: 0 },
+    t_pu_policy,
+    Transaction {
+      ..t_base_tx(),
+      inputs: [t_nonce_input_from_another_transaction(50)],
+      mint: from_asset(t_pu_policy, constants.linked_list_root_key, 1),
+      outputs: [t_pu_root_output(None), t_gs_utxo(0, t_gs_datum(False)).output],
+    },
+  ) || True
+}
+
 /// `Deinit` — burning the root. Admin-signed, on an empty list, and only once
 /// the protocol has been deactivated: the root can never be re-created (`Init`
 /// is nonce-gated to a UTxO spent at genesis) and `AddPowerUser` needs an
@@ -1268,6 +1300,53 @@ test power_users_init_after_genesis_fails_without_the_nonce() fail {
 // A UTxO is spent, but not the nonce: the same trap.
 test power_users_init_after_genesis_fails_with_another_utxo_spent_instead_of_the_nonce() fail {
   t_run_pu_iag(Transaction { ..t_pu_iag_tx(), inputs: [t_nonce_input(51)] }) || True
+}
+
+// The nonce's output index, but of another transaction: the same trap.
+test power_users_init_after_genesis_fails_with_the_nonce_index_from_another_transaction() fail {
+  t_run_pu_iag(
+    Transaction {
+      ..t_pu_iag_tx(),
+      inputs: [t_nonce_input_from_another_transaction(50)],
+    },
+  ) || True
+}
+
+// The nonce is found wherever it sits among the inputs: here in the middle of
+// three.
+test power_users_init_after_genesis_succeeds_with_the_nonce_among_other_inputs() {
+  t_run_pu_iag(
+    Transaction {
+      ..t_pu_iag_tx(),
+      inputs: [t_nonce_input(49), t_nonce_input(50), t_nonce_input(51)],
+    },
+  )
+}
+
+/// A minting-authority credential distinct from `t_admin`.
+const t_minting_authority: ByteArray =
+  #"0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f"
+
+// GlobalState names a minting authority distinct from its admin, and only the
+// authority signs: the admin's field is the one that must sign, so a False
+// return, hence `!`.
+test power_users_init_after_genesis_fails_when_signed_by_the_minting_authority_only() {
+  !t_run_pu_iag(
+    Transaction {
+      ..t_pu_iag_tx(),
+      reference_inputs: [
+        t_gs_utxo(
+          0,
+          GlobalStateDatum {
+            ..t_gs_datum(False),
+            power_user_linked_list_policy_id: t_current_pu_policy,
+            minting_script_credential_hash: t_minting_authority,
+          },
+        ),
+      ],
+      extra_signatories: [t_minting_authority],
+    },
+  )
 }
 
 // The root pin traps, as in `Init`.

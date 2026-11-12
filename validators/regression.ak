@@ -1182,6 +1182,41 @@ test denylist_init_fails_with_another_utxo_spent_instead_of_the_nonce() fail {
   ) || True
 }
 
+/// A plain UTxO at output index `ix` of another transaction than the one every
+/// other fixture shares, so not the nonce even at the nonce's index.
+fn nonce_input_from_another_transaction(ix: Int) -> Input {
+  let input = nonce_input(ix)
+  Input {
+    ..input,
+    output_reference: OutputReference {
+      ..input.output_reference,
+      transaction_id: #"1111111111111111111111111111111111111111111111111111111111111111",
+    },
+  }
+}
+
+// The spent UTxO has the nonce's output index but another transaction id: the
+// nonce is the whole output reference, so `expect nonce_validated` traps, and
+// only a trap passes this `… || True` body.
+test denylist_init_fails_with_the_nonce_index_from_another_transaction() fail {
+  v_denylist.mint.mint(
+    gs_policy,
+    oref(50),
+    denylist_spend_hash,
+    DenylistInit { root_output_index: 0 },
+    denylist_policy,
+    Transaction {
+      ..base_tx(),
+      inputs: [nonce_input_from_another_transaction(50)],
+      mint: from_asset(denylist_policy, constants.linked_list_root_key, 1),
+      outputs: [
+        dl_root_output(None),
+        gs_output(2_000_000, gs_datum(False, False, False, False)),
+      ],
+    },
+  ) || True
+}
+
 // ============================================================================
 // PROPERTY: the sanctions list can only be dismantled AFTER the token has been
 // decommissioned.
@@ -2154,6 +2189,27 @@ test denylist_init_after_genesis_fails_without_the_nonce() fail {
 // A UTxO is spent, but not the nonce: the same trap.
 test denylist_init_after_genesis_fails_with_another_utxo_spent_instead_of_the_nonce() fail {
   run_denylist_iag(Transaction { ..dl_iag_tx(), inputs: [nonce_input(51)] }) || True
+}
+
+// The nonce's output index, but of another transaction: the same trap.
+test denylist_init_after_genesis_fails_with_the_nonce_index_from_another_transaction() fail {
+  run_denylist_iag(
+    Transaction {
+      ..dl_iag_tx(),
+      inputs: [nonce_input_from_another_transaction(50)],
+    },
+  ) || True
+}
+
+// The nonce is found wherever it sits among the inputs: here in the middle of
+// three.
+test denylist_init_after_genesis_succeeds_with_the_nonce_among_other_inputs() {
+  run_denylist_iag(
+    Transaction {
+      ..dl_iag_tx(),
+      inputs: [nonce_input(49), nonce_input(50), nonce_input(51)],
+    },
+  )
 }
 
 // The root pin traps, as in `Init`.
