@@ -9,7 +9,7 @@ use aiken_design_patterns/linked_list.{
   spend_for_updating_elements_data,
 }
 use cardano/address.{Address, Script, VerificationKey}
-use cardano/assets.{PolicyId, from_asset, from_lovelace, merge, tokens, zero}
+use cardano/assets.{Assets, PolicyId, from_asset, from_lovelace, merge, zero}
 use cardano/transaction.{
   InlineDatum, Input, NoDatum, Output, OutputReference, Transaction, find_input,
 }
@@ -19,11 +19,9 @@ use types/denylist.{
   AddToDenylist, Deinit, Denylist, Init, MintRedeemer, RemoveFromDenylist,
   SpendRedeemer, StateTransition, UpdateDenylistEntry, valid_frozen_amount,
 }
-use types/global_state.{
-  GlobalStateDatum, genesis_global_state, gs_core_from_ref_input,
-}
+use types/global_state.{GlobalStateDatum, gs_core_from_ref_input}
 use types/power_users.{PowerUser}
-use utils.{must_be_signed_by_credential, quantity_of_policy_id}
+use utils.{must_be_signed_by_credential}
 
 /// Resolves the GS reference input (for the power-user linked-list policy id)
 /// and the power-user node reference input at `power_user_node_ref_input_index`,
@@ -35,7 +33,6 @@ fn power_user_from_refs(
   global_state_ref_input_index: Int,
   global_state_policy_id: ByteArray,
   power_user_node_ref_input_index: Int,
-  power_user_list_script_hash: ByteArray,
 ) -> (ByteArray, PowerUser) {
   let gs = gs_core_from_ref_input(
     self.reference_inputs,
@@ -51,7 +48,6 @@ fn power_user_from_refs(
   let (power_user_credential_hash, power_user_data) = utils.authenticated_power_user(
     power_user_node_ref_input.output,
     gs.power_user_linked_list_policy_id,
-    power_user_list_script_hash,
   )
   // Never the GlobalState logic named in field 0: its withdrawal would sign
   // for the operator. Today it cannot appear here — it needs GlobalState
@@ -62,18 +58,14 @@ fn power_user_from_refs(
   (power_user_credential_hash, power_user_data)
 }
 
-/// Parameters sit in the same positions as `mint`'s: GlobalState policy first,
-/// then what identifies THIS list (here its policy id, there the one-shot
-/// nonce), then the power-users spend hash.
+/// The only parameter is the GlobalState policy, `mint`'s first. This list's
+/// own policy id is not a parameter: the mint takes this validator's hash, so
+/// the spend reads the policy off the element it spends.
 validator denylist_validator(
   /// Needed only by `UpdateDenylistEntry`, which — unlike Add/Remove — runs no
   /// mint and so must authorise the sanctions officer here. Not circular: the
   /// GlobalState policy depends on neither denylist hash.
   global_state_policy_id: ByteArray,
-  denylist_linked_list_policy_id: ByteArray,
-  /// The POWER-USERS SPEND VALIDATOR's script hash, for the same reason. Not
-  /// circular: the power-users validators never depend on the denylist.
-  power_user_list_script_hash: ByteArray,
 ) {
   spend(
     _datum_opt: Option<Data>,
@@ -81,32 +73,33 @@ validator denylist_validator(
     input_out_ref: OutputReference,
     self: Transaction,
   ) {
+    // This list's policy id is not a parameter: the list mint takes this
+    // validator's hash, so taking the policy id back would be circular. It is
+    // read off the UTxO being spent instead, which must hold exactly one
+    // policy besides lovelace (`utils.sole_nft_policy_id` traps on no token or
+    // on a second policy; it reads no names or quantities, because the list
+    // mint creates exactly one token per element).
+    //
+    // That also binds every arm to a UTxO shaped like a list element. A stray
+    // value-bearing UTxO parked at the list address with no token at all —
+    // not list state — cannot ride along with a genuine list mutation
+    // elsewhere in the same transaction: it traps here. A UTxO holding some
+    // other policy's NFT yields that other policy, so its spend is decided by
+    // that policy's mint, never by this list's; readers name this list's
+    // policy, so such a UTxO is never list state either.
+    expect Some(own_input) = find_input(self.inputs, input_out_ref)
+    let denylist_linked_list_policy_id = utils.sole_nft_policy_id(
+      own_input.output.value,
+    )
     when redeemer is {
-      StateTransition -> {
-        // Delegate to mint validator.
-        //
-        // `spend_for_adding_or_removing_an_element` only asks whether SOME
-        // denylist-policy mint/burn happens anywhere in this transaction — it
-        // says nothing about the UTxO actually being spent under this
-        // redeemer. Without pinning that, a stray value-bearing UTxO parked at
-        // the list address (holding no list NFT, and therefore not list state
-        // at all) could be swept up and spent here, riding along with any
-        // genuine list mutation elsewhere in the same transaction. Resolving
-        // this validator's own input and requiring it to carry the list's NFT
-        // closes that: only a genuine list element (root or node) may be spent
-        // under `StateTransition`.
-        expect Some(own_input) = find_input(self.inputs, input_out_ref)
-        and {
-          (quantity_of_policy_id(
-            own_input.output.value,
-            denylist_linked_list_policy_id,
-          ) > 0)?,
-          spend_for_adding_or_removing_an_element(
-            denylist_linked_list_policy_id,
-            self.mint,
-          ),
-        }
-      }
+      StateTransition ->
+        // Delegate to the mint validator: the library's gate requires a mint
+        // or burn under this list's policy, so the list mint runs and proves
+        // the exact transition.
+        spend_for_adding_or_removing_an_element(
+          denylist_linked_list_policy_id,
+          self.mint,
+        )
       UpdateDenylistEntry {
         own_input_index,
         own_output_index,
@@ -125,7 +118,6 @@ validator denylist_validator(
           global_state_ref_input_index,
           global_state_policy_id,
           power_user_node_ref_input_index,
-          power_user_list_script_hash,
         )
         and {
           power_user_data.is_admin?,
@@ -191,68 +183,74 @@ validator denylist_validator(
 validator mint(
   global_state_policy_id: ByteArray,
   init_input_out_ref: OutputReference,
-  /// The POWER-USERS SPEND VALIDATOR's script hash. Not circular: the
-  /// power-users validators depend on the GlobalState mint hash, never on the
-  /// denylist policy id.
-  power_user_list_script_hash: ByteArray,
+  /// The DENYLIST SPEND VALIDATOR's script hash: where every NFT of this
+  /// policy must live. Not circular: the spend validator reads the list policy
+  /// off the element it spends, so its hash depends only on the GlobalState
+  /// policy.
+  list_script_hash: ByteArray,
 ) {
   mint(redeemer: MintRedeemer, policy_id: PolicyId, self: Transaction) {
     when redeemer is {
       Init { root_output_index } -> {
-        // Nonce-gated. GS is only being created in this same transaction (it is
-        // an output, not yet an input) — the operator-held one-shot UTxO is the
-        // implicit gate, same pattern as power_users.
+        // One-shot because of the nonce, as the power-users list's `Init`:
+        // each instance is a mint applied with its own `init_input_out_ref`,
+        // so its own policy id, and its root is created once, when that UTxO
+        // is spent. No GlobalState is read, so the same branch serves at
+        // genesis and after it.
+        //
+        // Whoever creates the root gains no control over the list: every
+        // change to its contents (Add, Remove, UpdateDenylistEntry, Deinit) is
+        // gated through GlobalState, by an `is_admin` power user of the list
+        // it names or by its admin.
+        //
+        // Genesis wiring is still forced by the GlobalState mint: both list
+        // policies must mint in the genesis transaction, and a list mint
+        // cannot mint there except through `Init` (every other branch reads
+        // GlobalState as a reference input, which does not exist yet). That
+        // the policy ids GlobalState names are this repository's lists is
+        // verified off-chain.
+        //
+        // No count of this policy's mint here: the library's `init` already
+        // requires the root NFT to be the only asset of this policy minted, at
+        // quantity 1, and traps otherwise.
+        //
+        // No count of this policy's inputs either: no token of it can exist
+        // before the root. `Init` is one-shot (the nonce), and every other
+        // branch needs an existing element, as its input (`AddToDenylist`) or
+        // burnt (`RemoveFromDenylist`, `Deinit`).
         let nonce_validated = list.any(
           self.inputs,
           fn(input) { input.output_reference == init_input_out_ref },
         )
         let root_output = utils.safe_list_at(self.outputs, root_output_index)
-        and {
-          dict.size(tokens(self.mint, policy_id)) == 1,
-          // Genesis: no list node exists yet, so none may be spent.
-          (utils.count_inputs_with_policy(self.inputs, policy_id) == 0)?,
-          // Genesis binding: the GlobalState minted in this same transaction
-          // must name THIS list. The GlobalState mint only checks that the
-          // policy its datum names mints something, and the id is immutable
-          // afterwards — so a deployment naming another list would leave this
-          // one, and the role or sanctions checks it carries, unreachable for
-          // good. Not circular: the GlobalState policy is a parameter here.
-          (genesis_global_state(self.outputs, global_state_policy_id).denylist_linked_list_policy_id == policy_id)?,
-          // The library hands this callback the produced root's ADDRESS, so a
-          // caller could in principle pin where the root lands. THIS ONE CANNOT,
-          // and the reason is worth recording so nobody tries to "fix" it:
-          //
-          // pinning it would mean passing the list SPEND validator's hash to this
-          // MINT validator — but the spend validator is parameterised by the list
-          // policy id, which IS this mint validator's own hash. The dependency
-          // would be circular, so no compile-time value exists.
-          //
-          // Genesis is therefore verified off-chain: after `Init`, confirm the
-          // root NFT actually sits at the list spend validator's address. `Init`
-          // is nonce-gated to a one-shot operator-held UTxO, so the only party
-          // who can get this wrong is the deployer, and only once. Every LATER
-          // read of a list element does pin the address, so a misplaced root
-          // fails closed rather than silently granting authority.
-          init(nonce_validated, root_output, self.mint, fn(_, _, _) { True })
-            |> run_root_with(policy_id, constants.linked_list_root_key),
-        }
+        creates_the_root(
+          self,
+          nonce_validated,
+          root_output,
+          policy_id,
+          list_script_hash,
+        )
       }
       Deinit { global_state_ref_input_index } -> {
         // POST-DECOMMISSION CLEANUP ONLY.
         //
-        // Burning the root is irreversible in both directions: `Init` is gated
-        // on a one-shot UTxO consumed at genesis, so a root can never be
-        // re-created, and `denylist_linked_list_policy_id` is immutable in the
-        // GlobalState datum — no spend branch writes it — so GlobalState can
-        // never be pointed at a replacement list either.
+        // Burning the root is irreversible: this list instance's root can never
+        // be re-created, because its `Init` nonce is spent. A new instance (a
+        // new policy) can be created with `Init` at any time, but it is inert
+        // unless `MigrateLists` adopts it. Only `MigrateLists` writes
+        // `denylist_linked_list_policy_id`, admin-signed and before
+        // `LockUpgrades`, and it needs GlobalState spent — so after the lock,
+        // or once deactivated, GlobalState can never be pointed at a
+        // replacement list either.
         //
         // What that costs while the protocol is LIVE: every movement of the
         // security token needs a covering node of THIS list as a reference
         // input — the transfer path, the seizure path and every mint
         // destination all go through `lib/denylist/absence.ak`. With no root
         // there is no element to cover anything, so a `Deinit` on a live
-        // protocol permanently freezes the register while the token still
-        // reports itself active. That is a worse state than decommissioning,
+        // protocol freezes the register — until a `MigrateLists` before the
+        // lock, for good after it — while the token still reports itself
+        // active. That is a worse state than decommissioning,
         // because it is invisible: `deactivated` stays False.
         //
         // Requiring `deactivated` first forces the two irreversible decisions
@@ -273,11 +271,16 @@ validator mint(
         and {
           gs.deactivated?,
           must_be_signed_by_credential(self, gs.admin_credential_hash),
-          dict.size(tokens(self.mint, policy_id)) == 1,
+          // No count of this policy's mint here: the library's `deinit`
+          // already requires the root NFT to be the only asset of this policy
+          // minted, at quantity -1, and traps otherwise.
+          //
           // Only the root is spent, and `deinit` already requires the list to
-          // be empty. See the note on the Add branch for why this count is
-          // kept alongside the library's own scan.
-          (utils.count_inputs_with_policy(self.inputs, policy_id) == 1)?,
+          // be empty. No count of this policy's inputs either: `deinit`'s
+          // input scan traps on a second element of the policy, and no token
+          // of the policy exists outside an element (see the note on the
+          // `AddToDenylist` branch), so once the root is burnt no token of the
+          // policy is left anywhere.
           deinit(self.inputs, self.mint, fn(_, _, _) { True })
             |> run_root_with(policy_id, constants.linked_list_root_key),
         }
@@ -296,7 +299,6 @@ validator mint(
           global_state_ref_input_index,
           global_state_policy_id,
           power_user_node_ref_input_index,
-          power_user_list_script_hash,
         )
         let anchor_output = utils.safe_list_at(
           self.outputs,
@@ -314,20 +316,44 @@ validator mint(
           bytearray.length(user_pkh) == 28,
           power_user_data.is_admin,
           must_be_signed_by_credential(self, power_user_credential_hash),
-          dict.size(tokens(self.mint, policy_id)) == 1,
+          // No count of this policy's mint here: the library's
+          // `insert_ascending` already requires the new node's NFT to be the
+          // only asset of this policy minted, at quantity 1, and traps
+          // otherwise.
+          //
           // An insert spends exactly one element — the anchor, which
           // `insert_ascending` infers from `self.inputs` itself. The new node
           // is an OUTPUT.
           //
-          // The library performs its own exact-one scan, so this line is
-          // defence in depth. It is kept because the two counts are not
-          // identical: the library's scanner only recognises CANONICAL
-          // elements (exactly ADA plus one list NFT) and silently IGNORES an
-          // input carrying the list policy in any other value shape, whereas
-          // this one counts every input bearing the policy. Element outputs
-          // are strictly canonical, so the gap should be unreachable — but a
-          // list is an access-control structure, and this costs one fold.
-          (utils.count_inputs_with_policy(self.inputs, policy_id) == 1)?,
+          // No count of this policy's inputs either, here or on
+          // `RemoveFromDenylist` and `Deinit`. The library's input scan
+          // recognises only CANONICAL elements (ADA plus exactly that one
+          // NFT, quantity 1, an inline datum, no reference script), and every
+          // token of this policy is always in one, at the list spend script.
+          // By induction over transactions:
+          //
+          // * Before `Init` no token exists. `Init` mints one, in a root the
+          //   library authenticates as canonical, pinned to
+          //   `Script(list_script_hash)`.
+          // * A transaction minting or burning under the policy runs this
+          //   handler. Every input bearing the policy is canonical and at the
+          //   list script, so the library's scan sees each one: `deinit` and
+          //   the insertion trap on a second element input of the policy, and
+          //   `remove` refuses any input at the list's credential beyond its
+          //   pair. With the mint fixed by `is_only_mint_under_policy`, value
+          //   conservation leaves every token of the policy in an output the
+          //   library authenticates as canonical: the continued anchor at the
+          //   anchor's address, or the new node at the anchor's payment
+          //   credential.
+          // * Any other transaction: every element spent is at the list spend
+          //   script, so runs it, and its only arms are `StateTransition`,
+          //   which requires a mint under the policy, and
+          //   `UpdateDenylistEntry`, whose `spend_for_updating_elements_data`
+          //   requires a canonical continuation at the same address with the
+          //   same NFT.
+          //
+          // So an input carrying the policy in another value shape, which the
+          // scan would not see, cannot exist.
           insert_ascending(
             anchor_output,
             new_node_output,
@@ -374,7 +400,6 @@ validator mint(
           global_state_ref_input_index,
           global_state_policy_id,
           power_user_node_ref_input_index,
-          power_user_list_script_hash,
         )
         // `remove` finds both spent elements itself; the index only says
         // WHICH of the two is the anchor.
@@ -391,11 +416,16 @@ validator mint(
           bytearray.length(user_pkh) == 28,
           power_user_data.is_admin,
           must_be_signed_by_credential(self, power_user_credential_hash),
-          dict.size(tokens(self.mint, policy_id)) == 1,
+          // No count of this policy's mint here: the library's `remove`
+          // already requires the removed node's NFT to be the only asset of
+          // this policy minted, at quantity -1, and traps otherwise.
+          //
           // A remove spends exactly two elements: the anchor and the node
-          // being removed. Defence in depth beside the library's own exact-two
-          // scan — see the note on the Add branch.
-          (utils.count_inputs_with_policy(self.inputs, policy_id) == 2)?,
+          // being removed. No count of this policy's inputs (see the note on
+          // the `AddToDenylist` branch): `remove`'s input scan refuses any
+          // element input at the list's credential beyond the pair (every
+          // element is there), keeps the continued anchor at the anchor's
+          // address and burns the other.
           remove(
             anchor_out_ref,
             anchor_output,
@@ -432,6 +462,36 @@ validator mint(
   }
 }
 
+/// The root's creation in `Init`: the nonce UTxO is spent, the root is the
+/// only token of this policy minted, and it is pinned to the list spend script.
+///
+/// The library hands the callback the produced root's address, and the root is
+/// pinned there: its whole payment credential must be
+/// `Script(list_script_hash)`, so a key credential carrying the same hash is
+/// refused; the stake part stays free. The library `expect`s the nonce and the
+/// callback, so a missing nonce or a misplaced root traps.
+///
+/// Not circular: the spend validator takes no list policy id (it reads the
+/// policy off the element it spends), so its hash depends only on the
+/// GlobalState policy, and this mint takes that hash.
+fn creates_the_root(
+  self: Transaction,
+  nonce_validated: Bool,
+  root_output: Output,
+  policy_id: PolicyId,
+  list_script_hash: ByteArray,
+) -> Bool {
+  init(
+    nonce_validated,
+    root_output,
+    self.mint,
+    fn(address, _, _) {
+      (address.payment_credential == Script(list_script_hash))?
+    },
+  )
+    |> run_root_with(policy_id, constants.linked_list_root_key)
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -444,6 +504,10 @@ const t_gs_policy: ByteArray =
 
 const t_pu_policy: ByteArray =
   #"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+/// A policy unrelated to the lists, sorting before `t_dl_policy`.
+const t_foreign_policy: ByteArray =
+  #"1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f"
 
 const t_dl_script_hash: ByteArray =
   #"d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0"
@@ -708,8 +772,6 @@ test denylist_spend_accepts_a_genuine_node_spend_alongside_a_mutation() {
   }
   denylist_validator.spend(
     t_gs_policy,
-    t_dl_policy,
-    t_pu_script_hash,
     no_datum,
     StateTransition,
     t_oref(0),
@@ -720,28 +782,122 @@ test denylist_spend_accepts_a_genuine_node_spend_alongside_a_mutation() {
 /// THE GUARD under test. A UTxO sitting at the denylist address with NO
 /// denylist-policy token — not list state at all — spent under
 /// `StateTransition` while a genuine denylist mint/burn happens elsewhere in
-/// the very same transaction. Before this fix, `spend_for_adding_or_removing_
-/// an_element` asked only "does the mint field carry this policy anywhere",
-/// so this stray UTxO's value could be swept out alongside any real
-/// insert/remove. Now the validator additionally resolves ITS OWN spent
-/// input and requires that specific UTxO to carry the list token, so the new
-/// `(quantity_of_policy_id(own_input.output.value, ...) > 0)?` conjunct is
-/// False and the `and { }` block returns False — hence `!`, not `fail`.
-test denylist_spend_rejects_a_stray_no_token_utxo_swept_alongside_a_mutation() {
+/// the very same transaction. `spend_for_adding_or_removing_an_element` asks
+/// only "does the mint field carry this policy anywhere", so without a check
+/// on the spent UTxO itself its value could be swept out alongside any real
+/// insert/remove. The validator reads the list policy off ITS OWN spent input,
+/// which must hold exactly one policy besides lovelace; this one holds only
+/// lovelace, so the derivation traps — hence `fail`, written `… || True` so
+/// that a validator merely returning False cannot pass it.
+test denylist_spend_rejects_a_stray_no_token_utxo_swept_alongside_a_mutation() fail {
   let no_datum: Option<Data> = None
   let tx = Transaction {
     ..t_base_tx(),
     inputs: [t_dl_stray_input(0)],
     mint: from_asset(t_dl_policy, t_ll_asset_name(t_key_28), 1),
   }
-  !denylist_validator.spend(
+  denylist_validator.spend(
     t_gs_policy,
-    t_dl_policy,
-    t_pu_script_hash,
     no_datum,
     StateTransition,
     t_oref(0),
     tx,
+  ) || True
+}
+
+// ── The spend reads its list policy off its own input ───────────────────────
+//
+// Each test below is the accepted control above
+// (`denylist_spend_accepts_a_genuine_node_spend_alongside_a_mutation`) with
+// only the spent node's value changed. The derivation traps on no token or on
+// a second policy, so each refusal is written `… || True`: a validator that
+// merely returns False cannot pass it, only a trap can. It reads no names or
+// quantities under the policy, so the two shapes holding more than one list
+// token are accepted; neither can occur on chain.
+
+/// The control's node with `extra` merged into its value.
+fn t_dl_node_with(extra: Assets) -> Input {
+  let node = t_dl_node_input(0, t_key_28)
+  Input {
+    ..node,
+    output: Output { ..node.output, value: merge(node.output.value, extra) },
+  }
+}
+
+fn t_run_dl_state_transition(own_input: Input) -> Bool {
+  let no_datum: Option<Data> = None
+  denylist_validator.spend(
+    t_gs_policy,
+    no_datum,
+    StateTransition,
+    t_oref(0),
+    Transaction {
+      ..t_base_tx(),
+      inputs: [own_input],
+      mint: from_asset(t_dl_policy, t_ll_asset_name(t_key_28), 1),
+    },
+  )
+}
+
+/// A second policy beside the list NFT: the value has three entries, so the
+/// derivation traps. The second policy sorts before the list policy, so a
+/// derivation reading the first token's policy would pick it.
+test denylist_spend_refuses_an_own_input_with_two_policies() fail {
+  t_run_dl_state_transition(
+    t_dl_node_with(from_asset(t_foreign_policy, t_ll_asset_name(t_key_28), 1)),
+  ) || True
+}
+
+/// A second asset name under the list policy: accepted, because the
+/// derivation reads no names. No element holds this shape on chain: the list
+/// mint creates exactly one token per element (the library's
+/// `is_only_mint_under_policy`), and the library authenticates every element
+/// output as lovelace plus one NFT at quantity 1.
+test denylist_spend_derives_the_policy_from_an_own_input_with_two_names() {
+  t_run_dl_state_transition(
+    t_dl_node_with(from_asset(t_dl_policy, t_ll_asset_name(t_pu_cred), 1)),
+  )
+}
+
+/// The list NFT at quantity 2: accepted, because the derivation reads no
+/// quantities. No element holds this shape on chain, for the same reason as
+/// the test above: the list mint creates each token at quantity 1 (the
+/// library's `is_only_mint_under_policy`), and the library authenticates every
+/// element output as lovelace plus one NFT at quantity 1.
+test denylist_spend_derives_the_policy_from_an_own_input_with_quantity_two() {
+  t_run_dl_state_transition(
+    t_dl_node_with(from_asset(t_dl_policy, t_ll_asset_name(t_key_28), 1)),
+  )
+}
+
+/// A UTxO at the list address holding an unrelated policy's NFT, spent under
+/// `StateTransition` beside a mint of that unrelated policy: accepted. This is
+/// harmless. The spend reads the unrelated policy off the UTxO, so its own
+/// mint decides the spend, not this list's; and every reader names the list
+/// policy, so such a UTxO is never list state.
+test denylist_spend_accepts_a_foreign_utxo_under_its_own_mint() {
+  let no_datum: Option<Data> = None
+  let node = t_dl_node_input(0, t_key_28)
+  let foreign_input = Input {
+    ..node,
+    output: Output {
+      ..node.output,
+      value: merge(
+        from_lovelace(2_000_000),
+        from_asset(t_foreign_policy, t_ll_asset_name(t_key_28), 1),
+      ),
+    },
+  }
+  denylist_validator.spend(
+    t_gs_policy,
+    no_datum,
+    StateTransition,
+    t_oref(0),
+    Transaction {
+      ..t_base_tx(),
+      inputs: [foreign_input],
+      mint: from_asset(t_foreign_policy, t_ll_asset_name(t_pu_cred), 1),
+    },
   )
 }
 
@@ -765,7 +921,7 @@ fn t_run_denylist_add(key: ByteArray, tx: Transaction) -> Bool {
   mint.mint(
     t_gs_policy,
     t_oref(99),
-    t_pu_script_hash,
+    t_dl_script_hash,
     AddToDenylist {
       user_pkh: key,
       anchor_node_output_index: 0,
@@ -850,7 +1006,7 @@ fn t_run_denylist_remove(key: ByteArray, tx: Transaction) -> Bool {
   mint.mint(
     t_gs_policy,
     t_oref(99),
-    t_pu_script_hash,
+    t_dl_script_hash,
     RemoveFromDenylist {
       user_pkh: key,
       anchor_node_input_index: 0,
@@ -880,6 +1036,28 @@ test denylist_remove_rejects_a_29_byte_key() {
   !t_run_denylist_remove(t_key_29, t_dl_remove_tx(t_key_29))
 }
 
+// GlobalState's field 7 names another 28-byte policy, as after a
+// `MigrateLists` away from this list, while field 3 is unchanged: the operator
+// still authenticates under it, so a retired list's min-ADA can be reclaimed.
+test denylist_remove_succeeds_on_a_list_global_state_no_longer_names() {
+  t_run_denylist_remove(
+    t_key_28,
+    Transaction {
+      ..t_dl_remove_tx(t_key_28),
+      reference_inputs: [
+        t_gs_utxo(
+          0,
+          GlobalStateDatum {
+            ..t_gs_datum(False),
+            denylist_linked_list_policy_id: #"01010101010101010101010101010101010101010101010101010101",
+          },
+        ),
+        t_pu_node_input(1, t_power_user(True)),
+      ],
+    },
+  )
+}
+
 // Non-upgradeable: must keep reading a GlobalState datum a future version
 // extended with trailing fields (see decode_global_state_core).
 test denylist_insert_accepts_a_global_state_with_trailing_fields() {
@@ -889,8 +1067,9 @@ test denylist_insert_accepts_a_global_state_with_trailing_fields() {
   )
 }
 
-// Frozen core: the sanctions path keeps working when a later logic reshapes
-// every field after 0–5.
+// Frozen core: the sanctions path's GlobalState read is permanent and tolerates
+// any tail after fields 0–4. A rotation is append-only, so such a tail only
+// arises from a successor logic's own later actions.
 test denylist_insert_accepts_a_global_state_with_a_reshaped_tail() {
   t_run_denylist_add(
     t_key_28,
@@ -993,8 +1172,6 @@ fn t_run_update(tx: Transaction) -> Bool {
   let no_datum: Option<Data> = None
   denylist_validator.spend(
     t_gs_policy,
-    t_dl_policy,
-    t_pu_script_hash,
     no_datum,
     UpdateDenylistEntry {
       own_input_index: 0,
@@ -1048,27 +1225,6 @@ test denylist_update_rejects_a_deactivated_protocol() fail {
     reference_inputs: [
       t_gs_utxo(0, t_gs_datum(True)),
       t_pu_node_input(1, t_power_user(True)),
-    ],
-  }
-  t_run_update(tx)
-}
-
-test denylist_update_rejects_a_power_user_node_outside_its_list() fail {
-  let pu = t_pu_node_input(1, t_power_user(True))
-  let tx = Transaction {
-    ..t_update_tx(t_entry(None), t_entry(Some(10)), 2_000_000),
-    reference_inputs: [
-      t_gs_utxo(0, t_gs_datum(False)),
-      Input {
-        ..pu,
-        output: Output {
-          ..pu.output,
-          address: Address {
-            payment_credential: VerificationKey(t_pu_cred),
-            stake_credential: None,
-          },
-        },
-      },
     ],
   }
   t_run_update(tx)
@@ -1151,8 +1307,6 @@ test denylist_update_rejects_two_spends_sharing_one_continuation() fail {
   }
   denylist_validator.spend(
     t_gs_policy,
-    t_dl_policy,
-    t_pu_script_hash,
     no_datum,
     UpdateDenylistEntry {
       own_input_index: 1,
@@ -1260,8 +1414,6 @@ test denylist_update_accepts_distinct_input_and_output_indices() {
   }
   denylist_validator.spend(
     t_gs_policy,
-    t_dl_policy,
-    t_pu_script_hash,
     no_datum,
     UpdateDenylistEntry {
       own_input_index: 1,
@@ -1307,4 +1459,149 @@ test dl_remove_rejects_a_missing_signature() {
     t_key_28,
     Transaction { ..t_dl_remove_tx(t_key_28), extra_signatories: [] },
   )
+}
+
+// ── A list NFT never leaves the list script ─────────────────────────────────
+//
+// One refusal per path through which a denylist NFT is minted, moved or kept
+// in this file's fixtures (Init, Deinit and the spend gate are in
+// `validators/regression.ak`). Each is an accepted fixture above with only the
+// NFT's destination changed; its accepted control is named in its comment. A
+// `fail` test here is written `… || True` or `… |> fn(_) { True }`, so a
+// validator that merely returns False cannot pass it — only a trap can.
+
+/// A key (wallet) address outside the list.
+const t_wallet: ByteArray =
+  #"0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e"
+
+fn t_at_wallet(output: Output) -> Output {
+  Output {
+    ..output,
+    address: Address {
+      payment_credential: VerificationKey(t_wallet),
+      stake_credential: None,
+    },
+  }
+}
+
+// AddToDenylist: control `denylist_insert_accepts_a_28_byte_key`. The new node
+// must share the anchor's payment credential (the library's insert check), so
+// it traps.
+test denylist_insert_refuses_a_new_node_at_a_wallet() fail {
+  let tx = t_dl_insert_tx(t_key_28)
+  t_run_denylist_add(
+    t_key_28,
+    Transaction {
+      ..tx,
+      outputs: [
+        t_dl_root_output(Some(t_key_28)),
+        t_at_wallet(t_dl_sanction_node_output(t_key_28)),
+      ],
+    },
+  ) || True
+}
+
+// The continued anchor must keep the anchor's full address (library), so it
+// traps.
+test denylist_insert_refuses_an_anchor_continuation_at_a_wallet() fail {
+  let tx = t_dl_insert_tx(t_key_28)
+  t_run_denylist_add(
+    t_key_28,
+    Transaction {
+      ..tx,
+      outputs: [
+        t_at_wallet(t_dl_root_output(Some(t_key_28))),
+        t_dl_sanction_node_output(t_key_28),
+      ],
+    },
+  ) || True
+}
+
+// RemoveFromDenylist: control `denylist_remove_accepts_a_28_byte_key`. The
+// continued anchor must keep the anchor's address (library), so it traps.
+test denylist_remove_refuses_an_anchor_continuation_at_a_wallet() fail {
+  t_run_denylist_remove(
+    t_key_28,
+    Transaction {
+      ..t_dl_remove_tx(t_key_28),
+      outputs: [t_at_wallet(t_dl_root_output(None))],
+    },
+  ) || True
+}
+
+// The removed node's NFT is paid to a wallet instead of burnt, so nothing of
+// this policy is minted. The library's `remove` requires the burn
+// (`expect is_only_mint_under_policy`), finds no entry for this policy and
+// traps, so only a trap passes this `… |> fn(_) { True }` body.
+test denylist_remove_refuses_a_removed_node_kept_in_a_wallet() fail {
+  t_run_denylist_remove(
+    t_key_28,
+    Transaction {
+      ..t_dl_remove_tx(t_key_28),
+      mint: zero,
+      outputs: [
+        t_dl_root_output(None),
+        t_at_wallet(t_dl_sanction_node_output(t_key_28)),
+      ],
+    },
+  )
+    |> fn(_) { True }
+}
+
+// The same, with another node NFT minted in place of the burn so that this
+// policy still runs. The library requires the removal to burn exactly the
+// removed node's NFT, so it traps.
+test denylist_remove_refuses_a_removed_node_kept_under_another_list_mint() fail {
+  t_run_denylist_remove(
+    t_key_28,
+    Transaction {
+      ..t_dl_remove_tx(t_key_28),
+      mint: from_asset(t_dl_policy, t_ll_asset_name(t_other_key), 1),
+      outputs: [
+        t_dl_root_output(None),
+        t_at_wallet(t_dl_sanction_node_output(t_key_28)),
+      ],
+    },
+  ) || True
+}
+
+// The same, burning another node's NFT instead: the quantity is right, so
+// only the library's burnt-name check refuses it, by trapping. In-process
+// only: no input carries that NFT, so the ledger could not balance the burn.
+test denylist_remove_refuses_burning_another_node_in_place_of_the_removed_one() fail {
+  t_run_denylist_remove(
+    t_key_28,
+    Transaction {
+      ..t_dl_remove_tx(t_key_28),
+      mint: from_asset(t_dl_policy, t_ll_asset_name(t_other_key), -1),
+      outputs: [
+        t_dl_root_output(None),
+        t_at_wallet(t_dl_sanction_node_output(t_key_28)),
+      ],
+    },
+  ) || True
+}
+
+// UpdateDenylistEntry: control
+// `denylist_update_relaxes_a_full_freeze_to_a_partial_one`, the same
+// transaction with the continuation at the list script. The wallet case is
+// `denylist_update_rejects_a_continuation_at_another_address`; here the
+// continuation sits at the power-users spend script. The library requires the
+// continuation to keep the spent element's address, so it traps.
+test denylist_update_refuses_a_continuation_at_another_script() fail {
+  let out = t_entry_input(0, t_key_28, t_entry(Some(10)), 2_000_000).output
+  t_run_update(
+    Transaction {
+      ..t_update_tx(t_entry(None), t_entry(Some(10)), 2_000_000),
+      outputs: [
+        Output {
+          ..out,
+          address: Address {
+            payment_credential: Script(t_pu_script_hash),
+            stake_credential: None,
+          },
+        },
+      ],
+    },
+  ) || True
 }

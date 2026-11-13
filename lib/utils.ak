@@ -3,9 +3,9 @@ use aiken/collection/dict
 use aiken/collection/list
 use aiken/collection/pairs
 use aiken_design_patterns/linked_list.{get_node_element_info, run_node_with}
-use cardano/address.{Address, Credential, Script, VerificationKey}
+use cardano/address.{Credential, Script, VerificationKey}
 use cardano/assets.{Assets, PolicyId, tokens}
-use cardano/transaction.{InlineDatum, Input, Output, Transaction}
+use cardano/transaction.{InlineDatum, Output, Transaction}
 use constants
 use types/kyc_proof
 use types/power_users.{PowerUser}
@@ -116,27 +116,25 @@ pub fn quantity_of_policy_id(value: Assets, policyId: PolicyId) {
 ///    well-formed inline `Element` datum.
 /// 2. It is a NODE, not the list root. `get_node_element_info` enforces this
 ///    structurally, so there is no `expect Some(key)` to get wrong.
-/// 3. It still LIVES AT THE LIST'S SPEND ADDRESS. Authentication says nothing
-///    about where an element sits, and that omission is load-bearing: the key
-///    is fixed by the NFT's asset name, but the ROLE FLAGS come from the datum.
-///    A power-user NFT carried out of the list into a private wallet would
-///    otherwise keep granting whatever flags its holder writes, so a revoked
-///    operator would keep their powers. Pinning the address is what makes
-///    revocation stick.
+/// 3. Its datum is a well-formed `PowerUser`.
+///
+/// The node's ADDRESS is not checked here: the list guarantees that every NFT
+/// of its policy lives at its spend script — the list mint's Init pin, and the
+/// library's own address checks on nodes and continuations, whose input scan
+/// refuses any spent element they do not place (the argument is on the list
+/// mint's `AddPowerUser` branch) — so the policy id alone identifies a list
+/// element.
 ///
 /// Every caller that reads power-user authority goes through here — the
 /// denylist mint, the minting authority, the seizure logic and the GlobalState
-/// pause branch — so the three checks cannot drift apart between them.
+/// pause branch — so the checks cannot drift apart between them.
 pub fn authenticated_power_user(
   node_output: Output,
   power_user_list_policy_id: PolicyId,
-  power_user_list_script_hash: ByteArray,
 ) -> (ByteArray, PowerUser) {
   get_node_element_info(
     node_output,
-    fn(address, _lovelace, node_key, data, _link) {
-      expect Address { payment_credential: Script(node_script), .. } = address
-      expect node_script == power_user_list_script_hash
+    fn(_address, _lovelace, node_key, data, _link) {
       expect power_user_data: PowerUser = data
       (node_key, power_user_data)
     },
@@ -177,42 +175,25 @@ pub fn credential_type_byte(credential: Credential) -> Int {
   }
 }
 
-/// How many of `inputs` carry at least one token of `policy_id`.
+/// The policy id of the one NFT a linked-list element carries, read off the
+/// element's own value.
 ///
-/// The linked-list library authenticates exactly the three element UTxOs an
-/// insert or a remove touches (anchor, its reproduction, and the new/removed
-/// node) and says nothing about a FOURTH. Both list `spend` handlers delegate
-/// insert and remove (`StateTransition`) wholesale to their mint validator,
-/// which only asks whether SOME token of the policy is in the mint field — so
-/// an extra list node spent alongside a legitimate insert is constrained by
-/// nothing: the mint field carries one asset at +1, that fourth NFT is
-/// conserved by the ledger, and no validator says where it must land. It can go
-/// to a private wallet, where (because element authentication never inspects
-/// the address) it keeps authenticating whatever datum its holder writes — and
-/// the list is permanently corrupted, since its predecessor still links to a
-/// key no longer at the script.
+/// The value must hold exactly one policy besides lovelace; any other shape
+/// traps: no token at all, or a second policy. The first entry is not checked
+/// to be lovelace, because a ledger value always lists lovelace first. The
+/// names and quantities under the policy are not checked either: the list mint
+/// creates exactly one token per element (the library's
+/// `is_only_mint_under_policy` on every branch), so a list element never
+/// holds another shape.
 ///
-/// Pinning the input count per mint branch is the cheapest place to close this:
-/// the mint validator already knows the operation shape and must run for any
-/// insert or remove. (The denylist's in-place `UpdateDenylistEntry` runs no
-/// mint at all: the library's `one_to_one` binds each update spend to its own
-/// continuation, which must keep the address, the NFT and the link, so no node
-/// can leave the list that way either.) Outputs need no separate constraint —
-/// with inputs pinned and the mint field already restricted to a single asset,
-/// value conservation forces the count, and the library already requires each
-/// element output to hold exactly one NFT of the policy.
-pub fn count_inputs_with_policy(inputs: List<Input>, policy_id: PolicyId) -> Int {
-  list.foldl(
-    inputs,
-    0,
-    fn(input, acc) {
-      if quantity_of_policy_id(input.output.value, policy_id) > 0 {
-        acc + 1
-      } else {
-        acc
-      }
-    },
-  )
+/// A list spend validator calls this on the UTxO it is spending, in place of
+/// taking its list policy id as a parameter. It cannot take one: the list mint
+/// takes the spend validator's hash, so the dependency would be circular. A
+/// UTxO at the list address holding some other policy's token yields that
+/// other policy; it is not list state, and no reader treats it as such.
+pub fn sole_nft_policy_id(value: Assets) -> PolicyId {
+  expect [_, Pair(policy_id, _)] = assets.to_pairs(value)
+  policy_id
 }
 
 /// Rebuild a Constr field list, replacing the element at `index` with

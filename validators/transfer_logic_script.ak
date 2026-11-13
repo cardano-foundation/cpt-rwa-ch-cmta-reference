@@ -70,9 +70,6 @@ validator transfer_logic_validator(
   /// what closes that; nothing about "did some node name me" was ever
   /// load-bearing.
   security_policy_id: ByteArray,
-  /// The DENYLIST SPEND VALIDATOR's script hash, which every denylist element
-  /// a party cites must sit at. See `absence.with_denylist_element`.
-  denylist_script_hash: ByteArray,
 ) {
   withdraw(
     redeemer: TransferLogicScriptWithdrawRedeemer,
@@ -239,7 +236,7 @@ validator transfer_logic_validator(
       inputs_user_credentials,
       redeemer.actions_for_each_input,
       fn(holder_hash, frozen_amount) {
-        let paid_back = paid_back_to_holder(
+        let kept = held_by(
           self.outputs,
           security_policy_id,
           security_asset_name,
@@ -254,7 +251,7 @@ validator transfer_logic_validator(
         // Its `expect` cannot trap here: the sender fold above has already
         // trapped on any input holding the token without an inline stake
         // credential.
-        paid_back >= frozen_amount || paid_back >= paid_back_to_holder(
+        kept >= frozen_amount || kept >= held_by(
           list.map(self.inputs, fn(input) { input.output }),
           security_policy_id,
           security_asset_name,
@@ -264,7 +261,6 @@ validator transfer_logic_validator(
       gs_datum.requires_sender_kyc,
       gs_datum,
       security_policy_id,
-      denylist_script_hash,
       self,
     )
 
@@ -275,7 +271,6 @@ validator transfer_logic_validator(
       gs_datum.requires_receiver_kyc,
       gs_datum,
       security_policy_id,
-      denylist_script_hash,
       self,
     )
 
@@ -304,10 +299,11 @@ validator transfer_logic_validator(
   }
 }
 
-/// How much of the security token this transaction pays to outputs whose
-/// inline stake credential hash is `holder_hash` — the holder's holdings that
-/// this transaction creates, and therefore a lower bound on what the holder
-/// holds once it lands.
+/// How much of the security token `outputs` hold under the inline stake
+/// credential hash `holder_hash`. Over the transaction's outputs this is the
+/// holder's holdings that the transaction creates, and therefore a lower bound
+/// on what the holder holds once it lands; over the spent inputs' outputs it is
+/// what the holder spends.
 ///
 /// Counted by BARE HASH, as the denylist keys: a node freezes the hash, so an
 /// output to either credential form of it counts towards the floor.
@@ -317,7 +313,7 @@ validator transfer_logic_validator(
 /// already demands of them, so an ADA-only output with no stake credential is
 /// skipped, never trapped on. Other asset names and other policies count for
 /// nothing.
-fn paid_back_to_holder(
+fn held_by(
   outputs: List<Output>,
   issuance_policy_id: ByteArray,
   security_asset_name: ByteArray,
@@ -326,7 +322,7 @@ fn paid_back_to_holder(
   list.foldl(
     outputs,
     0,
-    fn(output, paid_back) {
+    fn(output, kept) {
       let quantity = value.quantity_of(
         assets.to_value(output.value),
         issuance_policy_id,
@@ -335,12 +331,12 @@ fn paid_back_to_holder(
       if quantity > 0 {
         expect Some(Inline(stake_cred)) = output.address.stake_credential
         if utils.credential_hash(stake_cred) == holder_hash {
-          paid_back + quantity
+          kept + quantity
         } else {
-          paid_back
+          kept
         }
       } else {
-        paid_back
+        kept
       }
     },
   )
@@ -380,7 +376,7 @@ const t_third_party_hash: ByteArray =
 
 // The denylist SPEND validator's hash — distinct from the denylist
 // POLICY id (mint and spend are separate validators). Node fixtures live here.
-const t_denylist_script_hash: ByteArray =
+const t_denylist_spend_hash: ByteArray =
   #"d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0"
 
 const t_plb_hash: ByteArray =
@@ -550,7 +546,7 @@ fn t_denylist_root_ref_input() -> Input {
     output_reference: t_out_ref(2),
     output: Output {
       address: Address {
-        payment_credential: Script(t_denylist_script_hash),
+        payment_credential: Script(t_denylist_spend_hash),
         stake_credential: None,
       },
       value: merge(
@@ -653,7 +649,6 @@ fn run_transfer(
     t_sec_name,
     t_gs_policy,
     t_issuance_policy,
-    t_denylist_script_hash,
     redeemer,
     Script(t_transfer_hash),
     tx,
@@ -1264,7 +1259,6 @@ fn run_cip68_transfer(
     t_cip68_sec_name,
     t_gs_policy,
     t_issuance_policy,
-    t_denylist_script_hash,
     redeemer,
     Script(t_transfer_hash),
     tx,
@@ -1465,7 +1459,7 @@ fn pf_node_with_data(
     output_reference: t_out_ref(20 + ix),
     output: Output {
       address: Address {
-        payment_credential: Script(t_denylist_script_hash),
+        payment_credential: Script(t_denylist_spend_hash),
         stake_credential: None,
       },
       value: merge(
@@ -1650,31 +1644,6 @@ test fully_frozen_receiver_is_rejected() {
   )
 }
 
-// A copy of A's node held anywhere but the denylist's own address
-// authenticates nothing — here under a foreign SCRIPT, so it is the hash
-// equality, not the credential kind, that must reject it.
-test partially_frozen_proof_from_a_node_outside_the_list_is_rejected() fail {
-  let wallet_node = Input {
-    ..pf_node(0, t_sender_stake, None, Some(1)),
-    output: Output {
-      ..pf_node(0, t_sender_stake, None, Some(1)).output,
-      address: Address {
-        payment_credential: Script(t_third_party_hash),
-        stake_credential: None,
-      },
-    },
-  }
-  pf_run(
-    [pf_root(Some(t_sender_stake)), wallet_node],
-    [pf_input(0, pf_a(), 1_000)],
-    [pf_output(pf_c(), 999), pf_output(pf_a(), 1)],
-    [pf_src(3)],
-    // Every proof leans on the wallet copy, so the address pin is the only
-    // thing that can reject this transaction.
-    [pf_dst(3), pf_dst(3)],
-  )
-}
-
 // Only the security asset of the pinned policy counts as paid back: 400 of
 // another asset name to A does not keep the floor.
 test paid_back_counts_only_the_security_asset() {
@@ -1756,7 +1725,7 @@ test paid_back_to_a_different_hash_does_not_count() {
 }
 
 // Both credential forms of A as senders share A's node through the memo and
-// the one paid-back sum: kept floor → pass.
+// the one `held_by` sum: kept floor → pass.
 test both_credential_forms_of_a_partially_frozen_hash_pass_together() {
   pf_run(
     pf_list_a(Some(400)),
@@ -2310,7 +2279,7 @@ test partially_frozen_sender_below_the_floor_with_f_above_its_balance_may_consol
 
 // Hot-path cost pin: above the floor with A's balance over eight inputs. Its
 // cost delta against the one-input `..._may_send_above_the_floor` shows the
-// inputs are not counted when `paid_back ≥ f`.
+// inputs are not counted when `kept ≥ f`.
 test partially_frozen_sender_above_the_floor_with_eight_inputs() {
   pf_run(
     pf_list_a(Some(400)),
@@ -2561,7 +2530,6 @@ test transfer_publish_rejects_credential_deregistration() {
     t_sec_name,
     t_gs_policy,
     t_issuance_policy,
-    t_denylist_script_hash,
     builtin.constr_data(0, []),
     certificate.UnregisterCredential {
       credential: Script(t_transfer_hash),

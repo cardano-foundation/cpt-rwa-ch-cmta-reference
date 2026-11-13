@@ -13,21 +13,19 @@ use aiken/primitive/bytearray
 use cardano/address.{Credential, Script}
 use cardano/assets.{without_lovelace}
 use cardano/certificate.{Certificate, RegisterCredential}
-use cardano/transaction.{InlineDatum, Input, Output, Transaction, Withdraw}
+use cardano/transaction.{InlineDatum, Input, Transaction, Withdraw}
 use cardano/value
 use constants
 use types/global_state.{
   AddTrustedEntity, DeactivateContract, GlobalStateDatum,
-  GlobalStateSpendRedeemer, LockUpgrades, MintSecurity, ModifySecurityInfo,
-  PauseTransfers, RemoveTrustedEntity, RotateAdmin, RotateGlobalStateScript,
-  RotateMintingScript, SetMintableAmount, SetRequiresReceiverKyc,
-  SetRequiresSenderKyc, UpdateMemberRootHash, UpdateTrustedEntity,
-  decode_global_state, decode_global_state_core, get_mintable_amount,
-  idx_admin_credential_hash, idx_deactivated, idx_mintable_amount,
-  idx_minting_script_credential_hash, idx_power_user_linked_list_policy_id,
-  set_admin_credential_hash, set_deactivated,
-  set_global_state_script_credential_hash, set_member_root_hash,
-  set_mintable_amount, set_minting_script_credential_hash,
+  GlobalStateSpendRedeemer, LockUpgrades, MigrateLists, MintSecurity,
+  ModifySecurityInfo, PauseTransfers, RemoveTrustedEntity, RotateAdmin,
+  RotateGlobalStateScript, RotateMintingScript, SetMintableAmount,
+  SetRequiresReceiverKyc, SetRequiresSenderKyc, UpdateMemberRootHash,
+  UpdateTrustedEntity, decode_global_state, decode_global_state_core,
+  get_mintable_amount, set_admin_credential_hash, set_deactivated,
+  set_global_state_script_credential_hash, set_list_policy_ids,
+  set_member_root_hash, set_mintable_amount, set_minting_script_credential_hash,
   set_requires_receiver_kyc, set_requires_sender_kyc, set_security_info,
   set_transfers_paused, set_trusted_entity_vkeys, set_upgrades_locked,
 }
@@ -45,7 +43,7 @@ use utils.{must_be_signed_by_credential, must_run_script_withdrawal}
 //
 // INVARIANT (security-token guard and supply cap): every action except
 // MintSecurity rejects security-token mints, burns and movements, also checked
-// once before the dispatch. MintSecurity may write only field 5
+// once before the dispatch. MintSecurity may write only field 6
 // (`mintable_amount`, which must stay an Int), and only in a transaction that
 // mints or burns the security token under the issuance policy. It does not
 // count, bound or compute the amount: HOW MUCH the field moves is the
@@ -80,20 +78,26 @@ use utils.{must_be_signed_by_credential, must_run_script_withdrawal}
 //      re-check it, on purpose: a strict reader in the permanent scripts
 //      would turn a successor that breaks this rule into a brick.
 //   2. `deactivated` is terminal (no action once set) and `upgrades_locked`
-//      is one-way and closes rotation, minting-script rotation and
-//      `SetMintableAmount`.
+//      is one-way and closes rotation, minting-script rotation,
+//      `SetMintableAmount` and `MigrateLists`.
 //   3. Every action except MintSecurity rejects security-token mints, burns
-//      and movements. MintSecurity writes only field 5, and only in a
+//      and movements. MintSecurity writes only field 6, and only in a
 //      transaction that mints or burns the security token; the amount is the
 //      minting authority's debit. A counter write outside a mint is a cap
 //      amendment (`SetMintableAmount`: admin-only, closed by `LockUpgrades`,
 //      never beside a security-token mint, burn or movement).
-//   4. The frozen core (fields 0–5, `GlobalStateCore`) keeps its order, types
-//      and constructor 0, inline: the proxy, the minting proxy and the
-//      power-users and denylist lists read it and can never be redeployed.
-//      Fields 6+ are the installed logic's to reshape. The outgoing side of a
-//      rotation keeps core fields 1–5 unchanged, so only field 0 is the
-//      rotation's to change.
+//   4. The datum is append-only, constructor 0, inline. The core (fields 0–4,
+//      `GlobalStateCore`) is what the proxy, the minting proxy and the
+//      power-users and denylist lists read; they can never be redeployed, so
+//      its position and type are fixed forever. Every field keeps its
+//      position, its type and, across a rotation, its value; a new version
+//      may only append, and sets a field that falls out of use to its type's
+//      empty value. The outgoing side of a rotation enforces this in that
+//      transaction only: the output's first N fields (N = the input's field
+//      count) equal the input's except field 0, so only field 0 is the
+//      rotation's to change. After that, the installed logic governs, so a
+//      successor must carry this check into its own rotation; it is absolute
+//      only after `LockUpgrades`.
 //   5. The logic's own hash is never accepted as the admin, the minting
 //      authority or an operator: every GlobalState transaction carries this
 //      withdrawal, and `must_be_signed_by_credential` accepts a withdrawal as
@@ -121,24 +125,21 @@ use utils.{must_be_signed_by_credential, must_run_script_withdrawal}
 //      redeemer unchanged — `GlobalStateSpendRedeemer` with
 //      `RotateGlobalStateScript` at constructor 14 — since the outgoing side
 //      requires both withdrawals to carry the same one.
-//  11. Field 3's VALUE (`power_user_linked_list_policy_id`) never changes after
-//      genesis — invariant 4 freezes only its position and type. It is the
-//      sole anchor for which list's nodes are power users: the minting
+//  11. Field 3 (`power_user_linked_list_policy_id`) and field 7
+//      (`denylist_linked_list_policy_id`) change only through `MigrateLists`:
+//      admin-signed, closed by `LockUpgrades`, and only to 28-byte ids, which
+//      the admin is trusted with and which are verified off-chain — invariant
+//      4 pins their values across a rotation. They are the sole anchors for
+//      which list's nodes are power users and which are sanctions: the minting
 //      authority, the denylist, the third-party transfer logic and
-//      PauseTransfers here all authenticate operators under it with no
+//      PauseTransfers here all authenticate operators under field 3, and the
+//      readers authenticate denylist entries under field 7, with no
 //      compile-time copy to check against.
+
 validator global_state_logic(
   security_asset_name: ByteArray,
   issuance_policy_id: ByteArray,
   global_state_policy_id: ByteArray,
-  /// The POWER-USERS SPEND VALIDATOR's script hash — not the list
-  /// policy id. Element authentication ignores the address, so a power-user
-  /// NFT carried out of the list into a private wallet keeps authenticating
-  /// whatever ROLE FLAGS its holder writes into the datum. Here that would let
-  /// a revoked operator keep pausing the protocol. Not circular: the
-  /// power-users validators depend on the GlobalState MINT hash, never on this
-  /// logic's.
-  power_user_list_script_hash: ByteArray,
   /// Aggregate cap on the CBOR-serialised GlobalState datum, in bytes (F09),
   /// checked on every action. A write that does not grow the datum always
   /// passes, so an over-cap datum can be shrunk.
@@ -242,9 +243,10 @@ validator global_state_logic(
 
       // Raw Data field list of the input datum — taken from the RAW datum, so
       // fields a later logic appended survive every write below. Each branch
-      // proves the output datum equals this with exactly one field replaced,
-      // sharing every unchanged field as opaque Data — no unwrap/rewrap, and no
-      // full-datum re-validation of the output.
+      // proves the output datum equals this with exactly one field replaced
+      // (`MigrateLists`: the two list policy ids), sharing every unchanged
+      // field as opaque Data — no unwrap/rewrap, and no full-datum
+      // re-validation of the output.
       let input_fields = builtin.unconstr_fields(input_datum_data)
 
       // Aggregate datum cap (F09), for EVERY action: the output fits
@@ -345,23 +347,17 @@ validator global_state_logic(
             // INPUT's field 0, never from the redeemer: the redeemer is the
             // caller's to choose.
             if input_datum.global_state_script_credential_hash == own_hash {
-              // OUTGOING — the current logic hands over.
-              let output_fields = builtin.unconstr_fields(
+              // OUTGOING — the current logic hands over. The datum is
+              // append-only: the output's first N fields, N the input's field
+              // count, are the input's with only field 0 rewritten to the new
+              // logic, so no field is dropped, reordered, retyped or changed.
+              // Fields after those N are the new logic's to append. This holds
+              // in this transaction only; the new logic must carry the rule
+              // into its own rotation.
+              let output_constr = builtin.un_constr_data(
                 global_state_output_datum,
               )
-              // The permanent readers (minting proxy, power-users and denylist
-              // lists) read only the frozen core, fields 0–5, with their types;
-              // whatever layout the new logic gives the rest, they must still be
-              // able to read it. Everything after the core is the new logic's.
-              let output_datum = decode_global_state_core(
-                global_state_output_datum,
-              )
-              let unchanged = fn(idx) {
-                utils.safe_list_at(output_fields, idx) == utils.safe_list_at(
-                  input_fields,
-                  idx,
-                )
-              }
+              let output_fields = builtin.snd_pair(output_constr)
               and {
                 // The one-way upgrade lock closes this path too.
                 !input_datum.upgrades_locked,
@@ -378,17 +374,23 @@ validator global_state_logic(
                 // alone would then satisfy the minting proxy) or as the admin.
                 new_global_state_script_hash != input_datum.minting_script_credential_hash,
                 new_global_state_script_hash != input_datum.admin_credential_hash,
-                output_datum.global_state_script_credential_hash == new_global_state_script_hash,
-                // The rest of the core is not the rotation's to change.
-                // `deactivated` and the admin keep their own rules, the power-users
-                // list is fixed for life, the minting authority has its own
-                // rotation, and the supply headroom moves only through
-                // `SetMintableAmount` and mint/burn, never through a rotation.
-                unchanged(idx_deactivated),
-                unchanged(idx_admin_credential_hash),
-                unchanged(idx_power_user_linked_list_policy_id),
-                unchanged(idx_minting_script_credential_hash),
-                unchanged(idx_mintable_amount),
+                // Every other field keeps its own rules: `deactivated` and the
+                // admin, the two list policy ids moved only through
+                // `MigrateLists`, the minting authority with its own rotation,
+                // the supply headroom moved only through `SetMintableAmount`
+                // and mint/burn, and the rest through their own actions —
+                // never through a rotation.
+                (builtin.fst_pair(output_constr) == 0)?,
+                builtin.equals_data(
+                  builtin.constr_data(
+                    0,
+                    list.take(output_fields, list.length(input_fields)),
+                  ),
+                  set_global_state_script_credential_hash(
+                    input_fields,
+                    new_global_state_script_hash,
+                  ),
+                )?,
                 // The new logic RUNS in this transaction — so its script is
                 // producible and its stake credential registered...
                 must_run_script_withdrawal(self, new_global_state_script_hash),
@@ -398,8 +400,8 @@ validator global_state_logic(
                 // passes in any transaction that moves no security token. This
                 // still does not prove the script is a correct GlobalState logic
                 // (one that ignores its redeemer passes): re-derive its hash from
-                // source and every parameter before signing. Everything else in
-                // the output is the new logic's to accept or refuse.
+                // source and every parameter before signing. A field appended
+                // after the input's is the new logic's to accept or refuse.
                 pairs.get_first(
                   self.redeemers,
                   Withdraw(Script(new_global_state_script_hash)),
@@ -428,7 +430,7 @@ validator global_state_logic(
             when redeemer.action is {
               MintSecurity -> {
                 // Why this is enough: see the header. The security token is
-                // minted or burned, and only field 5 changes, to an Int; HOW
+                // minted or burned, and only field 6 changes, to an Int; HOW
                 // MUCH is the minting authority's debit, not counted here.
                 let security_delta = value.quantity_of(
                   mint,
@@ -461,7 +463,6 @@ validator global_state_logic(
                 let (power_user_credential_hash, power_user_data) = utils.authenticated_power_user(
                   power_user_node_ref_input.output,
                   input_datum.power_user_linked_list_policy_id,
-                  power_user_list_script_hash,
                 )
 
                 let expected_output_datum = set_transfers_paused(
@@ -762,6 +763,42 @@ validator global_state_logic(
                     expected_output_datum,
                     global_state_output_datum,
                   ),
+                }
+              }
+              MigrateLists {
+                new_power_user_linked_list_policy_id,
+                new_denylist_linked_list_policy_id,
+              } -> {
+                let expected_output_datum = set_list_policy_ids(
+                  input_fields,
+                  new_power_user_linked_list_policy_id,
+                  new_denylist_linked_list_policy_id,
+                )
+                // Never a no-op (as PauseTransfers): at least one list
+                // switches.
+                let switches_a_list = or {
+                  new_power_user_linked_list_policy_id != input_datum.power_user_linked_list_policy_id,
+                  new_denylist_linked_list_policy_id != input_datum.denylist_linked_list_policy_id,
+                }
+                // The admin is trusted with the new ids. No check here could
+                // prove a new list runs this repository's code, so which code
+                // each id runs, and that it is neither the other list nor
+                // another policy of this deployment, is verified off-chain.
+                and {
+                  // The one-way upgrade lock makes the lists final as well.
+                  (!input_datum.upgrades_locked)?,
+                  must_be_signed_by_credential(
+                    self,
+                    input_datum.admin_credential_hash,
+                  )?,
+                  (bytearray.length(new_power_user_linked_list_policy_id) == 28)?,
+                  (bytearray.length(new_denylist_linked_list_policy_id) == 28)?,
+                  switches_a_list?,
+                  // Fields 3 and 7 replaced, nothing else changed or appended.
+                  builtin.equals_data(
+                    expected_output_datum,
+                    global_state_output_datum,
+                  )?,
                 }
               }
               DeactivateContract -> {

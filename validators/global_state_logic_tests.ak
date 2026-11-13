@@ -23,17 +23,17 @@ use minting_authority as v_authority
 use minting_logic_script as v_minting_proxy
 use tests/global_state_fixtures.{
   rotated, t_admin, t_data_of_raw_length, t_datum, t_datum_size, t_dl_ll_policy,
-  t_gs_logic, t_gs_policy, t_gs_script_hash, t_input, t_many_entities,
-  t_max_datum_bytes, t_metadata_len_at_cap, t_metadata_len_over_cap,
-  t_minting_script, t_new_gs_logic, t_out_ref, t_output, t_pu_ll_policy,
-  t_reference_script, t_root32, t_security_info_len_at_cap,
-  t_security_info_len_over_cap, t_tx, t_vkey_10,
+  t_gs_logic, t_gs_policy, t_input, t_many_entities, t_max_datum_bytes,
+  t_metadata_len_at_cap, t_metadata_len_over_cap, t_minting_script,
+  t_new_gs_logic, t_out_ref, t_output, t_pu_ll_policy, t_reference_script,
+  t_root32, t_security_info_len_at_cap, t_security_info_len_over_cap, t_tx,
+  t_vkey_10,
 }
 use types/global_state.{
   AddTrustedEntity, DeactivateContract, GlobalStateDatum, GlobalStateLocation,
-  GlobalStateSpendRedeemer, GlobalStateSpent, LockUpgrades, MintSecurity,
-  ModifySecurityInfo, PauseTransfers, RemoveTrustedEntity, RotateAdmin,
-  RotateGlobalStateScript, RotateMintingScript, SetMintableAmount,
+  GlobalStateSpendRedeemer, GlobalStateSpent, LockUpgrades, MigrateLists,
+  MintSecurity, ModifySecurityInfo, PauseTransfers, RemoveTrustedEntity,
+  RotateAdmin, RotateGlobalStateScript, RotateMintingScript, SetMintableAmount,
   SetRequiresReceiverKyc, SetRequiresSenderKyc, TrustedEntityMetadata,
   UpdateMemberRootHash, UpdateTrustedEntity, gs_core_field_count,
   idx_deactivated, idx_mintable_amount, idx_transfers_paused, set_security_info,
@@ -123,7 +123,6 @@ fn run_logic(
     t_sec_name,
     t_issuance_policy,
     t_gs_policy,
-    t_pu_script_hash,
     t_max_datum_bytes,
     redeemer,
     Script(logic),
@@ -581,8 +580,6 @@ fn mint_security_composite(
     t_registry_policy,
     t_minting_proxy_hash,
     t_issuance_policy,
-    #"d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0",
-    t_pu_script_hash,
     #"e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1",
     #"e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2",
     MintBurn {
@@ -720,7 +717,7 @@ test mint_security_accepts_a_clean_cap_decrement() {
 /// The cap must actually be decremented. Here the datum is reproduced
 /// unchanged while 100 tokens are issued, which would leave headroom for the
 /// full original cap on top of live supply. The GlobalState logic accepts it
-/// (only field 5 may change, and it is still an Int) and the minting proxy
+/// (only field 6 may change, and it is still an Int) and the minting proxy
 /// checks no amount; the minting authority's debit refuses it, so the
 /// transaction as a whole is refused.
 test a_cap_that_does_not_decrement_is_refused_by_the_minting_authority() {
@@ -766,7 +763,7 @@ test mint_security_leaves_the_amount_to_the_minting_authority() {
   )
 }
 
-/// Field 5 must stay an Int: the output's `mintable_amount` as bytes, with 100
+/// Field 6 must stay an Int: the output's `mintable_amount` as bytes, with 100
 /// minted, TRAPS when MintSecurity reads it (`get_mintable_amount`). Paired
 /// with `mint_security_leaves_the_amount_to_the_minting_authority`, the same
 /// transaction with an Int there. Trap-only: `|| True` makes a False return
@@ -860,13 +857,10 @@ test mint_security_allows_security_token_input_and_output() {
   run_spend(input_datum, mintsecurity_redeemer(), tx)
 }
 
-// ── PauseTransfers — the power-user gate and its list-address pin ───────────
+// ── PauseTransfers — the power-user gate ────────────────────────────────────
 //
-// The address pin this branch carries matters more here than in the swappable
-// consumers: a GlobalState logic is replaced only by an admin rotation,
-// so the assertion is the primary defence rather than a belt-and-braces one.
-// Keep all three tests together — the positive control is what makes the two
-// negatives meaningful.
+// The operator's node is authenticated by the power-users list policy alone
+// (`utils.authenticated_power_user`); its address is the list's own guarantee.
 
 const t_pause_pu_cred: ByteArray =
   #"0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c"
@@ -881,8 +875,7 @@ fn t_pause_datum(transfers_paused: Bool) -> GlobalStateDatum {
   }
 }
 
-/// A power-user node with `can_pause`, at `payment` — varied so the address
-/// pin can be exercised in both directions.
+/// A power-user node with `can_pause`, at `payment`.
 fn t_pu_node_at(payment: Credential) -> Input {
   let pu = PowerUser {
     credential_hash: t_pause_pu_cred,
@@ -934,8 +927,7 @@ fn t_pause_redeemer() -> GlobalStateSpendRedeemer {
   }
 }
 
-/// The positive control. Without it the two negatives below would also pass
-/// if the branch were broken outright.
+/// The positive control for the pause tests below.
 test pause_succeeds_for_a_can_pause_power_user_in_the_list() {
   run_spend(
     t_pause_datum(False),
@@ -1004,35 +996,6 @@ test pause_rejects_an_operator_that_is_the_global_state_logic() {
       ),
       reference_inputs: [t_pu_node_at(Script(t_pu_script_hash))],
     },
-  )
-}
-
-/// The same node, same NFT, same datum — parked at a SCRIPT address
-/// that is not the power-users list. `expect ... == power_user_list_script_hash`
-/// traps, hence `fail`.
-test pause_fails_when_the_power_user_node_is_at_the_wrong_script() fail {
-  run_spend(
-    t_pause_datum(False),
-    t_pause_redeemer(),
-    t_pause_tx(t_pu_node_at(Script(t_gs_script_hash))),
-  )
-}
-
-/// The reachable shape: the node NFT carried out of the list into a private
-/// wallet, where element authentication would otherwise still accept whatever
-/// role flags its holder writes. The `expect Script(..)` pattern match traps on
-/// a `VerificationKey` credential.
-test pause_fails_when_the_power_user_node_is_in_a_wallet() fail {
-  run_spend(
-    t_pause_datum(False),
-    t_pause_redeemer(),
-    t_pause_tx(
-      t_pu_node_at(
-        VerificationKey(
-          #"0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e",
-        ),
-      ),
-    ),
   )
 }
 
@@ -2291,16 +2254,261 @@ test deactivated_input_rejects_set_mintable_amount() fail {
   )
 }
 
+// ── MigrateLists — the admin switches the list policy ids, before the lock ───
+//
+// `t_migrate_tx` builds a switch that passes: the admin signs and the output is
+// the input with fields 3 and 7 set to the redeemer's ids. It carries no
+// reference input: the branch needs none. Every negative is a one-change copy
+// of it and is refused by a False return.
+
+const t_new_pu_ll_policy: ByteArray =
+  #"3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a"
+
+const t_new_dl_ll_policy: ByteArray =
+  #"4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b"
+
+/// The input datum of every MigrateLists test: the current lists are
+/// `t_pu_ll_policy` and `t_dl_ll_policy`.
+fn t_migrate_datum() -> GlobalStateDatum {
+  GlobalStateDatum {
+    ..t_datum(False, False),
+    power_user_linked_list_policy_id: t_pu_ll_policy,
+    denylist_linked_list_policy_id: t_dl_ll_policy,
+  }
+}
+
+fn migrate_lists_redeemer(
+  new_pu: ByteArray,
+  new_dl: ByteArray,
+) -> GlobalStateSpendRedeemer {
+  GlobalStateSpendRedeemer {
+    global_state_output_index: 0,
+    action: MigrateLists {
+      new_power_user_linked_list_policy_id: new_pu,
+      new_denylist_linked_list_policy_id: new_dl,
+    },
+  }
+}
+
+fn t_migrated(
+  input_datum: GlobalStateDatum,
+  new_pu: ByteArray,
+  new_dl: ByteArray,
+) -> GlobalStateDatum {
+  GlobalStateDatum {
+    ..input_datum,
+    power_user_linked_list_policy_id: new_pu,
+    denylist_linked_list_policy_id: new_dl,
+  }
+}
+
+/// Admin-signed; the output is the input with fields 3 and 7 switched to
+/// `new_pu` and `new_dl`; no reference input.
+fn t_migrate_tx(
+  input_datum: GlobalStateDatum,
+  new_pu: ByteArray,
+  new_dl: ByteArray,
+) -> Transaction {
+  t_tx(input_datum, t_migrated(input_datum, new_pu, new_dl), [t_admin])
+}
+
+fn migrate(
+  input_datum: GlobalStateDatum,
+  new_pu: ByteArray,
+  new_dl: ByteArray,
+  tx: Transaction,
+) -> Bool {
+  run_spend(input_datum, migrate_lists_redeemer(new_pu, new_dl), tx)
+}
+
+test migrate_lists_switches_both_policy_ids() {
+  let d = t_migrate_datum()
+  migrate(
+    d,
+    t_new_pu_ll_policy,
+    t_new_dl_ll_policy,
+    t_migrate_tx(d, t_new_pu_ll_policy, t_new_dl_ll_policy),
+  )
+}
+
+test migrate_lists_switches_only_the_power_users_list() {
+  let d = t_migrate_datum()
+  migrate(
+    d,
+    t_new_pu_ll_policy,
+    t_dl_ll_policy,
+    t_migrate_tx(d, t_new_pu_ll_policy, t_dl_ll_policy),
+  )
+}
+
+test migrate_lists_switches_only_the_denylist() {
+  let d = t_migrate_datum()
+  migrate(
+    d,
+    t_pu_ll_policy,
+    t_new_dl_ll_policy,
+    t_migrate_tx(d, t_pu_ll_policy, t_new_dl_ll_policy),
+  )
+}
+
+// Each list moves to the other's field. The admin is trusted with the new ids,
+// so nothing on chain refuses it: keeping the lists apart is verified
+// off-chain.
+test migrate_lists_accepts_a_swap_of_the_two_lists() {
+  let d = t_migrate_datum()
+  migrate(
+    d,
+    t_dl_ll_policy,
+    t_pu_ll_policy,
+    t_migrate_tx(d, t_dl_ll_policy, t_pu_ll_policy),
+  )
+}
+
+test migrate_lists_fails_without_the_admin_signature() {
+  let d = t_migrate_datum()
+  !migrate(
+    d,
+    t_new_pu_ll_policy,
+    t_new_dl_ll_policy,
+    Transaction {
+      ..t_migrate_tx(d, t_new_pu_ll_policy, t_new_dl_ll_policy),
+      extra_signatories: [],
+    },
+  )
+}
+
+// One signer, and not the admin (nor the minting authority, which the datum
+// keeps distinct from the admin): a False return, hence `!`.
+test migrate_lists_fails_when_signed_by_a_stranger_only() {
+  let d = t_migrate_datum()
+  !migrate(
+    d,
+    t_new_pu_ll_policy,
+    t_new_dl_ll_policy,
+    Transaction {
+      ..t_migrate_tx(d, t_new_pu_ll_policy, t_new_dl_ll_policy),
+      extra_signatories: [t_wallet_vkey],
+    },
+  )
+}
+
+test migrate_lists_fails_once_upgrades_are_locked() {
+  // LockUpgrades makes the lists final, like the cap and the rules.
+  let d = GlobalStateDatum { ..t_migrate_datum(), upgrades_locked: True }
+  !migrate(
+    d,
+    t_new_pu_ll_policy,
+    t_new_dl_ll_policy,
+    t_migrate_tx(d, t_new_pu_ll_policy, t_new_dl_ll_policy),
+  )
+}
+
+// Both ids are the current ones: the output equals the input.
+test migrate_lists_fails_as_a_no_op() {
+  let d = t_migrate_datum()
+  !migrate(
+    d,
+    t_pu_ll_policy,
+    t_dl_ll_policy,
+    t_migrate_tx(d, t_pu_ll_policy, t_dl_ll_policy),
+  )
+}
+
+// A 27-byte id, written to the output as named, so only the length check can
+// refuse it.
+test migrate_lists_fails_on_a_short_power_users_policy_id() {
+  let d = t_migrate_datum()
+  let short = bytearray.drop(t_new_pu_ll_policy, 1)
+  !migrate(
+    d,
+    short,
+    t_new_dl_ll_policy,
+    t_migrate_tx(d, short, t_new_dl_ll_policy),
+  )
+}
+
+test migrate_lists_fails_on_a_short_denylist_policy_id() {
+  let d = t_migrate_datum()
+  let short = bytearray.drop(t_new_dl_ll_policy, 1)
+  !migrate(
+    d,
+    t_new_pu_ll_policy,
+    short,
+    t_migrate_tx(d, t_new_pu_ll_policy, short),
+  )
+}
+
+test migrate_lists_fails_when_another_field_changes() {
+  let d = t_migrate_datum()
+  let tx = t_migrate_tx(d, t_new_pu_ll_policy, t_new_dl_ll_policy)
+  !migrate(
+    d,
+    t_new_pu_ll_policy,
+    t_new_dl_ll_policy,
+    Transaction {
+      ..tx,
+      outputs: [
+        t_output(
+          GlobalStateDatum {
+            ..t_migrated(d, t_new_pu_ll_policy, t_new_dl_ll_policy),
+            transfers_paused: True,
+          },
+        ),
+      ],
+    },
+  )
+}
+
+test migrate_lists_fails_when_a_field_is_appended() {
+  let d = t_migrate_datum()
+  !migrate(
+    d,
+    t_new_pu_ll_policy,
+    t_new_dl_ll_policy,
+    with_raw_output(
+      t_migrate_tx(d, t_new_pu_ll_policy, t_new_dl_ll_policy),
+      appended(t_migrated(d, t_new_pu_ll_policy, t_new_dl_ll_policy)),
+    ),
+  )
+}
+
+test migrate_lists_fails_with_a_concurrent_security_mint() {
+  let d = t_migrate_datum()
+  !migrate(
+    d,
+    t_new_pu_ll_policy,
+    t_new_dl_ll_policy,
+    with_security_token_minted_into_an_output(
+      t_migrate_tx(d, t_new_pu_ll_policy, t_new_dl_ll_policy),
+    ),
+  )
+}
+
+test migrate_lists_fails_on_a_deactivated_protocol() fail {
+  // Terminal `expect !deactivated` traps before dispatch.
+  let d = GlobalStateDatum {
+    ..t_migrate_datum(),
+    transfers_paused: True,
+    deactivated: True,
+  }
+  migrate(
+    d,
+    t_new_pu_ll_policy,
+    t_new_dl_ll_policy,
+    t_migrate_tx(d, t_new_pu_ll_policy, t_new_dl_ll_policy),
+  )
+}
+
 // ── Burns after SetMintableAmount — headroom semantics ───────────────────────
 //
 // Supply is never seen on chain, only headroom: the minting authority
 // requires the GlobalState output to carry `mintable_amount - minted`, never
 // below zero, and a burn mints a NEGATIVE quantity. The GlobalState logic
-// accepts each of these (it checks only that field 5 alone changed) and the
-// minting proxy checks no amount; the authority decides. So a cap of 0, or
-// one set below what is already in
-// circulation (indistinguishable on chain), never blocks a burn — and every
-// burn hands its quantity back as headroom that can be minted again.
+// accepts each of these (it checks only that field 6 alone changed) and the
+// minting proxy checks no amount; the authority decides. So a cap of 0, or one
+// set below what is already in circulation (indistinguishable on chain), never
+// blocks a burn — and every burn hands its quantity back as headroom that can
+// be minted again.
 
 test burn_succeeds_when_mintable_amount_is_zero() {
   let input_datum = GlobalStateDatum {
@@ -2412,7 +2620,6 @@ test logic_accepts_register_credential() {
     t_sec_name,
     t_issuance_policy,
     t_gs_policy,
-    t_pu_script_hash,
     t_max_datum_bytes,
     builtin.constr_data(0, []),
     RegisterCredential { credential: Script(t_gs_logic), deposit: Never },
@@ -2425,7 +2632,6 @@ test logic_rejects_unregister_credential() {
     t_sec_name,
     t_issuance_policy,
     t_gs_policy,
-    t_pu_script_hash,
     t_max_datum_bytes,
     builtin.constr_data(0, []),
     UnregisterCredential { credential: Script(t_gs_logic), refund: Never },
@@ -2672,10 +2878,13 @@ test rotate_gs_logic_succeeds_with_the_consistent_fixture() {
   outgoing(t_new_gs_logic, t_consistent_rotate_tx(t_new_gs_logic))
 }
 
+// The output is the input unchanged: rotated to itself, field 0 keeps its
+// value, so the append-only comparison passes and only the self-rotation
+// guard refuses.
 test rotate_to_the_current_logic_fails_with_its_own_redeemer() {
   let r: Data = rotate_gs_redeemer(t_gs_logic)
   let tx = Transaction {
-    ..t_rotate_tx(GlobalStateDatum { ..t_datum(False, False), network_id: 999 }),
+    ..t_rotate_tx(t_datum(False, False)),
     withdrawals: [Pair(Script(t_gs_logic), 0)],
     redeemers: [Pair(Withdraw(Script(t_gs_logic)), r)],
   }
@@ -2763,12 +2972,130 @@ test rotate_gs_logic_fails_when_the_mintable_amount_changes() {
   )
 }
 
+// The datum is append-only across a rotation: every v1 field after field 0
+// keeps its value. One refusal per field not covered above; each differs from
+// `rotate_gs_logic_succeeds_when_admin_signs` only in that field, and each is
+// a False return of the prefix comparison.
+test rotate_gs_logic_outgoing_refuses_a_changed_transfers_paused() {
+  !outgoing(
+    t_new_gs_logic,
+    t_rotate_tx(
+      GlobalStateDatum { ..t_rotated_datum(), transfers_paused: True },
+    ),
+  )
+}
+
+test rotate_gs_logic_outgoing_refuses_a_changed_denylist_linked_list_policy_id() {
+  !outgoing(
+    t_new_gs_logic,
+    t_rotate_tx(
+      GlobalStateDatum {
+        ..t_rotated_datum(),
+        denylist_linked_list_policy_id: t_dl_ll_policy,
+      },
+    ),
+  )
+}
+
+test rotate_gs_logic_outgoing_refuses_a_changed_security_info() {
+  !outgoing(
+    t_new_gs_logic,
+    t_rotate_tx(
+      GlobalStateDatum {
+        ..t_rotated_datum(),
+        security_info: builtin.constr_data(0, [builtin.i_data(7)]),
+      },
+    ),
+  )
+}
+
+test rotate_gs_logic_outgoing_refuses_a_changed_trusted_entity_vkeys() {
+  !outgoing(
+    t_new_gs_logic,
+    t_rotate_tx(
+      GlobalStateDatum {
+        ..t_rotated_datum(),
+        trusted_entity_vkeys: [Pair(t_vkey_10, builtin.i_data(1))],
+      },
+    ),
+  )
+}
+
+test rotate_gs_logic_outgoing_refuses_a_changed_member_root_hash() {
+  !outgoing(
+    t_new_gs_logic,
+    t_rotate_tx(
+      GlobalStateDatum { ..t_rotated_datum(), member_root_hash: t_root32 },
+    ),
+  )
+}
+
+test rotate_gs_logic_outgoing_refuses_a_changed_requires_sender_kyc() {
+  !outgoing(
+    t_new_gs_logic,
+    t_rotate_tx(
+      GlobalStateDatum { ..t_rotated_datum(), requires_sender_kyc: True },
+    ),
+  )
+}
+
+test rotate_gs_logic_outgoing_refuses_a_changed_requires_receiver_kyc() {
+  !outgoing(
+    t_new_gs_logic,
+    t_rotate_tx(
+      GlobalStateDatum { ..t_rotated_datum(), requires_receiver_kyc: True },
+    ),
+  )
+}
+
+// The input is unlocked, so the lock check passes; only the comparison
+// refuses a rotation that would also set the lock.
+test rotate_gs_logic_outgoing_refuses_a_changed_upgrades_locked() {
+  !outgoing(
+    t_new_gs_logic,
+    t_rotate_tx(GlobalStateDatum { ..t_rotated_datum(), upgrades_locked: True }),
+  )
+}
+
+test rotate_gs_logic_outgoing_refuses_a_changed_network_id() {
+  !outgoing(
+    t_new_gs_logic,
+    t_rotate_tx(GlobalStateDatum { ..t_rotated_datum(), network_id: 7 }),
+  )
+}
+
+// The output's last field removed: a shorter datum is refused.
+test rotate_gs_logic_outgoing_refuses_a_dropped_last_field() {
+  let raw: Data = t_rotated_datum()
+  expect [_, ..rest] = list.reverse(builtin.unconstr_fields(raw))
+  !outgoing(
+    t_new_gs_logic,
+    with_raw_output(
+      t_rotate_tx(t_rotated_datum()),
+      builtin.constr_data(0, list.reverse(rest)),
+    ),
+  )
+}
+
+// Constructor 1 with the rotated datum's fields: refused by the constructor
+// check alone (a False return), since the prefix comparison rebuilds
+// constructor 0 from the fields.
+test rotate_gs_logic_outgoing_refuses_another_constructor() {
+  let raw: Data = t_rotated_datum()
+  !outgoing(
+    t_new_gs_logic,
+    with_raw_output(
+      t_rotate_tx(t_rotated_datum()),
+      builtin.constr_data(1, builtin.unconstr_fields(raw)),
+    ),
+  )
+}
+
 // A retyped known field would make the frozen readers trap for good.
 test rotate_gs_logic_fails_when_the_output_is_not_readable() fail {
-  // Frozen core (2026-10-15): the tail is the successor's to retype, so the
-  // unreadable output is now one whose CORE cannot be read — here constructor
-  // 1, which only the outgoing core decode catches (fields 1–5 are pinned by
-  // `unchanged` anyway). The proxy would trap on it forever.
+  // Constructor 1, which no reader decodes. The outgoing constructor check
+  // refuses it with a False return, which a `fail` test also accepts; the
+  // same shape as `rotate_gs_logic_outgoing_refuses_another_constructor`.
   let raw: Data = t_rotated_datum()
   let fields = builtin.unconstr_fields(raw)
   outgoing(
@@ -2807,15 +3134,8 @@ test rotate_gs_logic_fails_with_a_reference_script_on_the_output() {
   )
 }
 
-// "Don't block updates": the outgoing logic leaves every other field, and any
-// appended field, to the new logic.
-test rotate_gs_logic_outgoing_allows_another_field_to_change() {
-  outgoing(
-    t_new_gs_logic,
-    t_rotate_tx(GlobalStateDatum { ..t_rotated_datum(), network_id: 7 }),
-  )
-}
-
+// "Don't block updates": a new version may append fields after the input's,
+// and the outgoing logic leaves them to it.
 test rotate_gs_logic_outgoing_allows_an_appended_field() {
   let raw: Data = t_rotated_datum()
   outgoing(
@@ -2825,6 +3145,23 @@ test rotate_gs_logic_outgoing_allows_an_appended_field() {
       builtin.constr_data(
         0,
         list.concat(builtin.unconstr_fields(raw), [builtin.i_data(1)]),
+      ),
+    ),
+  )
+}
+
+test rotate_gs_logic_outgoing_allows_two_appended_fields() {
+  let raw: Data = t_rotated_datum()
+  outgoing(
+    t_new_gs_logic,
+    with_raw_output(
+      t_rotate_tx(t_rotated_datum()),
+      builtin.constr_data(
+        0,
+        list.concat(
+          builtin.unconstr_fields(raw),
+          [builtin.i_data(1), builtin.b_data(#"ff")],
+        ),
       ),
     ),
   )
@@ -3014,7 +3351,6 @@ fn run_logic_capped(
     t_sec_name,
     t_issuance_policy,
     t_gs_policy,
-    t_pu_script_hash,
     cap,
     redeemer,
     Script(t_gs_logic),
@@ -3153,17 +3489,14 @@ test datum_cap_set_mintable_amount_rejects_an_output_over_the_cap() {
   !mintable_case(-1)
 }
 
-// Outgoing rotation: the successor may change other fields, but the datum it
+// Outgoing rotation: the successor may append fields, but the datum it
 // inherits must respect the outgoing logic's cap.
 fn rotation_case(cap_offset: Int) -> Bool {
-  let output_datum = GlobalStateDatum {
-    ..t_rotated_datum(),
-    security_info: builtin.constr_data(0, [builtin.i_data(7)]),
-  }
+  let output_raw = appended(t_rotated_datum())
   run_logic_capped(
-    t_datum_size(output_datum) + cap_offset,
+    bytearray.length(builtin.serialise_data(output_raw)) + cap_offset,
     rotate_gs_redeemer(t_new_gs_logic),
-    t_rotate_tx(output_datum),
+    with_raw_output(t_rotate_tx(t_rotated_datum()), output_raw),
   )
 }
 
@@ -3277,7 +3610,7 @@ test datum_cap_does_not_block_a_pause_over_the_cap() {
   )
 }
 
-// ── Frozen core: the outgoing logic leaves the tail to its successor ─────────
+// ── Append-only: the outgoing logic keeps every field but field 0 ────────────
 
 fn rotated_core_with_tail(tail: List<Data>) -> Data {
   let raw: Data = t_rotated_datum()
@@ -3290,10 +3623,10 @@ fn rotated_core_with_tail(tail: List<Data>) -> Data {
   )
 }
 
-// A successor may give the datum a different shape after the core — here 11
-// fields, the tail retyped — and the outgoing logic hands over.
-test rotate_gs_logic_outgoing_allows_a_reshaped_tail() {
-  outgoing(
+// A different shape after the core — here 10 fields, the tail retyped — is
+// refused (a False return of the prefix comparison).
+test rotate_gs_logic_outgoing_refuses_a_reshaped_tail() {
+  !outgoing(
     t_new_gs_logic,
     with_raw_output(
       t_rotate_tx(t_rotated_datum()),
@@ -3310,15 +3643,15 @@ test rotate_gs_logic_outgoing_allows_a_reshaped_tail() {
   )
 }
 
-// A v1 tail field retyped (transfers_paused as bytes) is the successor's call.
-test rotate_gs_logic_outgoing_allows_a_retyped_tail_field() {
+// A v1 field after the core retyped (transfers_paused as bytes) is refused.
+test rotate_gs_logic_outgoing_refuses_a_retyped_tail_field() {
   let raw: Data = t_rotated_datum()
   let fields = utils.replace_data_field(
     builtin.unconstr_fields(raw),
     idx_transfers_paused,
     builtin.b_data(#"00"),
   )
-  outgoing(
+  !outgoing(
     t_new_gs_logic,
     with_raw_output(
       t_rotate_tx(t_rotated_datum()),
@@ -3327,18 +3660,18 @@ test rotate_gs_logic_outgoing_allows_a_retyped_tail_field() {
   )
 }
 
-// The core alone, with no tail at all, is still a datum the permanent
-// readers can read.
-test rotate_gs_logic_outgoing_allows_the_core_alone() {
-  outgoing(
+// The core alone, with every field after it dropped, is refused even though
+// the permanent readers could read it.
+test rotate_gs_logic_outgoing_refuses_the_core_alone() {
+  !outgoing(
     t_new_gs_logic,
     with_raw_output(t_rotate_tx(t_rotated_datum()), rotated_core_with_tail([])),
   )
 }
 
-// A core field retyped would make the permanent readers trap for good. (Fields
-// 1–5 are also pinned by `unchanged`, so this is not evidence for the decoder
-// — `rotate_gs_logic_fails_when_the_output_is_not_readable` is.)
+// A core field retyped would make the permanent readers trap for good. The
+// prefix comparison refuses it with a False return, which this `fail` test
+// also accepts.
 test rotate_gs_logic_fails_when_a_core_field_is_retyped() fail {
   let raw: Data = t_rotated_datum()
   let fields = utils.replace_data_field(
@@ -3422,7 +3755,6 @@ test logic_built_for_another_global_state_policy_fails_genesis() fail {
     t_sec_name,
     t_issuance_policy,
     #"c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
-    t_pu_script_hash,
     t_max_datum_bytes,
     deactivate_redeemer(),
     Script(t_gs_logic),
@@ -3750,8 +4082,6 @@ test zero_amount_mint_burn_cannot_carry_an_admin_rotation() {
     t_registry_policy,
     t_minting_proxy_hash,
     t_issuance_policy,
-    #"d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0",
-    t_pu_script_hash,
     #"e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1",
     #"e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2",
     MintBurn {
@@ -3835,8 +4165,6 @@ test zero_mint_mint_security_cannot_move_the_counter() {
     t_registry_policy,
     t_minting_proxy_hash,
     t_issuance_policy,
-    #"d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0",
-    t_pu_script_hash,
     #"e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1",
     #"e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2",
     MintBurn {

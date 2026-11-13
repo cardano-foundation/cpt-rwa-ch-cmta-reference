@@ -2,7 +2,6 @@ use aiken/builtin
 use aiken/collection/list
 use aiken/primitive/bytearray
 use aiken_design_patterns/linked_list.{get_element_info, run_element_with}
-use cardano/address.{Address, Script}
 use cardano/transaction.{Input}
 use constants
 use types/denylist.{Denylist}
@@ -114,17 +113,12 @@ pub fn verify_denylist_permits(
   element_ref_input_index: Int,
   reference_inputs: List<Input>,
   denylist_policy_id: ByteArray,
-  /// The DENYLIST SPEND VALIDATOR's script hash — deliberately not the list
-  /// policy id. `denylist_validator` (spend) and `mint` are separate
-  /// validators in the same file and therefore have different hashes.
-  denylist_script_hash: ByteArray,
   on_partially_frozen: fn(ByteArray, Int) -> Bool,
 ) -> Bool {
   with_denylist_element(
     element_ref_input_index,
     reference_inputs,
     denylist_policy_id,
-    denylist_script_hash,
     fn(element_key, element_link, element_data) {
       party_permitted(
         element_key,
@@ -155,25 +149,21 @@ pub fn verify_denylist_permits(
 /// The library authenticates the element: a genuine single-NFT UTxO of
 /// `denylist_policy_id`, holding exactly ADA plus that one NFT, with a
 /// well-formed `Element` datum and the correct `"Node"` key prefix. It hands
-/// back the element's address, its own key, its data and its link.
+/// back the element's own key, its data and its link.
 ///
-/// Authentication says nothing about WHERE the element sits, so we pin the
-/// address ourselves. Without that, one denylist NFT in a private wallet would
-/// authenticate whatever datum its holder writes — and since the key is fixed
-/// by the NFT's asset name but the LINK and the DATA come from the datum, a
-/// wallet-held node keyed at 00…00 with `link: None` would certify absence for
-/// every address on chain, and a wallet-held copy of a holder's own node could
-/// claim any frozen amount. Requiring the element to still live at the list's
-/// own spend address is what makes "authenticated" mean "in the list".
+/// The element's ADDRESS is not checked here: the list guarantees that every
+/// NFT of its policy lives at its spend script — the list mint's Init pin, and
+/// the library's own address checks on nodes and continuations, whose input
+/// scan refuses any spent element they do not place (the argument is on the
+/// list mint's `AddToDenylist` branch) — so the policy id alone identifies a
+/// list element.
 ///
 /// Fails loudly (UPLC error) if the reference input does not carry the denylist
-/// NFT, has a malformed `Element` datum, or does not sit at
-/// `denylist_script_hash`.
+/// NFT or has a malformed `Element` datum.
 pub fn with_denylist_element(
   element_ref_input_index: Int,
   reference_inputs: List<Input>,
   denylist_policy_id: ByteArray,
-  denylist_script_hash: ByteArray,
   continue_with: fn(Option<ByteArray>, Option<ByteArray>, Data) -> a,
 ) -> a {
   let element_ref = utils.safe_list_at(
@@ -182,9 +172,7 @@ pub fn with_denylist_element(
   )
   get_element_info(
     element_ref.output,
-    fn(address, _lovelace, node_key, data, link) {
-      expect Address { payment_credential: Script(element_script), .. } = address
-      expect element_script == denylist_script_hash
+    fn(_address, _lovelace, node_key, data, link) {
       continue_with(node_key, link, data)
     },
   )

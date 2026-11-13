@@ -8,58 +8,56 @@ use aiken_design_patterns/linked_list.{
   run_root_with, spend_for_adding_or_removing_an_element,
   spend_for_updating_elements_data,
 }
-use cardano/address.{Address, Script, VerificationKey}
-use cardano/assets.{PolicyId, from_asset, from_lovelace, merge, tokens, zero}
+use cardano/address.{Address, Inline, Script, VerificationKey}
+use cardano/assets.{Assets, PolicyId, from_asset, from_lovelace, merge, zero}
 use cardano/transaction.{
   InlineDatum, Input, NoDatum, Output, OutputReference, Transaction, find_input,
 }
 use constants
 use tests
 use types/global_state.{
-  GlobalStateDatum, active_admin_from_ref_input, genesis_global_state,
-  gs_core_from_ref_input,
+  GlobalStateDatum, active_admin_from_ref_input, gs_core_from_ref_input,
 }
 use types/power_users.{
   AddPowerUser, Deinit, Init, MintRedeemer, ModifyPowerUser, PowerUser,
   RemovePowerUser, SpendRedeemer, StateTransition,
 }
-use utils.{must_be_signed_by_credential, quantity_of_policy_id}
+use utils.{must_be_signed_by_credential}
 
-validator power_users_validator(
-  global_state_policy_id: ByteArray,
-  power_users_linked_list_policy_id: ByteArray,
-) {
+validator power_users_validator(global_state_policy_id: ByteArray) {
   spend(
     _datum_opt: Option<Data>,
     redeemer: SpendRedeemer,
     input_out_ref: OutputReference,
     self: Transaction,
   ) {
+    // This list's policy id is not a parameter: the list mint takes this
+    // validator's hash, so taking the policy id back would be circular. It is
+    // read off the UTxO being spent instead, which must hold exactly one
+    // policy besides lovelace (`utils.sole_nft_policy_id` traps on no token or
+    // on a second policy; it reads no names or quantities, because the list
+    // mint creates exactly one token per element).
+    //
+    // That also binds every arm to a UTxO shaped like a list element. A stray
+    // value-bearing UTxO parked at the list address with no token at all —
+    // not list state — cannot ride along with a genuine list mutation
+    // elsewhere in the same transaction: it traps here. A UTxO holding some
+    // other policy's NFT yields that other policy, so its spend is decided by
+    // that policy's mint, never by this list's; readers name this list's
+    // policy, so such a UTxO is never list state either.
+    expect Some(own_input) = find_input(self.inputs, input_out_ref)
+    let power_users_linked_list_policy_id = utils.sole_nft_policy_id(
+      own_input.output.value,
+    )
     when redeemer is {
-      StateTransition -> {
-        // Delegating responsibility to the mint validator — but the
-        // library's gate only asks whether SOME power-users-policy mint/burn
-        // happens anywhere in this transaction, not that the UTxO actually
-        // being spent under this redeemer is a genuine list element. Without
-        // pinning that, a stray value-bearing UTxO parked at the list
-        // address (holding no list NFT, and therefore not list state at
-        // all) could be swept up here, riding along with any genuine list
-        // mutation elsewhere in the same transaction. Resolving this
-        // validator's own input and requiring it to carry the list's NFT
-        // closes that: only a genuine list element (root or node) may be
-        // spent under `StateTransition`.
-        expect Some(own_input) = find_input(self.inputs, input_out_ref)
-        and {
-          (quantity_of_policy_id(
-            own_input.output.value,
-            power_users_linked_list_policy_id,
-          ) > 0)?,
-          spend_for_adding_or_removing_an_element(
-            power_users_linked_list_policy_id,
-            self.mint,
-          ),
-        }
-      }
+      StateTransition ->
+        // Delegating responsibility to the mint validator: the library's gate
+        // requires a mint or burn under this list's policy, so the list mint
+        // runs and proves the exact transition.
+        spend_for_adding_or_removing_an_element(
+          power_users_linked_list_policy_id,
+          self.mint,
+        )
       ModifyPowerUser {
         own_input_index,
         own_output_index,
@@ -116,63 +114,69 @@ validator power_users_validator(
 validator mint(
   global_state_policy_id: ByteArray,
   init_input_out_ref: OutputReference,
+  /// The POWER-USERS SPEND VALIDATOR's script hash: where every NFT of this
+  /// policy must live. Not circular: the spend validator reads the list policy
+  /// off the element it spends, so its hash depends only on the GlobalState
+  /// policy.
+  list_script_hash: ByteArray,
 ) {
   mint(redeemer: MintRedeemer, policy_id: PolicyId, self: Transaction) {
     when redeemer is {
       Init { root_output_index } -> {
-        // Init is nonce-gated — GS is only being created in this same
-        // transaction (an output, not yet an input), so admin-via-datum lookup
-        // isn't feasible. The one-shot UTxO is
-        // operator-held, which implicitly gates this action to the operator.
+        // One-shot because of the nonce: each instance of this list is a mint
+        // applied with its own `init_input_out_ref`, so its own policy id, and
+        // its root is created once, when that UTxO is spent. No GlobalState is
+        // read, so the same branch serves at genesis and after it.
+        //
+        // Whoever creates the root gains no control over the list: every
+        // change to its contents (Add, Remove, Modify, Deinit) is gated
+        // through GlobalState, by the admin it names.
+        //
+        // Genesis wiring is still forced by the GlobalState mint: both list
+        // policies must mint in the genesis transaction, and a list mint
+        // cannot mint there except through `Init` (every other branch reads
+        // GlobalState as a reference input, which does not exist yet). That
+        // the policy ids GlobalState names are this repository's lists is
+        // verified off-chain.
+        //
+        // No count of this policy's mint here: the library's `init` already
+        // requires the root NFT to be the only asset of this policy minted, at
+        // quantity 1, and traps otherwise.
+        //
+        // No count of this policy's inputs either: no token of it can exist
+        // before the root. `Init` is one-shot (the nonce), and every other
+        // branch needs an existing element, as its input (`AddPowerUser`) or
+        // burnt (`RemovePowerUser`, `Deinit`).
         let nonce_validated = list.any(
           self.inputs,
           fn(input) { input.output_reference == init_input_out_ref },
         )
         let root_output = utils.safe_list_at(self.outputs, root_output_index)
-        and {
-          //Only 1 token of this policy must be minted (the root NFT)
-          dict.size(tokens(self.mint, policy_id)) == 1,
-          // Genesis: no list node exists yet, so none may be spent.
-          (utils.count_inputs_with_policy(self.inputs, policy_id) == 0)?,
-          // Genesis binding: the GlobalState minted in this same transaction
-          // must name THIS list. The GlobalState mint only checks that the
-          // policy its datum names mints something, and the id is immutable
-          // afterwards — so a deployment naming another list would leave this
-          // one, and the role or sanctions checks it carries, unreachable for
-          // good. Not circular: the GlobalState policy is a parameter here.
-          (genesis_global_state(self.outputs, global_state_policy_id).power_user_linked_list_policy_id == policy_id)?,
-          // The library hands this callback the produced root's ADDRESS, so a
-          // caller could in principle pin where the root lands. THIS ONE CANNOT,
-          // and the reason is worth recording so nobody tries to "fix" it:
-          //
-          // pinning it would mean passing the list SPEND validator's hash to this
-          // MINT validator — but the spend validator is parameterised by the list
-          // policy id, which IS this mint validator's own hash. The dependency
-          // would be circular, so no compile-time value exists.
-          //
-          // Genesis is therefore verified off-chain: after `Init`, confirm the
-          // root NFT actually sits at the list spend validator's address. `Init`
-          // is nonce-gated to a one-shot operator-held UTxO, so the only party
-          // who can get this wrong is the deployer, and only once. Every LATER
-          // read of a list element does pin the address, so a misplaced root
-          // fails closed rather than silently granting authority.
-          init(nonce_validated, root_output, self.mint, fn(_, _, _) { True })
-            |> run_root_with(policy_id, constants.linked_list_root_key),
-        }
+        creates_the_root(
+          self,
+          nonce_validated,
+          root_output,
+          policy_id,
+          list_script_hash,
+        )
       }
       Deinit { global_state_ref_input_index } -> {
         // POST-DECOMMISSION CLEANUP ONLY — same rule and the same reasoning as
         // the denylist's `Deinit`, and here the consequence of getting it wrong
         // is if anything broader.
         //
-        // Burning this root is irreversible: `Init` is gated on a one-shot UTxO
-        // consumed at genesis, `AddPowerUser` needs an existing element as its
-        // anchor, and `power_user_linked_list_policy_id` is immutable in the
-        // GlobalState datum. So once the root is gone no operator can ever be
-        // added again — mint, burn, pause, unpause, seizure and sanctions all
-        // authenticate against a node of THIS list and would be lost for good.
-        // If transfers happened to be paused at that moment they stay paused
-        // forever, since unpausing needs a `can_pause` node.
+        // Burning this root is irreversible: `Init` is gated by this instance's
+        // one-shot nonce, which is spent, and `AddPowerUser` needs an existing
+        // element as its anchor. Anyone holding a fresh nonce can create a new
+        // instance (a new policy), which stays inert unless `MigrateLists`
+        // adopts it. On a live protocol before `LockUpgrades` the admin could
+        // still point GlobalState at a new list that way; after the lock
+        // `power_user_linked_list_policy_id` is final, so once the root is gone
+        // no operator could ever be added again — mint, burn, pause, unpause,
+        // seizure and sanctions all authenticate against a node of THIS list
+        // and would be lost for good. If transfers happened to be paused at
+        // that moment they would stay paused forever, since unpausing needs a
+        // `can_pause` node.
         //
         // Requiring `deactivated` keeps the branch to its purpose: reclaiming
         // the root's min-ADA after the token has been retired.
@@ -191,11 +195,16 @@ validator mint(
           // can burn the root NFT while the list is empty. Admin now comes
           // from GS datum (rotatable); previously compile-time owner.
           must_be_signed_by_credential(self, gs.admin_credential_hash),
-          dict.size(tokens(self.mint, policy_id)) == 1,
+          // No count of this policy's mint here: the library's `deinit`
+          // already requires the root NFT to be the only asset of this policy
+          // minted, at quantity -1, and traps otherwise.
+          //
           // Only the root is spent, and `deinit` already requires the list to
-          // be empty. Defence in depth beside the library's own scan — see the
-          // note on the Add branch.
-          (utils.count_inputs_with_policy(self.inputs, policy_id) == 1)?,
+          // be empty. No count of this policy's inputs either: `deinit`'s
+          // input scan traps on a second element of the policy, and no token
+          // of the policy exists outside an element (see the note on the
+          // `AddPowerUser` branch), so once the root is burnt no token of the
+          // policy is left anywhere.
           deinit(self.inputs, self.mint, fn(_, _, _) { True })
             |> run_root_with(policy_id, constants.linked_list_root_key),
         }
@@ -226,20 +235,43 @@ validator mint(
           // grant out rather than rejecting it up front.
           bytearray.length(new_power_user_key) == 28,
           must_be_signed_by_credential(self, admin),
-          dict.size(tokens(self.mint, policy_id)) == 1,
+          // No count of this policy's mint here: the library's
+          // `insert_ascending` already requires the new node's NFT to be the
+          // only asset of this policy minted, at quantity 1, and traps
+          // otherwise.
+          //
           // An insert spends exactly one element — the anchor, which
           // `insert_ascending` infers from `self.inputs` itself. The new node
           // is an OUTPUT.
           //
-          // The library performs its own exact-one scan, so this line is
-          // defence in depth. It is kept because the two counts are not
-          // identical: the library's scanner only recognises CANONICAL
-          // elements (exactly ADA plus one list NFT) and silently IGNORES an
-          // input carrying the list policy in any other value shape, whereas
-          // this one counts every input bearing the policy. Element outputs
-          // are strictly canonical, so the gap should be unreachable — but a
-          // list is an access-control structure, and this costs one fold.
-          (utils.count_inputs_with_policy(self.inputs, policy_id) == 1)?,
+          // No count of this policy's inputs either, here or on
+          // `RemovePowerUser` and `Deinit`. The library's input scan
+          // recognises only CANONICAL elements (ADA plus exactly that one
+          // NFT, quantity 1, an inline datum, no reference script), and every
+          // token of this policy is always in one, at the list spend script.
+          // By induction over transactions:
+          //
+          // * Before `Init` no token exists. `Init` mints one, in a root the
+          //   library authenticates as canonical, pinned to
+          //   `Script(list_script_hash)`.
+          // * A transaction minting or burning under the policy runs this
+          //   handler. Every input bearing the policy is canonical and at the
+          //   list script, so the library's scan sees each one: `deinit` and
+          //   the insertion trap on a second element input of the policy, and
+          //   `remove` refuses any input at the list's credential beyond its
+          //   pair. With the mint fixed by `is_only_mint_under_policy`, value
+          //   conservation leaves every token of the policy in an output the
+          //   library authenticates as canonical: the continued anchor at the
+          //   anchor's address, or the new node at the anchor's payment
+          //   credential.
+          // * Any other transaction: every element spent is at the list spend
+          //   script, so runs it, and its only arms are `StateTransition`,
+          //   which requires a mint under the policy, and `ModifyPowerUser`,
+          //   whose `spend_for_updating_elements_data` requires a canonical
+          //   continuation at the same address with the same NFT.
+          //
+          // So an input carrying the policy in another value shape, which the
+          // scan would not see, cannot exist.
           insert_ascending(
             anchor_output,
             new_node_output,
@@ -295,11 +327,16 @@ validator mint(
           // Same length pin as the Add branch — see its comment.
           bytearray.length(power_user_key_to_remove) == 28,
           must_be_signed_by_credential(self, admin),
-          dict.size(tokens(self.mint, policy_id)) == 1,
+          // No count of this policy's mint here: the library's `remove`
+          // already requires the removed node's NFT to be the only asset of
+          // this policy minted, at quantity -1, and traps otherwise.
+          //
           // A remove spends exactly two elements: the anchor and the node
-          // being removed. Defence in depth beside the library's own exact-two
-          // scan — see the note on the Add branch.
-          (utils.count_inputs_with_policy(self.inputs, policy_id) == 2)?,
+          // being removed. No count of this policy's inputs (see the note on
+          // the `AddPowerUser` branch): `remove`'s input scan refuses any
+          // element input at the list's credential beyond the pair (every
+          // element is there), keeps the continued anchor at the anchor's
+          // address and burns the other.
           remove(
             anchor_out_ref,
             anchor_output,
@@ -336,6 +373,36 @@ validator mint(
   }
 }
 
+/// The root's creation in `Init`: the nonce UTxO is spent, the root is the
+/// only token of this policy minted, and it is pinned to the list spend script.
+///
+/// The library hands the callback the produced root's address, and the root is
+/// pinned there: its whole payment credential must be
+/// `Script(list_script_hash)`, so a key credential carrying the same hash is
+/// refused; the stake part stays free. The library `expect`s the nonce and the
+/// callback, so a missing nonce or a misplaced root traps.
+///
+/// Not circular: the spend validator takes no list policy id (it reads the
+/// policy off the element it spends), so its hash depends only on the
+/// GlobalState policy, and this mint takes that hash.
+fn creates_the_root(
+  self: Transaction,
+  nonce_validated: Bool,
+  root_output: Output,
+  policy_id: PolicyId,
+  list_script_hash: ByteArray,
+) -> Bool {
+  init(
+    nonce_validated,
+    root_output,
+    self.mint,
+    fn(address, _, _) {
+      (address.payment_credential == Script(list_script_hash))?
+    },
+  )
+    |> run_root_with(policy_id, constants.linked_list_root_key)
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -345,6 +412,10 @@ const t_gs_policy: ByteArray =
 
 const t_pu_policy: ByteArray =
   #"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+/// A policy unrelated to the list, sorting before `t_pu_policy`.
+const t_foreign_policy: ByteArray =
+  #"1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f"
 
 const t_gs_script_hash: ByteArray =
   #"0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d"
@@ -623,7 +694,6 @@ test power_users_spend_accepts_a_genuine_node_spend_alongside_a_mutation() {
   }
   power_users_validator.spend(
     t_gs_policy,
-    t_pu_policy,
     no_datum,
     StateTransition,
     t_oref(0),
@@ -634,28 +704,122 @@ test power_users_spend_accepts_a_genuine_node_spend_alongside_a_mutation() {
 /// THE GUARD under test. A UTxO sitting at the power-users address with NO
 /// power-users-policy token — not list state at all — spent under
 /// `StateTransition` while a genuine power-users mint/burn happens elsewhere
-/// in the very same transaction. Before this fix,
-/// `spend_for_adding_or_removing_an_element` asked only "does the mint field
-/// carry this policy anywhere", so this stray UTxO's value could be swept
-/// out alongside any real insert/remove. Now the validator additionally
-/// resolves ITS OWN spent input and requires that specific UTxO to carry the
-/// list token, so the new `(quantity_of_policy_id(own_input.output.value,
-/// ...) > 0)?` conjunct is False and the `and { }` block returns False —
-/// hence `!`, not `fail`.
-test power_users_spend_rejects_a_stray_no_token_utxo_swept_alongside_a_mutation() {
+/// in the very same transaction. `spend_for_adding_or_removing_an_element`
+/// asks only "does the mint field carry this policy anywhere", so without a
+/// check on the spent UTxO itself its value could be swept out alongside any
+/// real insert/remove. The validator reads the list policy off ITS OWN spent
+/// input, which must hold exactly one policy besides lovelace; this one holds
+/// only lovelace, so the derivation traps — hence `fail`, written `… || True`
+/// so that a validator merely returning False cannot pass it.
+test power_users_spend_rejects_a_stray_no_token_utxo_swept_alongside_a_mutation() fail {
   let no_datum: Option<Data> = None
   let tx = Transaction {
     ..t_base_tx(),
     inputs: [t_pu_stray_input(0)],
     mint: from_asset(t_pu_policy, t_ll_asset_name(t_pu_cred), 1),
   }
-  !power_users_validator.spend(
+  power_users_validator.spend(
     t_gs_policy,
-    t_pu_policy,
     no_datum,
     StateTransition,
     t_oref(0),
     tx,
+  ) || True
+}
+
+// ── The spend reads its list policy off its own input ───────────────────────
+//
+// Each test below is the accepted control above
+// (`power_users_spend_accepts_a_genuine_node_spend_alongside_a_mutation`) with
+// only the spent node's value changed. The derivation traps on no token or on
+// a second policy, so each refusal is written `… || True`: a validator that
+// merely returns False cannot pass it, only a trap can. It reads no names or
+// quantities under the policy, so the two shapes holding more than one list
+// token are accepted; neither can occur on chain.
+
+/// The control's node with `extra` merged into its value.
+fn t_pu_node_with(extra: Assets) -> Input {
+  let node = t_pu_node_input(0, t_power_user(False, False, False, False, False))
+  Input {
+    ..node,
+    output: Output { ..node.output, value: merge(node.output.value, extra) },
+  }
+}
+
+fn t_run_pu_state_transition(own_input: Input) -> Bool {
+  let no_datum: Option<Data> = None
+  power_users_validator.spend(
+    t_gs_policy,
+    no_datum,
+    StateTransition,
+    t_oref(0),
+    Transaction {
+      ..t_base_tx(),
+      inputs: [own_input],
+      mint: from_asset(t_pu_policy, t_ll_asset_name(t_pu_cred), 1),
+    },
+  )
+}
+
+/// A second policy beside the list NFT: the value has three entries, so the
+/// derivation traps. The second policy sorts before the list policy, so a
+/// derivation reading the first token's policy would pick it.
+test power_users_spend_refuses_an_own_input_with_two_policies() fail {
+  t_run_pu_state_transition(
+    t_pu_node_with(from_asset(t_foreign_policy, t_ll_asset_name(t_pu_cred), 1)),
+  ) || True
+}
+
+/// A second asset name under the list policy: accepted, because the
+/// derivation reads no names. No element holds this shape on chain: the list
+/// mint creates exactly one token per element (the library's
+/// `is_only_mint_under_policy`), and the library authenticates every element
+/// output as lovelace plus one NFT at quantity 1.
+test power_users_spend_derives_the_policy_from_an_own_input_with_two_names() {
+  t_run_pu_state_transition(
+    t_pu_node_with(from_asset(t_pu_policy, t_ll_asset_name(t_key_28), 1)),
+  )
+}
+
+/// The list NFT at quantity 2: accepted, because the derivation reads no
+/// quantities. No element holds this shape on chain, for the same reason as
+/// the test above: the list mint creates each token at quantity 1 (the
+/// library's `is_only_mint_under_policy`), and the library authenticates every
+/// element output as lovelace plus one NFT at quantity 1.
+test power_users_spend_derives_the_policy_from_an_own_input_with_quantity_two() {
+  t_run_pu_state_transition(
+    t_pu_node_with(from_asset(t_pu_policy, t_ll_asset_name(t_pu_cred), 1)),
+  )
+}
+
+/// A UTxO at the list address holding an unrelated policy's NFT, spent under
+/// `StateTransition` beside a mint of that unrelated policy: accepted. This is
+/// harmless. The spend reads the unrelated policy off the UTxO, so its own
+/// mint decides the spend, not this list's; and every reader names the list
+/// policy, so such a UTxO is never list state.
+test power_users_spend_accepts_a_foreign_utxo_under_its_own_mint() {
+  let no_datum: Option<Data> = None
+  let node = t_pu_node_input(0, t_power_user(False, False, False, False, False))
+  let foreign_input = Input {
+    ..node,
+    output: Output {
+      ..node.output,
+      value: merge(
+        from_lovelace(2_000_000),
+        from_asset(t_foreign_policy, t_ll_asset_name(t_pu_cred), 1),
+      ),
+    },
+  }
+  power_users_validator.spend(
+    t_gs_policy,
+    no_datum,
+    StateTransition,
+    t_oref(0),
+    Transaction {
+      ..t_base_tx(),
+      inputs: [foreign_input],
+      mint: from_asset(t_foreign_policy, t_ll_asset_name(t_key_28), 1),
+    },
   )
 }
 
@@ -676,6 +840,7 @@ fn t_run_pu_add(key: ByteArray, tx: Transaction) -> Bool {
   mint.mint(
     t_gs_policy,
     t_oref(99),
+    t_pu_script_hash,
     AddPowerUser {
       new_power_user_key: key,
       anchor_node_output_index: 0,
@@ -736,6 +901,7 @@ fn t_run_pu_remove(key: ByteArray, tx: Transaction) -> Bool {
   mint.mint(
     t_gs_policy,
     t_oref(99),
+    t_pu_script_hash,
     RemovePowerUser {
       power_user_key_to_remove: key,
       anchor_node_input_index: 0,
@@ -764,6 +930,27 @@ test power_users_remove_rejects_a_29_byte_key() {
   !t_run_pu_remove(t_key_29, t_pu_remove_tx(t_key_29))
 }
 
+// GlobalState's field 3 names another 28-byte policy, as after a
+// `MigrateLists` away from this list: Remove still authenticates by the admin
+// alone, so a retired list's min-ADA can be reclaimed.
+test power_users_remove_succeeds_on_a_list_global_state_no_longer_names() {
+  t_run_pu_remove(
+    t_key_28,
+    Transaction {
+      ..t_pu_remove_tx(t_key_28),
+      reference_inputs: [
+        t_gs_utxo(
+          0,
+          GlobalStateDatum {
+            ..t_gs_datum(False),
+            power_user_linked_list_policy_id: #"01010101010101010101010101010101010101010101010101010101",
+          },
+        ),
+      ],
+    },
+  )
+}
+
 // ── ModifyPowerUser branch coverage ─────────────────────────────────────────
 
 fn t_pu_modify_tx(old_pu: PowerUser, new_pu: PowerUser) -> Transaction {
@@ -780,7 +967,6 @@ fn t_run_pu_modify(wanted: PowerUser, tx: Transaction) -> Bool {
   let no_datum: Option<Data> = None
   power_users_validator.spend(
     t_gs_policy,
-    t_pu_policy,
     no_datum,
     ModifyPowerUser {
       own_input_index: 0,
@@ -845,6 +1031,7 @@ test power_users_init_succeeds_on_the_nonce_utxo() {
   mint.mint(
     t_gs_policy,
     t_oref(50),
+    t_pu_script_hash,
     Init { root_output_index: 0 },
     t_pu_policy,
     Transaction {
@@ -856,14 +1043,17 @@ test power_users_init_succeeds_on_the_nonce_utxo() {
   )
 }
 
-/// Without the one-shot nonce input, genesis must fail — otherwise anyone
-/// could create a second, parallel power-users list and point a deployment
-/// at it. The library's `init` guards this with `expect nonce_validated`,
-/// which TRAPS, hence `fail`.
+/// Without this instance's one-shot nonce input, `Init` must fail — otherwise
+/// the root of this policy could be created more than once. `Init` is gated
+/// by that nonce alone: anyone holding a fresh nonce can create a new instance
+/// (a new policy), which stays inert unless `MigrateLists` adopts it. The
+/// library's `init` guards this with `expect nonce_validated`, which TRAPS,
+/// hence `fail`.
 test power_users_init_rejects_a_missing_nonce() fail {
   mint.mint(
     t_gs_policy,
     t_oref(50),
+    t_pu_script_hash,
     Init { root_output_index: 0 },
     t_pu_policy,
     Transaction {
@@ -875,16 +1065,68 @@ test power_users_init_rejects_a_missing_nonce() fail {
   )
 }
 
+// A UTxO is spent, but not the nonce: `expect nonce_validated` traps, so
+// only a trap passes this `… || True` body.
+test power_users_init_fails_with_another_utxo_spent_instead_of_the_nonce() fail {
+  mint.mint(
+    t_gs_policy,
+    t_oref(50),
+    t_pu_script_hash,
+    Init { root_output_index: 0 },
+    t_pu_policy,
+    Transaction {
+      ..t_base_tx(),
+      inputs: [t_nonce_input(51)],
+      mint: from_asset(t_pu_policy, constants.linked_list_root_key, 1),
+      outputs: [t_pu_root_output(None), t_gs_utxo(0, t_gs_datum(False)).output],
+    },
+  ) || True
+}
+
+/// A plain UTxO at output index `ix` of another transaction than the one every
+/// other fixture shares, so not the nonce even at the nonce's index.
+fn t_nonce_input_from_another_transaction(ix: Int) -> Input {
+  let input = t_nonce_input(ix)
+  Input {
+    ..input,
+    output_reference: OutputReference {
+      ..input.output_reference,
+      transaction_id: #"1111111111111111111111111111111111111111111111111111111111111111",
+    },
+  }
+}
+
+// The spent UTxO has the nonce's output index but another transaction id: the
+// nonce is the whole output reference, so `expect nonce_validated` traps, and
+// only a trap passes this `… || True` body.
+test power_users_init_fails_with_the_nonce_index_from_another_transaction() fail {
+  mint.mint(
+    t_gs_policy,
+    t_oref(50),
+    t_pu_script_hash,
+    Init { root_output_index: 0 },
+    t_pu_policy,
+    Transaction {
+      ..t_base_tx(),
+      inputs: [t_nonce_input_from_another_transaction(50)],
+      mint: from_asset(t_pu_policy, constants.linked_list_root_key, 1),
+      outputs: [t_pu_root_output(None), t_gs_utxo(0, t_gs_datum(False)).output],
+    },
+  ) || True
+}
+
 /// `Deinit` — burning the root. Admin-signed, on an empty list, and only once
-/// the protocol has been deactivated: the root can never be re-created (`Init`
-/// is nonce-gated to a UTxO spent at genesis) and `AddPowerUser` needs an
-/// existing element as its anchor, so burning it while the token is live would
-/// permanently destroy every operator role — mint, burn, pause, unpause,
-/// seizure and sanctions alike.
+/// the protocol has been deactivated: this list instance's root can never be
+/// re-created, because its nonce is spent (a new instance, a new policy, can be
+/// created with `Init` at any time, but it is inert unless `MigrateLists`
+/// adopts it), and `AddPowerUser` needs an existing element as its anchor, so
+/// burning it while the token is live would permanently destroy every operator
+/// role — mint, burn, pause, unpause, seizure and sanctions alike.
 test power_users_deinit_succeeds_for_the_admin_after_deactivation() {
   mint.mint(
     t_gs_policy,
     t_oref(99),
+    t_pu_script_hash,
     Deinit { global_state_ref_input_index: 0 },
     t_pu_policy,
     Transaction {
@@ -904,6 +1146,7 @@ test power_users_deinit_rejects_a_live_protocol() {
   !mint.mint(
     t_gs_policy,
     t_oref(99),
+    t_pu_script_hash,
     Deinit { global_state_ref_input_index: 0 },
     t_pu_policy,
     Transaction {
@@ -923,6 +1166,7 @@ test power_users_deinit_rejects_a_missing_admin_signature() {
   !mint.mint(
     t_gs_policy,
     t_oref(99),
+    t_pu_script_hash,
     Deinit { global_state_ref_input_index: 0 },
     t_pu_policy,
     Transaction {
@@ -943,49 +1187,107 @@ test power_users_insert_accepts_a_global_state_with_trailing_fields() {
   )
 }
 
-// ── Init — bound to the genesis GlobalState ──────────────────────────────────
+// ── Init — nonce-only, at genesis or after it ───────────────────────────────
 //
-// The GlobalState minted alongside must name THIS list; its id is immutable
-// afterwards, so a mismatch would leave every role on this list unreachable.
+// `t_pu_init_tx` is the accepted `Init` of
+// `power_users_init_succeeds_on_the_nonce_utxo`: the nonce spent, the root the
+// only token minted, at the list script, beside a GlobalState output. `Init`
+// reads no GlobalState, so it needs none. Every negative is a one-change copy
+// of it.
 
-fn t_run_pu_init(outputs: List<Output>) -> Bool {
+fn t_pu_init_tx() -> Transaction {
+  Transaction {
+    ..t_base_tx(),
+    inputs: [t_nonce_input(50)],
+    mint: from_asset(t_pu_policy, constants.linked_list_root_key, 1),
+    outputs: [t_pu_root_output(None), t_gs_utxo(0, t_gs_datum(False)).output],
+  }
+}
+
+fn t_run_pu_init_tx(tx: Transaction) -> Bool {
   mint.mint(
     t_gs_policy,
     t_oref(50),
+    t_pu_script_hash,
     Init { root_output_index: 0 },
     t_pu_policy,
+    tx,
+  )
+}
+
+fn t_run_pu_init(outputs: List<Output>) -> Bool {
+  t_run_pu_init_tx(Transaction { ..t_pu_init_tx(), outputs })
+}
+
+// No GlobalState output, no GlobalState mint and no reference input: a new
+// instance of the list after genesis is created exactly as at genesis.
+test power_users_init_succeeds_without_a_global_state() {
+  t_run_pu_init_tx(
     Transaction {
-      ..t_base_tx(),
-      inputs: [t_nonce_input(50)],
-      mint: from_asset(t_pu_policy, constants.linked_list_root_key, 1),
-      outputs,
+      ..t_pu_init_tx(),
+      reference_inputs: [],
+      outputs: [t_pu_root_output(None)],
     },
   )
 }
 
-test power_users_init_rejects_a_global_state_naming_another_list() {
-  !t_run_pu_init(
-    [
-      t_pu_root_output(None),
-      t_gs_utxo(
-        0,
-        GlobalStateDatum {
-          ..t_gs_datum(False),
-          power_user_linked_list_policy_id: #"0101010101010101010101010101010101010101010101010101010101",
+// The nonce is found wherever it sits among the inputs: here in the middle of
+// three, the other two from other transactions.
+test power_users_init_succeeds_with_the_nonce_among_other_inputs() {
+  t_run_pu_init_tx(
+    Transaction {
+      ..t_pu_init_tx(),
+      inputs: [
+        t_nonce_input_from_another_transaction(49),
+        t_nonce_input(50),
+        Input {
+          ..t_nonce_input(51),
+          output_reference: OutputReference {
+            transaction_id: #"2222222222222222222222222222222222222222222222222222222222222222",
+            output_index: 51,
+          },
         },
-      ).output,
-    ],
+      ],
+    },
   )
 }
 
-// No GlobalState created in this transaction: nothing to bind to, so genesis
-// cannot proceed (the lookup traps, hence `fail`).
-test power_users_init_rejects_without_a_genesis_global_state() fail {
-  t_run_pu_init([t_pu_root_output(None)])
+// An element of this policy is spent beside the nonce: accepted, because
+// `Init` reads no inputs beyond the nonce. The shape cannot occur on chain: no
+// token of this policy exists before its root, because `Init` is one-shot (the
+// nonce) and every other branch needs an existing element, as its input
+// (`AddPowerUser`) or burnt (`RemovePowerUser`, `Deinit`).
+test power_users_init_reads_no_inputs_beyond_the_nonce() {
+  t_run_pu_init_tx(
+    Transaction {
+      ..t_pu_init_tx(),
+      inputs: [
+        t_nonce_input(50),
+        t_pu_node_input(1, t_power_user(True, False, False, False, False)),
+      ],
+    },
+  )
 }
 
-// Frozen core: both GlobalState read paths (the admin read and Deinit's) keep
-// working when a later logic reshapes every field after 0–5.
+// A second token of this policy is minted beside the root: the library's
+// `init` refuses it (`expect is_only_mint_under_policy`), a trap, so only a
+// trap passes this `… |> fn(_) { True }` body.
+test power_users_init_fails_with_a_second_token_minted() fail {
+  t_run_pu_init_tx(
+    Transaction {
+      ..t_pu_init_tx(),
+      mint: merge(
+        from_asset(t_pu_policy, constants.linked_list_root_key, 1),
+        from_asset(t_pu_policy, t_ll_asset_name(t_key_28), 1),
+      ),
+    },
+  )
+    |> fn(_) { True }
+}
+
+// Frozen core: both GlobalState read paths (the admin read and Deinit's) are
+// permanent and tolerate any tail after fields 0–4. A rotation is append-only,
+// so such a tail only arises from a successor logic's own later actions.
 test power_users_insert_accepts_a_global_state_with_a_reshaped_tail() {
   t_run_pu_add(
     t_key_28,
@@ -997,6 +1299,7 @@ test power_users_deinit_accepts_a_global_state_with_a_reshaped_tail() {
   mint.mint(
     t_gs_policy,
     t_oref(99),
+    t_pu_script_hash,
     Deinit { global_state_ref_input_index: 0 },
     t_pu_policy,
     tests.with_reshaped_gs_tail(
@@ -1027,4 +1330,386 @@ const t_other_key: ByteArray =
 
 test pu_add_rejects_a_node_keyed_other_than_the_redeemer() fail {
   t_run_pu_add(t_key_28, t_pu_insert_tx(t_other_key))
+}
+
+// ── A list NFT never leaves the list script ─────────────────────────────────
+//
+// One refusal per path through which a power-users NFT is minted, moved or
+// kept. Each is an accepted fixture above with only the NFT's destination
+// changed; its accepted control is named in its comment. A `fail` test here
+// is written `… || True` or `… |> fn(_) { True }`, so a validator that merely
+// returns False cannot pass it — only a trap can.
+
+/// A key (wallet) address outside the list.
+const t_wallet: ByteArray =
+  #"0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e"
+
+fn t_at_wallet(output: Output) -> Output {
+  Output {
+    ..output,
+    address: Address {
+      payment_credential: VerificationKey(t_wallet),
+      stake_credential: None,
+    },
+  }
+}
+
+fn t_at_script(output: Output, script_hash: ByteArray) -> Output {
+  Output {
+    ..output,
+    address: Address {
+      payment_credential: Script(script_hash),
+      stake_credential: None,
+    },
+  }
+}
+
+// Init: control `power_users_init_succeeds_on_the_nonce_utxo`, the same
+// transaction with the root at the list script.
+test power_users_init_refuses_a_root_at_a_wallet() fail {
+  t_run_pu_init(
+    [
+      t_at_wallet(t_pu_root_output(None)),
+      t_gs_utxo(0, t_gs_datum(False)).output,
+    ],
+  ) || True
+}
+
+test power_users_init_refuses_a_root_at_another_script() fail {
+  t_run_pu_init(
+    [
+      t_at_script(t_pu_root_output(None), t_gs_script_hash),
+      t_gs_utxo(0, t_gs_datum(False)).output,
+    ],
+  ) || True
+}
+
+// The list script's hash under a key credential: the whole credential is
+// compared, not just its hash.
+test power_users_init_refuses_a_root_at_the_key_hash_of_the_list_script() fail {
+  t_run_pu_init(
+    [
+      Output {
+        ..t_pu_root_output(None),
+        address: Address {
+          payment_credential: VerificationKey(t_pu_script_hash),
+          stake_credential: None,
+        },
+      },
+      t_gs_utxo(0, t_gs_datum(False)).output,
+    ],
+  ) || True
+}
+
+// The root at the list script with a stake part: the stake part is free.
+test power_users_init_accepts_a_root_with_a_stake_credential() {
+  t_run_pu_init(
+    [
+      Output {
+        ..t_pu_root_output(None),
+        address: Address {
+          payment_credential: Script(t_pu_script_hash),
+          stake_credential: Some(Inline(VerificationKey(t_admin))),
+        },
+      },
+      t_gs_utxo(0, t_gs_datum(False)).output,
+    ],
+  )
+}
+
+// AddPowerUser: control `power_users_insert_accepts_a_28_byte_key`. The new
+// node must share the anchor's payment credential (the library's insert
+// check), so it traps.
+test power_users_insert_refuses_a_new_node_at_a_wallet() fail {
+  let tx = t_pu_insert_tx(t_key_28)
+  t_run_pu_add(
+    t_key_28,
+    Transaction {
+      ..tx,
+      outputs: [
+        t_pu_root_output(Some(t_key_28)),
+        t_at_wallet(t_pu_new_node_output(t_key_28)),
+      ],
+    },
+  ) || True
+}
+
+// The continued anchor must keep the anchor's full address (library), so it
+// traps.
+test power_users_insert_refuses_an_anchor_continuation_at_a_wallet() fail {
+  let tx = t_pu_insert_tx(t_key_28)
+  t_run_pu_add(
+    t_key_28,
+    Transaction {
+      ..tx,
+      outputs: [
+        t_at_wallet(t_pu_root_output(Some(t_key_28))),
+        t_pu_new_node_output(t_key_28),
+      ],
+    },
+  ) || True
+}
+
+// RemovePowerUser: control `power_users_remove_accepts_a_28_byte_key`. The
+// continued anchor must keep the anchor's address (library), so it traps.
+test power_users_remove_refuses_an_anchor_continuation_at_a_wallet() fail {
+  t_run_pu_remove(
+    t_key_28,
+    Transaction {
+      ..t_pu_remove_tx(t_key_28),
+      outputs: [t_at_wallet(t_pu_root_output(None))],
+    },
+  ) || True
+}
+
+// The removed node's NFT is paid to a wallet instead of burnt, so nothing of
+// this policy is minted. The library's `remove` requires the burn
+// (`expect is_only_mint_under_policy`), finds no entry for this policy and
+// traps, so only a trap passes this `… |> fn(_) { True }` body.
+test power_users_remove_refuses_a_removed_node_kept_in_a_wallet() fail {
+  t_run_pu_remove(
+    t_key_28,
+    Transaction {
+      ..t_pu_remove_tx(t_key_28),
+      mint: zero,
+      outputs: [
+        t_pu_root_output(None),
+        t_at_wallet(t_pu_new_node_output(t_key_28)),
+      ],
+    },
+  )
+    |> fn(_) { True }
+}
+
+// The same, with another node NFT minted in place of the burn so that this
+// policy still runs. The library requires the removal to burn exactly the
+// removed node's NFT, so it traps.
+test power_users_remove_refuses_a_removed_node_kept_under_another_list_mint() fail {
+  t_run_pu_remove(
+    t_key_28,
+    Transaction {
+      ..t_pu_remove_tx(t_key_28),
+      mint: from_asset(t_pu_policy, t_ll_asset_name(t_other_key), 1),
+      outputs: [
+        t_pu_root_output(None),
+        t_at_wallet(t_pu_new_node_output(t_key_28)),
+      ],
+    },
+  ) || True
+}
+
+// The same, burning another node's NFT instead: the quantity is right, so
+// only the library's burnt-name check refuses it, by trapping. In-process
+// only: no input carries that NFT, so the ledger could not balance the burn.
+test power_users_remove_refuses_burning_another_node_in_place_of_the_removed_one() fail {
+  t_run_pu_remove(
+    t_key_28,
+    Transaction {
+      ..t_pu_remove_tx(t_key_28),
+      mint: from_asset(t_pu_policy, t_ll_asset_name(t_other_key), -1),
+      outputs: [
+        t_pu_root_output(None),
+        t_at_wallet(t_pu_new_node_output(t_key_28)),
+      ],
+    },
+  ) || True
+}
+
+// Deinit: control
+// `power_users_deinit_succeeds_for_the_admin_after_deactivation`.
+fn t_pu_deinit_tx() -> Transaction {
+  Transaction {
+    ..t_base_tx(),
+    inputs: [t_pu_root_input(0)],
+    reference_inputs: [t_gs_utxo(0, t_gs_datum(True))],
+    mint: from_asset(t_pu_policy, constants.linked_list_root_key, -1),
+    extra_signatories: [t_admin],
+  }
+}
+
+fn t_run_pu_deinit(tx: Transaction) -> Bool {
+  mint.mint(
+    t_gs_policy,
+    t_oref(99),
+    t_pu_script_hash,
+    Deinit { global_state_ref_input_index: 0 },
+    t_pu_policy,
+    tx,
+  )
+}
+
+// The root is paid to a wallet instead of burnt: nothing of this policy is
+// minted. The library's `deinit` requires the burn
+// (`expect is_only_mint_under_policy`), finds no entry for this policy and
+// traps, so only a trap passes this `… |> fn(_) { True }` body.
+test power_users_deinit_refuses_a_root_kept_in_a_wallet() fail {
+  t_run_pu_deinit(
+    Transaction {
+      ..t_pu_deinit_tx(),
+      mint: zero,
+      outputs: [t_at_wallet(t_pu_root_input(0).output)],
+    },
+  )
+    |> fn(_) { True }
+}
+
+// The same, with a node NFT minted in place of the burn. The library requires
+// deinit to burn exactly the root NFT, so it traps.
+test power_users_deinit_refuses_a_root_kept_under_another_list_mint() fail {
+  t_run_pu_deinit(
+    Transaction {
+      ..t_pu_deinit_tx(),
+      mint: from_asset(t_pu_policy, t_ll_asset_name(t_other_key), 1),
+      outputs: [t_at_wallet(t_pu_root_input(0).output)],
+    },
+  ) || True
+}
+
+// The same, burning a node's NFT instead: the quantity is right, so only the
+// library's burnt-name check refuses it, by trapping. In-process only: no
+// input carries that NFT, so the ledger could not balance the burn.
+test power_users_deinit_refuses_burning_a_node_name_in_place_of_the_root() fail {
+  t_run_pu_deinit(
+    Transaction {
+      ..t_pu_deinit_tx(),
+      mint: from_asset(t_pu_policy, t_ll_asset_name(t_other_key), -1),
+      outputs: [t_at_wallet(t_pu_root_input(0).output)],
+    },
+  ) || True
+}
+
+// The same, minting the root key instead of burning it: the name is right, so
+// only the library's burnt-quantity check refuses it, by trapping. In-process
+// only: the minted copy needs an output too, which deinit never reads.
+test power_users_deinit_refuses_minting_the_root_key_in_place_of_burning_it() fail {
+  t_run_pu_deinit(
+    Transaction {
+      ..t_pu_deinit_tx(),
+      mint: from_asset(t_pu_policy, constants.linked_list_root_key, 1),
+      outputs: [t_at_wallet(t_pu_root_input(0).output)],
+    },
+  ) || True
+}
+
+// The control with two of the root key burnt instead of one: the name is
+// right and the quantity is a burn, so only the library's exact-quantity
+// check refuses it, by trapping. In-process only: one root is spent, so the
+// ledger could not balance the burn.
+test power_users_deinit_refuses_burning_two_of_the_root_key() fail {
+  t_run_pu_deinit(
+    Transaction {
+      ..t_pu_deinit_tx(),
+      mint: from_asset(t_pu_policy, constants.linked_list_root_key, -2),
+    },
+  ) || True
+}
+
+// ModifyPowerUser: control
+// `power_user_modify_accepts_an_admin_signed_change_matching_the_wanted_state`.
+// The library requires the continuation to keep the spent element's address,
+// so both trap.
+test power_users_modify_refuses_a_continuation_at_a_wallet() fail {
+  let old_pu = t_power_user(False, False, False, False, False)
+  let new_pu = PowerUser { ..old_pu, can_mint: True }
+  t_run_pu_modify(
+    new_pu,
+    Transaction {
+      ..t_pu_modify_tx(old_pu, new_pu),
+      outputs: [t_at_wallet(t_pu_node_output(new_pu))],
+    },
+  ) || True
+}
+
+test power_users_modify_refuses_a_continuation_at_another_script() fail {
+  let old_pu = t_power_user(False, False, False, False, False)
+  let new_pu = PowerUser { ..old_pu, can_mint: True }
+  t_run_pu_modify(
+    new_pu,
+    Transaction {
+      ..t_pu_modify_tx(old_pu, new_pu),
+      outputs: [t_at_script(t_pu_node_output(new_pu), t_gs_script_hash)],
+    },
+  ) || True
+}
+
+// Two node spends sharing one continuation. Input 0 is the node keyed
+// `t_pu_cred`, input 1 the node keyed `t_key_28`; the spend under test is
+// input 1's, citing output 0.
+fn t_pu_two_node_modify_tx(outputs: List<Output>) -> Transaction {
+  Transaction {
+    ..t_base_tx(),
+    inputs: [
+      t_pu_node_input(0, t_power_user(False, False, False, False, False)),
+      Input {
+        output_reference: t_oref(1),
+        output: t_pu_new_node_output(t_key_28),
+      },
+    ],
+    outputs,
+    reference_inputs: [t_gs_utxo(0, t_gs_datum(False))],
+    extra_signatories: [t_admin],
+  }
+}
+
+/// The state input 1 is changed to: its own key, `can_mint` granted.
+fn t_pu_second_wanted() -> PowerUser {
+  PowerUser {
+    credential_hash: t_key_28,
+    is_admin: False,
+    can_mint: True,
+    can_burn: False,
+    can_pause: False,
+    can_force_transfer: False,
+  }
+}
+
+/// A node output carrying the NFT keyed `nft_key` and the datum
+/// `t_pu_second_wanted()`.
+fn t_pu_second_wanted_output(nft_key: ByteArray) -> Output {
+  let element: Element<Data, PowerUser> = Element {
+    data: Node { data: t_pu_second_wanted() },
+    link: None,
+  }
+  Output { ..t_pu_new_node_output(nft_key), datum: InlineDatum(element) }
+}
+
+fn t_run_pu_modify_second(tx: Transaction) -> Bool {
+  let no_datum: Option<Data> = None
+  power_users_validator.spend(
+    t_gs_policy,
+    no_datum,
+    ModifyPowerUser {
+      own_input_index: 1,
+      own_output_index: 0,
+      wanted_user_state: t_pu_second_wanted(),
+      global_state_ref_input_index: 0,
+    },
+    t_oref(1),
+    tx,
+  )
+}
+
+/// POSITIVE control: input 1's own continuation at the list script, with its
+/// own NFT.
+test power_users_modify_accepts_a_second_spend_with_its_own_continuation() {
+  t_run_pu_modify_second(
+    t_pu_two_node_modify_tx([t_pu_second_wanted_output(t_key_28)]),
+  )
+}
+
+/// Output 0 carries input 0's NFT (`t_pu_cred`), so both spends would cite
+/// it, and input 1's NFT goes to a wallet. Output 0's datum is input 1's
+/// wanted state, keyed `t_key_28`, so this spend's own credential check
+/// passes and only the library's NFT-preservation check refuses it, by
+/// trapping. (In a full attack, output 0 would also have to satisfy input 0's
+/// spend, whose credential check refuses this datum as well.)
+test power_users_modify_refuses_two_spends_sharing_one_continuation() fail {
+  t_run_pu_modify_second(
+    t_pu_two_node_modify_tx(
+      [
+        t_pu_second_wanted_output(t_pu_cred),
+        t_at_wallet(t_pu_second_wanted_output(t_key_28)),
+      ],
+    ),
+  ) || True
 }
