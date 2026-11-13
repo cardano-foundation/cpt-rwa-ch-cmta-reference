@@ -334,8 +334,9 @@ validator mint(
           // A remove spends exactly two elements: the anchor and the node
           // being removed. No count of this policy's inputs (see the note on
           // the `AddPowerUser` branch): `remove`'s input scan refuses any
-          // element input beyond the pair, keeps the continued anchor at the
-          // anchor's address and burns the other.
+          // element input at the list's credential beyond the pair (every
+          // element is there), keeps the continued anchor at the anchor's
+          // address and burns the other.
           remove(
             anchor_out_ref,
             anchor_output,

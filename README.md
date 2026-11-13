@@ -717,7 +717,9 @@ credential to be `Script(list_script_hash)`. Second, the linked-list library
   the policy), which is also why a list spend reads its policy off its own input without checking
   the names or quantities under it;
 * its input scan, singular on an insert and on `Deinit` (`validate_singular_authentic_input`) and
-  dual on a remove (`validate_dual_authentic_inputs`), which refuses any extra element input.
+  dual on a remove (`validate_dual_authentic_inputs`), which refuses any extra canonical element
+  input at the list's credential (every element is there, by the `Init` pin and the placement
+  checks).
 
 The scan sees only canonical elements (exactly ADA plus one list NFT), and every token of the policy
 is in one: each output that receives a token is authenticated by the library as canonical, so an

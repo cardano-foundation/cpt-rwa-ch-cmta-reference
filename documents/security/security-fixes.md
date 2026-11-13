@@ -391,7 +391,8 @@ gone (§22). In its place, each list keeps every NFT of its policy at its own sp
 mint takes its spend validator's hash (`list_script_hash`) and pins the root's payment credential to
 `Script(list_script_hash)` at `Init`; the library's induction keeps each continuation at its
 anchor's exact address and each new node at its anchor's payment credential (its stake part is free)
-from that root on, and its input scan refuses any element spent beyond the ones it places; and tests
+from that root on, and its input scan refuses any element at the list's credential spent beyond the
+ones it places; and tests
 on every list path refuse moving a list NFT off its list script.
 Readers now authenticate an element by its policy id alone. The reason is identity: with the pin, a
 list was named twice — by its policy id in the GlobalState datum and by its spend hash compiled into
@@ -1710,7 +1711,8 @@ checked the element's address against a compile-time copy of the list spend hash
 * From that root on, the library places every element: an insert keeps the continued anchor at the
   anchor's full address and the new node at the anchor's payment credential, a remove keeps the
   continued anchor at its address, and an in-place update keeps the element at its address. Its
-  input scan refuses any element input beyond the one or two an operation spends; it sees only
+  input scan refuses any element input at the list's credential beyond the one or two an operation
+  spends; it sees only
   canonical elements, and every token of the policy is in one
   ([§3](#3-a-list-element-was-trusted-wherever-it-sat)), so every list NFT stays at the list spend
   script. The list mints count no inputs of their own.
@@ -1895,7 +1897,8 @@ insertion keeps the continued anchor's full address and gives the new node the a
 credential, `remove` keeps the continued anchor's address, and `spend_for_updating_elements_data`
 keeps an element's address); its one-token rule (`is_only_mint_under_policy`), also relied on by the
 own-input derivation; and its input scan (`validate_singular_authentic_input` on an insert and on
-`deinit`, `validate_dual_authentic_inputs` on `remove`), which refuses any extra element input. It
+`deinit`, `validate_dual_authentic_inputs` on `remove`), which refuses any extra element input at
+the list's credential. It
 is relied on, not re-checked; re-verify the placement checks, the one-token rule and the input scan
 on any change of the library version. See the README's [What is relied on from the linked-list
 library](../../README.md#what-is-relied-on-from-the-linked-list-library) and [the base-layer
@@ -2164,7 +2167,7 @@ the notes above apply to any redeploy onto current `main`.
 | A registry-node spend can never mint or burn that node's own token | **True** | `registry_spend` hoists `!mint_has_policy(self.mint, spent_node.key)` above its `when`, so it covers both the in-place update and the covering-node spend | `UpgradeRegistryNode`'s belt-and-braces no-mint re-check removal (2026-08-21) |
 | The seizure path is the only one that skips owner consent | **True** | the third-party path never calls `authorised_stake_cred`; the transfer path always does | — |
 | `issuance_mint` requires the minting logic's withdraw-0 on every mint or burn | **True** | `issuance_mint` (`validators/issuance_mint.ak`, `95e99ac`) requires `has_key_or_fail(withdrawals, minting_logic_cred)`, the credential it is parameterised by, on every mint or burn of its policy | [§21](#21-the-supply-cap-is-debited-by-the-minting-authority)'s reliance: the minting proxy, and through it the authority's same-transaction debit, runs on every mint or burn |
-| Every list NFT stays at its list spend script (a linked-list library guarantee, not the base layer's) | **Relied on** — re-verify on any library change | Two parts. This repository's list mints pin the root to `Script(list_script_hash)` at `Init`. `anastasia-labs/aiken-design-patterns` v1.9.0 keeps each continuation at its anchor's exact address and each new node at its anchor's payment credential (its stake part is free), its in-place update keeps an element's address, its one-token rule (`is_only_mint_under_policy`) makes each mint or burn change exactly one token, and its insert, `deinit` and remove scan the full `inputs` list and refuse any extra element input (since v1.8.0; [the linked-list dependency](#the-linked-list-dependency)); every token of the policy is in a canonical element the scan sees ([§3](#3-a-list-element-was-trusted-wherever-it-sat)) | The readers' list-element address check removal (2026-11, [§22](#22-a-rotation-could-rewrite-the-datum-and-a-list-could-never-be-replaced)): power-user nodes and denylist elements are authenticated by policy id alone |
+| Every list NFT stays at its list spend script (a linked-list library guarantee, not the base layer's) | **Relied on** — re-verify on any library change | Two parts. This repository's list mints pin the root to `Script(list_script_hash)` at `Init`. `anastasia-labs/aiken-design-patterns` v1.9.0 keeps each continuation at its anchor's exact address and each new node at its anchor's payment credential (its stake part is free), its in-place update keeps an element's address, its one-token rule (`is_only_mint_under_policy`) makes each mint or burn change exactly one token, and its insert, `deinit` and remove scan the full `inputs` list and refuse any extra element input at the list's credential (since v1.8.0; [the linked-list dependency](#the-linked-list-dependency)); every token of the policy is in a canonical element the scan sees ([§3](#3-a-list-element-was-trusted-wherever-it-sat)) | The readers' list-element address check removal (2026-11, [§22](#22-a-rotation-could-rewrite-the-datum-and-a-list-could-never-be-replaced)): power-user nodes and denylist elements are authenticated by policy id alone |
 
 Two things this settled:
 

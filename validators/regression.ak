@@ -1334,7 +1334,7 @@ test denylist_deinit_rejects_a_missing_admin_signature() {
 }
 
 /// The `spend` handler's `StateTransition` path, kept as an explicit record
-/// that the input-count fix did NOT change it. It still delegates wholesale to
+/// that the reachability fix (§3 of the security notes) did NOT change it. It still delegates wholesale to
 /// the mint validator, so on its own it accepts. The one thing it now does
 /// first is derive the list policy from its own spent input, which must hold
 /// exactly one policy besides lovelace (`utils.sole_nft_policy_id`); here that
@@ -1567,7 +1567,7 @@ test power_user_remove_rejects_a_missing_admin_signature() {
 }
 
 /// As for the denylist, the power-users `spend` handler is unchanged by
-/// the input-count fix and still delegates wholesale, after deriving the list
+/// the reachability fix and still delegates wholesale, after deriving the list
 /// policy from its own spent input (a genuine list node here, so it succeeds).
 test power_user_spend_handler_is_pure_delegation() {
   let no_datum: Option<Data> = None
