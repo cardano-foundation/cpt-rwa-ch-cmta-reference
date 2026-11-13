@@ -887,11 +887,12 @@ test transfer_accepts_a_clean_holder_with_a_high_successor_link() {
 // a denylist node in a wallet, keyed at the lowest key with no successor, would
 // certify absence for every credential on chain, and a power-user node in a
 // wallet would grant whatever role flags its holder writes. What makes such an
-// element unreachable is the list itself: its mint pins the root at Init and
-// checks, on every branch, that every output carrying its NFT pays to the list
-// spend script, and the library keeps nodes and continuations at the anchor's
-// address. The two `*_trusts_the_policy_alone` tests below pin the reliance;
-// the list-side tests named in their comments pin the guarantee.
+// element unreachable is the list itself: its mint pins the root at Init, the
+// library keeps nodes and continuations at the anchor's address, and the
+// mint's input counts on every other branch keep any token of the policy the
+// library does not place out of the transaction. The two
+// `*_trusts_the_policy_alone` tests below pin the reliance; the list-side
+// tests named in their comments pin the guarantee.
 
 /// A genuine-policy denylist node in an attacker's wallet, keyed at the lowest
 /// key with no successor, is ACCEPTED as a covering node: the reader trusts the
@@ -1331,8 +1332,8 @@ test denylist_deinit_rejects_a_missing_admin_signature() {
 /// that the input-count fix did NOT change it. It still delegates wholesale to
 /// the mint validator, so on its own it accepts. The one thing it now does
 /// first is derive the list policy from its own spent input, which must hold
-/// lovelace plus exactly one NFT (`utils.sole_nft_policy_id`); here that input
-/// is a genuine list node, so the derivation succeeds. (The separate
+/// exactly one policy besides lovelace (`utils.sole_nft_policy_id`); here that
+/// input is a genuine list node, so the derivation succeeds. (The separate
 /// `UpdateDenylistEntry` path runs no mint and is pinned in
 /// `validators/denylist.ak`.) That is fine — it is no longer
 /// reachable with an unconstrained extra element, because the mint validator
@@ -2133,10 +2134,13 @@ test denylist_init_succeeds_with_the_nonce_among_other_inputs() {
   )
 }
 
-// An element of this policy is spent: only the no-list-input count refuses
-// it, a False return, hence `!`.
-test denylist_init_fails_with_a_list_input() {
-  !run_denylist_init_tx(
+// An element of this policy is spent beside the nonce: accepted, because
+// `Init` reads no inputs beyond the nonce. The shape cannot occur on chain: no
+// token of this policy exists before its root, because `Init` is one-shot (the
+// nonce) and every other branch needs an existing element, as its input
+// (`AddToDenylist`) or burnt (`RemoveFromDenylist`, `Deinit`).
+test denylist_init_reads_no_inputs_beyond_the_nonce() {
+  run_denylist_init_tx(
     Transaction {
       ..dl_init_tx(),
       inputs: [nonce_input(50), dl_node_input(1, dl_sanctioned_key, None)],

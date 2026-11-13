@@ -331,11 +331,16 @@ script, so that entry can never be removed properly.
 | `Add…` | 1 | an insert spends the anchor only; the new node is an *output* |
 | `Remove…` | 2 | the anchor and the node being removed |
 
+`Init`'s count was dropped in 2026-11 (§22): no token of the policy can exist before the root,
+because `Init` is one-shot (its nonce) and every other branch needs an existing element, as its
+input or burnt. The other three counts stand.
+
 Outputs needed no separate constraint *for the count*: with inputs pinned and the mint field already
 restricted to a single asset, value conservation forces the count, and the library already validates
 that each element output holds exactly one NFT of the policy. Where those outputs may sit is a
-separate question; since 2026-11 every mint branch also checks it (`utils.policy_only_at_script`,
-below and §22).
+separate question, which the library answers (below and §22): an insert keeps the continued anchor
+at the anchor's exact address and the new node at the anchor's payment credential, and a remove
+keeps the continued anchor at its address.
 
 **v1.8.0 now enforces these counts itself** — `insert_ascending` and `remove` take the full `inputs`
 list and scan it (`validate_singular_authentic_input` / `validate_dual_authentic_inputs`). Our own
@@ -344,7 +349,9 @@ only recognises *canonical* elements (exactly ADA plus one list NFT) and silentl
 input that carries the list policy in any other value shape, whereas ours counts every input bearing
 the policy. Element outputs are strictly canonical, so the gap should be unreachable — but a linked
 list used as an access-control structure is the wrong place to rely on "should", and the check costs
-one fold.
+one fold. Since 2026-11 our counts are also what makes the library's placement checks cover every
+token: no input bearing the policy is spent beyond the elements the library authenticates, so every
+token of the policy in the transaction is one the library places.
 
 **Then the primitive.** Every place that reads an element for authority now asserts the element's
 payment credential is its list's spend-validator hash, threaded in as a compile-time parameter.
@@ -366,10 +373,11 @@ Collapsing four near-identical copies into one helper is the point: three securi
 **Replaced in 2026-11 by the lists' own guarantee.** The reader-side address pin described above is
 gone (§22). In its place, each list keeps every NFT of its policy at its own spend script: each list
 mint takes its spend validator's hash (`list_script_hash`) and pins the root's payment credential to
-`Script(list_script_hash)` at `Init`; every mint branch checks that every output carrying the policy
-pays there (`utils.policy_only_at_script`); the library's induction keeps each continuation at its
+`Script(list_script_hash)` at `Init`; the library's induction keeps each continuation at its
 anchor's exact address and each new node at its anchor's payment credential (its stake part is free)
-from that root on; and tests on every list path refuse moving a list NFT off its list script.
+from that root on; the input counts on `Add…`, `Remove…` and `Deinit` keep any token of the policy
+the library does not place out of the transaction; and tests on every list path refuse moving a list
+NFT off its list script.
 Readers now authenticate an element by its policy id alone. The reason is identity: with the pin, a
 list was named twice — by its policy id in the GlobalState datum and by its spend hash compiled into
 every reader — so replacing a list meant rebuilding every reader, the permanent ones included. Now a
@@ -1674,15 +1682,19 @@ checked the element's address against a compile-time copy of the list spend hash
 **The fix.**
 
 * The list spend validators take no policy id. Each reads it off the UTxO it spends
-  (`utils.sole_nft_policy_id`): lovelace plus exactly one other policy holding one asset name at
-  quantity 1. Any other shape traps; a UTxO holding an unrelated policy's NFT yields that policy,
-  so its spend is decided by that policy's mint, and no reader treats it as list state.
+  (`utils.sole_nft_policy_id`): the value must hold exactly one policy besides lovelace, and no
+  token at all or a second policy traps. The names and quantities under that policy are not read,
+  because the list mint creates exactly one token per element (the library's
+  `is_only_mint_under_policy`). A UTxO holding an unrelated policy's NFT yields that policy, so its
+  spend is decided by that policy's mint, and no reader treats it as list state.
 * Each list mint takes its spend validator's hash, `list_script_hash`, after `init_input_out_ref`.
   `Init` requires the root's whole payment credential to be `Script(list_script_hash)`, so a key
   credential with the same hash is refused; the stake part stays free.
-* Every mint branch (`Init`, `Add…`, `Remove…`, `Deinit`) checks, in one fold over the outputs, that
-  every output carrying a token of the policy pays to `Script(list_script_hash)`
-  (`utils.policy_only_at_script`), as defence in depth on top of the library's own checks.
+* From that root on, the library places every element: an insert keeps the continued anchor at the
+  anchor's full address and the new node at the anchor's payment credential, a remove keeps the
+  continued anchor at its address, and an in-place update keeps the element at its address. The
+  input counts on `Add…` (1), `Remove…` (2) and `Deinit` (1) keep any token of the policy the
+  library does not place out of the transaction, so every list NFT stays at the list spend script.
 * There is no cycle: list spend (GlobalState policy) → list mint (GlobalState policy, one-shot
   input, list spend hash) → list policy id → GlobalState genesis datum.
 * Readers authenticate an element by its policy id alone, read from field 3 or 7. The
@@ -1697,15 +1709,16 @@ checked the element's address against a compile-time copy of the list spend hash
 `denylist_init_accepts_a_root_with_a_stake_credential` (`validators/regression.ak`).
 
 For the spend's own-input policy: `power_users_spend_refuses_an_own_input_with_two_policies`,
-`power_users_spend_refuses_an_own_input_with_two_names_of_one_policy`,
-`power_users_spend_refuses_an_own_input_with_quantity_two`,
 `power_users_spend_rejects_a_stray_no_token_utxo_swept_alongside_a_mutation` and
-`power_users_spend_accepts_a_foreign_utxo_under_its_own_mint`, and the same five for the denylist
-(`denylist_spend_refuses_an_own_input_with_two_policies`,
-`denylist_spend_refuses_an_own_input_with_two_names_of_one_policy`,
-`denylist_spend_refuses_an_own_input_with_quantity_two`,
+`power_users_spend_accepts_a_foreign_utxo_under_its_own_mint`; and, accepted because the derivation
+reads no names or quantities (shapes no list element holds on chain),
+`power_users_spend_derives_the_policy_from_an_own_input_with_two_names` and
+`power_users_spend_derives_the_policy_from_an_own_input_with_quantity_two`. The same five for the
+denylist: `denylist_spend_refuses_an_own_input_with_two_policies`,
 `denylist_spend_rejects_a_stray_no_token_utxo_swept_alongside_a_mutation`,
-`denylist_spend_accepts_a_foreign_utxo_under_its_own_mint`).
+`denylist_spend_accepts_a_foreign_utxo_under_its_own_mint`,
+`denylist_spend_derives_the_policy_from_an_own_input_with_two_names` and
+`denylist_spend_derives_the_policy_from_an_own_input_with_quantity_two`.
 
 For the readers: `authenticated_power_user_trusts_the_policy_alone`,
 `denylist_element_trusts_the_policy_alone`,
@@ -1795,9 +1808,10 @@ no new instance of this repository's list code could ever be initialised and swi
 * `Init` is nonce-only: it creates a list's root at genesis or at any later time, gated only by the
   instance's one-shot nonce `init_input_out_ref`. Each instance is the mint applied with its own
   nonce, so a fresh nonce gives a new policy id even with identical code, and one root. It still
-  requires the nonce spent, no input carrying the policy, and the root pinned to
-  `Script(list_script_hash)` with the per-branch outputs check; the library's `init` requires the
-  root NFT to be the only asset of the policy minted, at quantity 1.
+  requires the nonce spent and the root pinned to `Script(list_script_hash)`; the library's `init`
+  requires the root NFT to be the only asset of the policy minted, at quantity 1. It reads no input
+  beyond the nonce: no token of the policy can exist before the root, because every other branch
+  needs an existing element, as its input or burnt.
 * It needs no GlobalState and no admin signature. The root's creator gains no control, because every
   content change is gated through GlobalState: by the GlobalState admin for the power-users list,
   and by an `is_admin` power user under the current field 3 for the denylist.
@@ -1819,39 +1833,49 @@ off-chain before the switch. Accepted.
 `power_users_init_rejects_a_missing_nonce`,
 `power_users_init_fails_with_another_utxo_spent_instead_of_the_nonce`,
 `power_users_init_fails_with_the_nonce_index_from_another_transaction`,
-`power_users_init_fails_with_a_list_input` and `power_users_init_fails_with_a_second_token_minted`
-(`validators/power_users.ak`); the same eight for the denylist,
-`denylist_init_succeeds_on_the_nonce_utxo`, `denylist_init_succeeds_without_a_global_state`,
+`power_users_init_reads_no_inputs_beyond_the_nonce` and
+`power_users_init_fails_with_a_second_token_minted` (`validators/power_users.ak`); the same eight
+for the denylist, `denylist_init_succeeds_on_the_nonce_utxo`,
+`denylist_init_succeeds_without_a_global_state`,
 `denylist_init_succeeds_with_the_nonce_among_other_inputs`, `denylist_init_rejects_a_missing_nonce`,
 `denylist_init_fails_with_another_utxo_spent_instead_of_the_nonce`,
 `denylist_init_fails_with_the_nonce_index_from_another_transaction`,
-`denylist_init_fails_with_a_list_input` and `denylist_init_fails_with_a_second_token_minted`
-(`validators/regression.ak`); and, for reclaiming an old list after a switch,
-`power_users_remove_succeeds_on_a_list_global_state_no_longer_names` (`validators/power_users.ak`)
-and `denylist_remove_succeeds_on_a_list_global_state_no_longer_names` (`validators/denylist.ak`).
+`denylist_init_reads_no_inputs_beyond_the_nonce` and
+`denylist_init_fails_with_a_second_token_minted` (`validators/regression.ak`); and, for reclaiming
+an old list after a switch, `power_users_remove_succeeds_on_a_list_global_state_no_longer_names`
+(`validators/power_users.ak`) and `denylist_remove_succeeds_on_a_list_global_state_no_longer_names`
+(`validators/denylist.ak`).
 
 ### Accepted residue
 
-* **The per-branch outputs check has no isolating test.** No fixture is refused by
-  `utils.policy_only_at_script` alone: on every path where a list NFT could leave its script, the
-  library's own checks or this repository's input counts refuse first. It is defence in depth,
-  kept because it states the end result directly and costs one fold.
-* **One `expect` in the own-input policy derivation is unreachable.** `utils.sole_nft_policy_id`
-  requires the first policy of the spent value to be ADA. A ledger value always carries its
-  lovelace first, so that `expect` cannot fail by construction; it stays as a statement of the
-  shape.
+* **The per-branch outputs check was removed because no fixture could reach it.** An earlier
+  revision of this fix also checked, on every list mint branch, that every output carrying the
+  policy paid to the list spend script (`utils.policy_only_at_script`). No fixture was refused by
+  it alone: on every path where a list NFT could leave its script, the library's own checks or this
+  repository's input counts refused first. No shipped test isolates the library's placement checks
+  or its one-token rule; they are re-verified on any library bump (see Reliance).
+* **The own-input policy derivation does not check that the spent value lists lovelace first.** A
+  ledger value always does, so that check could not fail and was dropped.
+* **The own-input derivation reads the second policy without checking its names or quantities**,
+  because the list mint creates exactly one token per element (the library's
+  `is_only_mint_under_policy`).
 * **A foreign-token UTxO at a list address, old lists after a switch, and a power-users-only
   switch** are recorded under [Acknowledged, and deliberately not
   changed](#lists-foreign-tokens-at-a-list-address-and-lists-after-a-migration).
 
 ### Reliance
 
-Readers rely on the lists keeping every NFT of their policy at their own spend script: the
-linked-list library's usage guideline (`anastasia-labs/aiken-design-patterns` v1.9.0; input counts
-since v1.8.0), plus this repository's `Init` pin and per-branch outputs check. It is relied on, not
-re-checked; re-verify it on any change of the library version. See the README's [What is relied on
-from the linked-list library](../../README.md#what-is-relied-on-from-the-linked-list-library) and
-[the base-layer table](#what-the-cip-113-base-layer-actually-guarantees).
+Readers rely on the lists keeping every NFT of their policy at their own spend script. That rests on
+three things: this repository's `Init` pin; the linked-list library's placement checks
+(`anastasia-labs/aiken-design-patterns` v1.9.0: the insertion keeps the continued anchor's full
+address and gives the new node the anchor's payment credential, `remove` keeps the continued
+anchor's address, and `spend_for_updating_elements_data` keeps an element's address); and this
+repository's input counts on `Add…`, `Remove…` and `Deinit`. The library's one-token rule
+(`is_only_mint_under_policy`) is relied on as well, by the own-input derivation. It is relied on,
+not re-checked; re-verify the placement checks and the one-token rule on any change of the library
+version. See the README's [What is relied on from the linked-list
+library](../../README.md#what-is-relied-on-from-the-linked-list-library) and [the base-layer
+table](#what-the-cip-113-base-layer-actually-guarantees).
 
 ### Cost
 
@@ -1885,15 +1909,15 @@ Compiled sizes of the unapplied scripts (`compiledCode` in `plutus.json`), in by
 | `global_state_logic` | 5,742 | 5,938 (+196) |
 | `transfer_logic_validator` | 7,233 | 7,175 (−58) |
 | `third_party_transfer_logic_validator` | 7,440 | 7,341 (−99) |
-| `denylist.mint` | 5,772 | 5,165 (−607) |
-| `denylist_validator` | 2,907 | 2,857 (−50) |
-| `power_users.mint` | 5,105 | 4,556 (−549) |
-| `power_users_validator` | 2,311 | 2,304 (−7) |
+| `denylist.mint` | 5,772 | 4,949 (−823) |
+| `denylist_validator` | 2,907 | 2,802 (−105) |
+| `power_users.mint` | 5,105 | 4,340 (−765) |
+| `power_users_validator` | 2,311 | 2,253 (−58) |
 | `global_state_mint_validator` | 2,335 | 2,335 |
 | `global_state_proxy` | 424 | 424 |
 
 The genesis transaction's scripts (both list mints, the GlobalState mint and `global_state_logic`)
-shrink from ≈ 19.0 KB to ≈ 18.0 KB, unapplied; that is still above the 16 KiB transaction limit, so
+shrink from ≈ 19.0 KB to ≈ 17.6 KB, unapplied; that is still above the 16 KiB transaction limit, so
 they are still published as reference scripts before genesis.
 
 ---
@@ -2116,7 +2140,7 @@ the notes above apply to any redeploy onto current `main`.
 | A registry-node spend can never mint or burn that node's own token | **True** | `registry_spend` hoists `!mint_has_policy(self.mint, spent_node.key)` above its `when`, so it covers both the in-place update and the covering-node spend | `UpgradeRegistryNode`'s belt-and-braces no-mint re-check removal (2026-08-21) |
 | The seizure path is the only one that skips owner consent | **True** | the third-party path never calls `authorised_stake_cred`; the transfer path always does | — |
 | `issuance_mint` requires the minting logic's withdraw-0 on every mint or burn | **True** | `issuance_mint` (`validators/issuance_mint.ak`, `95e99ac`) requires `has_key_or_fail(withdrawals, minting_logic_cred)`, the credential it is parameterised by, on every mint or burn of its policy | [§21](#21-the-supply-cap-is-debited-by-the-minting-authority)'s reliance: the minting proxy, and through it the authority's same-transaction debit, runs on every mint or burn |
-| Every list NFT stays at its list spend script (a linked-list library guarantee, not the base layer's) | **Relied on** — re-verify on any library change | `anastasia-labs/aiken-design-patterns` v1.9.0 keeps each continuation at its anchor's exact address and each new node at its anchor's payment credential (its stake part is free), and its insert and remove count the list's inputs (since v1.8.0; [the linked-list dependency](#the-linked-list-dependency)); this repository's list mints pin the root to `Script(list_script_hash)` at `Init` and check every output carrying the policy on every branch (`utils.policy_only_at_script`) | The readers' list-element address check removal (2026-11, [§22](#22-a-rotation-could-rewrite-the-datum-and-a-list-could-never-be-replaced)): power-user nodes and denylist elements are authenticated by policy id alone |
+| Every list NFT stays at its list spend script (a linked-list library guarantee, not the base layer's) | **Relied on** — re-verify on any library change | `anastasia-labs/aiken-design-patterns` v1.9.0 keeps each continuation at its anchor's exact address and each new node at its anchor's payment credential (its stake part is free), and its insert and remove count the list's inputs (since v1.8.0; [the linked-list dependency](#the-linked-list-dependency)), its in-place update keeps an element's address, and its one-token rule (`is_only_mint_under_policy`) makes each mint or burn change exactly one token; this repository's list mints pin the root to `Script(list_script_hash)` at `Init`, and their input counts on `Add…`, `Remove…` and `Deinit` keep any token of the policy the library does not place out of the transaction | The readers' list-element address check removal (2026-11, [§22](#22-a-rotation-could-rewrite-the-datum-and-a-list-could-never-be-replaced)): power-user nodes and denylist elements are authenticated by policy id alone |
 
 Two things this settled:
 

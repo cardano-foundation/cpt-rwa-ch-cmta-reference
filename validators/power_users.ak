@@ -33,8 +33,10 @@ validator power_users_validator(global_state_policy_id: ByteArray) {
   ) {
     // This list's policy id is not a parameter: the list mint takes this
     // validator's hash, so taking the policy id back would be circular. It is
-    // read off the UTxO being spent instead, which must hold lovelace plus
-    // exactly one NFT (`utils.sole_nft_policy_id` traps on any other shape).
+    // read off the UTxO being spent instead, which must hold exactly one
+    // policy besides lovelace (`utils.sole_nft_policy_id` traps on no token or
+    // on a second policy; it reads no names or quantities, because the list
+    // mint creates exactly one token per element).
     //
     // That also binds every arm to a UTxO shaped like a list element. A stray
     // value-bearing UTxO parked at the list address with no token at all —
@@ -140,23 +142,23 @@ validator mint(
         // No count of this policy's mint here: the library's `init` already
         // requires the root NFT to be the only asset of this policy minted, at
         // quantity 1, and traps otherwise.
+        //
+        // No count of this policy's inputs either: no token of it can exist
+        // before the root. `Init` is one-shot (the nonce), and every other
+        // branch needs an existing element, as its input (`AddPowerUser`) or
+        // burnt (`RemovePowerUser`, `Deinit`).
         let nonce_validated = list.any(
           self.inputs,
           fn(input) { input.output_reference == init_input_out_ref },
         )
         let root_output = utils.safe_list_at(self.outputs, root_output_index)
-        and {
-          // A new list: no element of this policy exists yet, so none may be
-          // spent.
-          (utils.count_inputs_with_policy(self.inputs, policy_id) == 0)?,
-          creates_the_root(
-            self,
-            nonce_validated,
-            root_output,
-            policy_id,
-            list_script_hash,
-          ),
-        }
+        creates_the_root(
+          self,
+          nonce_validated,
+          root_output,
+          policy_id,
+          list_script_hash,
+        )
       }
       Deinit { global_state_ref_input_index } -> {
         // POST-DECOMMISSION CLEANUP ONLY — same rule and the same reasoning as
@@ -198,14 +200,12 @@ validator mint(
           // minted, at quantity -1, and traps otherwise.
           //
           // Only the root is spent, and `deinit` already requires the list to
-          // be empty. This INPUT count is defence in depth beside the
-          // library's own scan — see the note on the Add branch.
+          // be empty. This INPUT count is what keeps a stray token of this
+          // policy out of the transaction (see the note on the Add branch), so
+          // once the root is burnt no token of the policy is left anywhere.
           (utils.count_inputs_with_policy(self.inputs, policy_id) == 1)?,
           deinit(self.inputs, self.mint, fn(_, _, _) { True })
             |> run_root_with(policy_id, constants.linked_list_root_key),
-          // Every output carrying this policy — after a deinit there should be
-          // none — is at the list spend script. See the note on the Add branch.
-          utils.policy_only_at_script(self.outputs, policy_id, list_script_hash)?,
         }
       }
       AddPowerUser {
@@ -243,14 +243,18 @@ validator mint(
           // `insert_ascending` infers from `self.inputs` itself. The new node
           // is an OUTPUT.
           //
-          // The library performs its own exact-one scan, so this line is
-          // defence in depth. It is kept because the two counts are not
-          // identical: the library's scanner only recognises CANONICAL
-          // elements (exactly ADA plus one list NFT) and silently IGNORES an
-          // input carrying the list policy in any other value shape, whereas
-          // this one counts every input bearing the policy. Element outputs
-          // are strictly canonical, so the gap should be unreachable — but a
-          // list is an access-control structure, and this costs one fold.
+          // This count is what keeps a stray token of this policy out of the
+          // transaction. The library's own exact-one scan only recognises
+          // CANONICAL elements (exactly ADA plus one list NFT) and silently
+          // IGNORES an input carrying the list policy in any other value
+          // shape, whereas this one counts every input bearing the policy.
+          //
+          // With it, the anchor's token and the new node's are the only ones
+          // of this policy in the transaction, and the library places both:
+          // the continued anchor keeps the anchor's full address and the new
+          // node shares its payment credential. The anchor is at the list
+          // spend script by induction from the root that `Init` pins, so every
+          // token of this policy stays there.
           (utils.count_inputs_with_policy(self.inputs, policy_id) == 1)?,
           insert_ascending(
             anchor_output,
@@ -280,15 +284,6 @@ validator mint(
                 constants.linked_list_node_key_prefix,
                 constants.linked_list_node_key_prefix_length,
               ),
-          // Every output carrying this policy — here the continued anchor and
-          // the new node — is at the list spend script.
-          //
-          // Defence in depth, on every branch: the library already keeps the
-          // continued anchor at the anchor's address and the new node at its
-          // payment credential, and the anchor got there by induction from the
-          // root that `Init` pins. This one fold states the end result
-          // directly, so it holds even if one of those steps were loosened.
-          utils.policy_only_at_script(self.outputs, policy_id, list_script_hash)?,
         }
       }
       RemovePowerUser {
@@ -321,8 +316,10 @@ validator mint(
           // this policy minted, at quantity -1, and traps otherwise.
           //
           // A remove spends exactly two elements: the anchor and the node
-          // being removed. Defence in depth beside the library's own exact-two
-          // scan — see the note on the Add branch.
+          // being removed. As on the Add branch, this count is what keeps a
+          // stray token of this policy out of the transaction, so the library
+          // places every token: `remove` keeps the continued anchor at the
+          // anchor's address and burns the other.
           (utils.count_inputs_with_policy(self.inputs, policy_id) == 2)?,
           remove(
             anchor_out_ref,
@@ -350,9 +347,6 @@ validator mint(
                 constants.linked_list_node_key_prefix,
                 constants.linked_list_node_key_prefix_length,
               ),
-          // Every output carrying this policy — here the continued anchor — is
-          // at the list spend script. See the note on the Add branch.
-          utils.policy_only_at_script(self.outputs, policy_id, list_script_hash)?,
         }
       }
     }
@@ -382,20 +376,15 @@ fn creates_the_root(
   policy_id: PolicyId,
   list_script_hash: ByteArray,
 ) -> Bool {
-  and {
-    init(
-      nonce_validated,
-      root_output,
-      self.mint,
-      fn(address, _, _) {
-        (address.payment_credential == Script(list_script_hash))?
-      },
-    )
-      |> run_root_with(policy_id, constants.linked_list_root_key),
-    // Every output carrying this policy — here only the root — is at the list
-    // spend script. See the note on the Add branch.
-    utils.policy_only_at_script(self.outputs, policy_id, list_script_hash)?,
-  }
+  init(
+    nonce_validated,
+    root_output,
+    self.mint,
+    fn(address, _, _) {
+      (address.payment_credential == Script(list_script_hash))?
+    },
+  )
+    |> run_root_with(policy_id, constants.linked_list_root_key)
 }
 
 // ============================================================================
@@ -703,9 +692,9 @@ test power_users_spend_accepts_a_genuine_node_spend_alongside_a_mutation() {
 /// asks only "does the mint field carry this policy anywhere", so without a
 /// check on the spent UTxO itself its value could be swept out alongside any
 /// real insert/remove. The validator reads the list policy off ITS OWN spent
-/// input, which must hold lovelace plus exactly one NFT; this one holds only
-/// lovelace, so the derivation traps — hence `fail`, written `… || True` so
-/// that a validator merely returning False cannot pass it.
+/// input, which must hold exactly one policy besides lovelace; this one holds
+/// only lovelace, so the derivation traps — hence `fail`, written `… || True`
+/// so that a validator merely returning False cannot pass it.
 test power_users_spend_rejects_a_stray_no_token_utxo_swept_alongside_a_mutation() fail {
   let no_datum: Option<Data> = None
   let tx = Transaction {
@@ -724,11 +713,13 @@ test power_users_spend_rejects_a_stray_no_token_utxo_swept_alongside_a_mutation(
 
 // ── The spend reads its list policy off its own input ───────────────────────
 //
-// Each refusal below is the accepted control above
+// Each test below is the accepted control above
 // (`power_users_spend_accepts_a_genuine_node_spend_alongside_a_mutation`) with
-// only the spent node's value changed. The derivation traps on any shape but
-// lovelace plus one NFT, so each is written `… || True`: a validator that
-// merely returns False cannot pass it, only a trap can.
+// only the spent node's value changed. The derivation traps on no token or on
+// a second policy, so each refusal is written `… || True`: a validator that
+// merely returns False cannot pass it, only a trap can. It reads no names or
+// quantities under the policy, so the two shapes holding more than one list
+// token are accepted; neither can occur on chain.
 
 /// The control's node with `extra` merged into its value.
 fn t_pu_node_with(extra: Assets) -> Input {
@@ -754,7 +745,8 @@ fn t_run_pu_state_transition(own_input: Input) -> Bool {
   )
 }
 
-/// A second policy beside the list NFT. It sorts before the list policy, so a
+/// A second policy beside the list NFT: the value has three entries, so the
+/// derivation traps. The second policy sorts before the list policy, so a
 /// derivation reading the first token's policy would pick it.
 test power_users_spend_refuses_an_own_input_with_two_policies() fail {
   t_run_pu_state_transition(
@@ -762,18 +754,26 @@ test power_users_spend_refuses_an_own_input_with_two_policies() fail {
   ) || True
 }
 
-/// A second asset name under the list policy.
-test power_users_spend_refuses_an_own_input_with_two_names_of_one_policy() fail {
+/// A second asset name under the list policy: accepted, because the
+/// derivation reads no names. No element holds this shape on chain: the list
+/// mint creates exactly one token per element (the library's
+/// `is_only_mint_under_policy`), and the library authenticates every element
+/// output as lovelace plus one NFT at quantity 1.
+test power_users_spend_derives_the_policy_from_an_own_input_with_two_names() {
   t_run_pu_state_transition(
     t_pu_node_with(from_asset(t_pu_policy, t_ll_asset_name(t_key_28), 1)),
-  ) || True
+  )
 }
 
-/// The list NFT at quantity 2.
-test power_users_spend_refuses_an_own_input_with_quantity_two() fail {
+/// The list NFT at quantity 2: accepted, because the derivation reads no
+/// quantities. No element holds this shape on chain, for the same reason as
+/// the test above: the list mint creates each token at quantity 1 (the
+/// library's `is_only_mint_under_policy`), and the library authenticates every
+/// element output as lovelace plus one NFT at quantity 1.
+test power_users_spend_derives_the_policy_from_an_own_input_with_quantity_two() {
   t_run_pu_state_transition(
     t_pu_node_with(from_asset(t_pu_policy, t_ll_asset_name(t_pu_cred), 1)),
-  ) || True
+  )
 }
 
 /// A UTxO at the list address holding an unrelated policy's NFT, spent under
@@ -1236,10 +1236,13 @@ test power_users_init_succeeds_with_the_nonce_among_other_inputs() {
   )
 }
 
-// An element of this policy is spent: only the no-list-input count refuses
-// it, a False return, hence `!`.
-test power_users_init_fails_with_a_list_input() {
-  !t_run_pu_init_tx(
+// An element of this policy is spent beside the nonce: accepted, because
+// `Init` reads no inputs beyond the nonce. The shape cannot occur on chain: no
+// token of this policy exists before its root, because `Init` is one-shot (the
+// nonce) and every other branch needs an existing element, as its input
+// (`AddPowerUser`) or burnt (`RemovePowerUser`, `Deinit`).
+test power_users_init_reads_no_inputs_beyond_the_nonce() {
+  t_run_pu_init_tx(
     Transaction {
       ..t_pu_init_tx(),
       inputs: [

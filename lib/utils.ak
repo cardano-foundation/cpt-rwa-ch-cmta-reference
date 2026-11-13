@@ -3,7 +3,7 @@ use aiken/collection/dict
 use aiken/collection/list
 use aiken/collection/pairs
 use aiken_design_patterns/linked_list.{get_node_element_info, run_node_with}
-use cardano/address.{Address, Credential, Script, VerificationKey}
+use cardano/address.{Credential, Script, VerificationKey}
 use cardano/assets.{Assets, PolicyId, tokens}
 use cardano/transaction.{InlineDatum, Input, Output, Transaction}
 use constants
@@ -119,9 +119,10 @@ pub fn quantity_of_policy_id(value: Assets, policyId: PolicyId) {
 /// 3. Its datum is a well-formed `PowerUser`.
 ///
 /// The node's ADDRESS is not checked here: the list guarantees that every NFT
-/// of its policy lives at its spend script — the list mint's Init pin and its
-/// outputs check on every branch (`policy_only_at_script`), plus the library's
-/// own address checks on nodes and continuations — so the policy id alone
+/// of its policy lives at its spend script — the list mint's Init pin, the
+/// library's own address checks on nodes and continuations, and the mint's
+/// input counts on every other branch, which keep any token of the policy the
+/// library does not place out of the transaction — so the policy id alone
 /// identifies a list element.
 ///
 /// Every caller that reads power-user authority goes through here — the
@@ -194,12 +195,15 @@ pub fn credential_type_byte(credential: Credential) -> Int {
 /// insert or remove. (The denylist's in-place `UpdateDenylistEntry` runs no
 /// mint at all: the library's `one_to_one` binds each update spend to its own
 /// continuation, which must keep the address, the NFT and the link, so no node
-/// can leave the list that way either.) Outputs need no separate count — with
+/// can leave the list that way either.) Outputs need no separate check — with
 /// inputs pinned and the mint field already restricted to a single asset,
 /// value conservation forces the count, and the library already requires each
 /// element output to hold exactly one NFT of the policy. Where those outputs
-/// sit is the per-branch outputs check, `policy_only_at_script`, which every
-/// list mint branch runs beside this count.
+/// sit is the library's too: an insert keeps the continued anchor at the
+/// anchor's address and the new node at its payment credential, and a remove
+/// keeps the continued anchor at its address. With this count on every branch
+/// that spends an element, those are all the tokens of the policy in the
+/// transaction.
 pub fn count_inputs_with_policy(inputs: List<Input>, policy_id: PolicyId) -> Int {
   list.foldl(
     inputs,
@@ -217,10 +221,13 @@ pub fn count_inputs_with_policy(inputs: List<Input>, policy_id: PolicyId) -> Int
 /// The policy id of the one NFT a linked-list element carries, read off the
 /// element's own value.
 ///
-/// The value must be lovelace plus exactly one other policy, holding exactly
-/// one asset name at quantity 1 — the shape the library gives every element.
-/// Any other shape traps: no token at all, a second policy, a second name, or
-/// a quantity other than 1.
+/// The value must hold exactly one policy besides lovelace; any other shape
+/// traps: no token at all, or a second policy. The first entry is not checked
+/// to be lovelace, because a ledger value always lists lovelace first. The
+/// names and quantities under the policy are not checked either: the list mint
+/// creates exactly one token per element (the library's
+/// `is_only_mint_under_policy` on every branch), so a list element never
+/// holds another shape.
 ///
 /// A list spend validator calls this on the UTxO it is spending, in place of
 /// taking its list policy id as a parameter. It cannot take one: the list mint
@@ -228,33 +235,8 @@ pub fn count_inputs_with_policy(inputs: List<Input>, policy_id: PolicyId) -> Int
 /// UTxO at the list address holding some other policy's token yields that
 /// other policy; it is not list state, and no reader treats it as such.
 pub fn sole_nft_policy_id(value: Assets) -> PolicyId {
-  expect [Pair(ada_policy, _), Pair(policy_id, names)] = assets.to_pairs(value)
-  expect ada_policy == assets.ada_policy_id
-  expect [Pair(_, 1)] = dict.to_pairs(names)
+  expect [_, Pair(policy_id, _)] = assets.to_pairs(value)
   policy_id
-}
-
-/// Whether every output carrying any token of `policy_id` pays to the script
-/// `script_hash`. The whole payment credential is compared, so a key
-/// credential with the same hash does not qualify; the stake part is free.
-///
-/// One fold over the outputs. A list mint runs it on every branch, beside the
-/// library's own per-element checks, so that no list NFT it lets through can
-/// land anywhere but the list spend script.
-pub fn policy_only_at_script(
-  outputs: List<Output>,
-  policy_id: PolicyId,
-  script_hash: ByteArray,
-) -> Bool {
-  list.all(
-    outputs,
-    fn(output) {
-      or {
-        output.address.payment_credential == Script(script_hash),
-        dict.is_empty(tokens(output.value, policy_id)),
-      }
-    },
-  )
 }
 
 /// Rebuild a Constr field list, replacing the element at `index` with

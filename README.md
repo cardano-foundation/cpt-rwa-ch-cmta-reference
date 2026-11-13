@@ -558,8 +558,8 @@ and burn — the proxy's withdraw-0 is what the CIP-113 registry node invokes, a
 the authority's). The four large ones (`global_state_logic` is ~5.9 KB and runs in every mint and
 burn too) must be published once as reference-script UTxOs and supplied via reference inputs — not
 inlined (a transaction is capped at 16 KiB); the proxy is small enough to inline but is simplest to
-publish alongside them. The two list `mint` validators (~4.6–5.2 KB) must be treated the same way:
-the genesis transaction runs both, the GlobalState mint and `global_state_logic` — ≈ 18.0 KB of
+publish alongside them. The two list `mint` validators (~4.3–4.9 KB) must be treated the same way:
+the genesis transaction runs both, the GlobalState mint and `global_state_logic` — ≈ 17.6 KB of
 scripts against the 16 KiB limit — so publish them and `global_state_logic` before genesis (step 0
 of [Initialising a token](#initialising-a-token)). Sizes are of the unapplied scripts in
 `plutus.json` (`compiledCode` hex length ÷ 2); applying the parameters adds their encoded bytes.
@@ -706,17 +706,22 @@ changes the guarantees above:
 ### What is relied on from the linked-list library
 
 Both lists keep every NFT of their policy at their own spend script, and the readers rely on it. The
-guarantee has three parts: the linked-list library's usage guideline
-(`anastasia-labs/aiken-design-patterns` v1.9.0, whose insert and remove count the list's inputs
-since v1.8.0 and keep each continuation at its anchor's exact address and each new node at its
-anchor's payment credential, its stake part being free); this repository's `Init` pin, which
-requires the root's payment credential to be `Script(list_script_hash)`; and a check on every list
-mint branch that every output carrying the list's NFT pays to that script
-(`utils.policy_only_at_script`). So the readers — the minting authority, the transfer and seizure
-logic, the denylist and the GlobalState pause branch — authenticate a list element by its policy ID
-alone, read from datum field 3 or 7, and do not re-check its address. This is relied on, not
-re-checked: re-verify it on any change of the library version. Tests on every list path refuse
-moving a list NFT off its list script; see [§22 of the security
+guarantee has three parts. First, this repository's `Init` pin, which requires the root's payment
+credential to be `Script(list_script_hash)`. Second, the linked-list library's placement checks
+(`anastasia-labs/aiken-design-patterns` v1.9.0): an insert keeps the continued anchor at the
+anchor's exact address and the new node at the anchor's payment credential, its stake part being
+free; a remove keeps the continued anchor at its address; an in-place update keeps the element at
+its address. Third, this repository's input counts on the list mint branches that spend an element
+(one on an insert and on `Deinit`, two on a remove), which keep any token of the policy that the
+library does not place out of the transaction. The library's insert and remove also count the
+list's inputs, since v1.8.0. Its one-token rule (`is_only_mint_under_policy`: each mint or burn
+changes exactly one token of the policy) is relied on as well: it is why a list spend reads its
+policy off its own input without checking the names or quantities under it. So the readers — the
+minting authority, the transfer and seizure logic, the denylist and the GlobalState pause branch —
+authenticate a list element by its policy ID alone, read from datum field 3 or 7, and do not
+re-check its address. This is relied on, not re-checked: re-verify the placement checks and the
+one-token rule on any change of the library version. Tests on every list path refuse moving a list
+NFT off its list script; see [§22 of the security
 notes](documents/security/security-fixes.md#22-a-rotation-could-rewrite-the-datum-and-a-list-could-never-be-replaced).
 
 ### Two shapes that cannot be built
@@ -965,7 +970,7 @@ dependent transaction after the preceding output is available.
 0. **Prepare.** Register the stake credential of `global_state_logic`, applied with this
    deployment's parameters (its `publish` handler accepts `RegisterCredential`), and publish it and
    both list `mint` validators as reference-script UTxOs: the genesis transaction runs those three
-   and the GlobalState mint, ≈ 18.0 KB of scripts (unapplied), which cannot all be inlined under the
+   and the GlobalState mint, ≈ 17.6 KB of scripts (unapplied), which cannot all be inlined under the
    16 KiB transaction limit. No transaction before genesis may spend one of the three reserved
    one-shot inputs, so exclude them from coin selection: they are baked into the mint parameters,
    and spending one means choosing a new input and re-applying every parameter that depends on it.
