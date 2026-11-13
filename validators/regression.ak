@@ -1138,9 +1138,11 @@ test denylist_init_succeeds_on_the_nonce_utxo() {
   )
 }
 
-/// Without the one-shot nonce input, genesis must fail — otherwise anyone
-/// could create a second, parallel "denylist" and point a deployment at it.
-/// `init` guards this with `expect nonce_validated`, which TRAPS, hence `fail`.
+/// Without the one-shot nonce input, `Init` must fail — otherwise the root of
+/// this policy could be created more than once. (Anyone holding a fresh nonce
+/// can create a new instance, a new policy, which stays inert unless
+/// `MigrateLists` adopts it.) `init` guards this with `expect nonce_validated`,
+/// which TRAPS, hence `fail`.
 test denylist_init_rejects_a_missing_nonce() fail {
   v_denylist.mint.mint(
     gs_policy,

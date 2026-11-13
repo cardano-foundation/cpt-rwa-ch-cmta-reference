@@ -274,8 +274,8 @@ validator mint(
           // minted, at quantity -1, and traps otherwise.
           //
           // Only the root is spent, and `deinit` already requires the list to
-          // be empty. See the note on the Add branch for why this count is
-          // kept alongside the library's own scan.
+          // be empty. See the note on the Add branch for why this INPUT count
+          // is kept alongside the library's own scan.
           (utils.count_inputs_with_policy(self.inputs, policy_id) == 1)?,
           deinit(self.inputs, self.mint, fn(_, _, _) { True })
             |> run_root_with(policy_id, constants.linked_list_root_key),
