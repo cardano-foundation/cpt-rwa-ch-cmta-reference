@@ -9,9 +9,7 @@ use aiken_design_patterns/linked_list.{
   spend_for_updating_elements_data,
 }
 use cardano/address.{Address, Script, VerificationKey}
-use cardano/assets.{
-  Assets, PolicyId, from_asset, from_lovelace, merge, tokens, zero,
-}
+use cardano/assets.{Assets, PolicyId, from_asset, from_lovelace, merge, zero}
 use cardano/transaction.{
   InlineDatum, Input, NoDatum, Output, OutputReference, Transaction, find_input,
 }
@@ -271,7 +269,10 @@ validator mint(
         and {
           gs.deactivated?,
           must_be_signed_by_credential(self, gs.admin_credential_hash),
-          dict.size(tokens(self.mint, policy_id)) == 1,
+          // No count of this policy's mint here: the library's `deinit`
+          // already requires the root NFT to be the only asset of this policy
+          // minted, at quantity -1, and traps otherwise.
+          //
           // Only the root is spent, and `deinit` already requires the list to
           // be empty. See the note on the Add branch for why this count is
           // kept alongside the library's own scan.
@@ -314,7 +315,11 @@ validator mint(
           bytearray.length(user_pkh) == 28,
           power_user_data.is_admin,
           must_be_signed_by_credential(self, power_user_credential_hash),
-          dict.size(tokens(self.mint, policy_id)) == 1,
+          // No count of this policy's mint here: the library's
+          // `insert_ascending` already requires the new node's NFT to be the
+          // only asset of this policy minted, at quantity 1, and traps
+          // otherwise.
+          //
           // An insert spends exactly one element — the anchor, which
           // `insert_ascending` infers from `self.inputs` itself. The new node
           // is an OUTPUT.
@@ -399,7 +404,10 @@ validator mint(
           bytearray.length(user_pkh) == 28,
           power_user_data.is_admin,
           must_be_signed_by_credential(self, power_user_credential_hash),
-          dict.size(tokens(self.mint, policy_id)) == 1,
+          // No count of this policy's mint here: the library's `remove`
+          // already requires the removed node's NFT to be the only asset of
+          // this policy minted, at quantity -1, and traps otherwise.
+          //
           // A remove spends exactly two elements: the anchor and the node
           // being removed. Defence in depth beside the library's own exact-two
           // scan — see the note on the Add branch.
@@ -1442,8 +1450,8 @@ test dl_remove_rejects_a_missing_signature() {
 // in this file's fixtures (Init, Deinit and the spend gate are in
 // `validators/regression.ak`). Each is an accepted fixture above with only the
 // NFT's destination changed; its accepted control is named in its comment. A
-// `fail` test here is written `… || True`, so a validator that merely returns
-// False cannot pass it — only a trap can.
+// `fail` test here is written `… || True` or `… |> fn(_) { True }`, so a
+// validator that merely returns False cannot pass it — only a trap can.
 
 /// A key (wallet) address outside the list.
 const t_wallet: ByteArray =
@@ -1505,10 +1513,11 @@ test denylist_remove_refuses_an_anchor_continuation_at_a_wallet() fail {
 }
 
 // The removed node's NFT is paid to a wallet instead of burnt, so nothing of
-// this policy is minted and the branch's one-asset mint conjunct returns
-// False, hence `!`.
-test denylist_remove_refuses_a_removed_node_kept_in_a_wallet() {
-  !t_run_denylist_remove(
+// this policy is minted. The library's `remove` requires the burn
+// (`expect is_only_mint_under_policy`), finds no entry for this policy and
+// traps, so only a trap passes this `… |> fn(_) { True }` body.
+test denylist_remove_refuses_a_removed_node_kept_in_a_wallet() fail {
+  t_run_denylist_remove(
     t_key_28,
     Transaction {
       ..t_dl_remove_tx(t_key_28),
@@ -1519,6 +1528,7 @@ test denylist_remove_refuses_a_removed_node_kept_in_a_wallet() {
       ],
     },
   )
+    |> fn(_) { True }
 }
 
 // The same, with another node NFT minted in place of the burn so that this

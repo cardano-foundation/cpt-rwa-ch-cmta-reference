@@ -9,9 +9,7 @@ use aiken_design_patterns/linked_list.{
   spend_for_updating_elements_data,
 }
 use cardano/address.{Address, Inline, Script, VerificationKey}
-use cardano/assets.{
-  Assets, PolicyId, from_asset, from_lovelace, merge, tokens, zero,
-}
+use cardano/assets.{Assets, PolicyId, from_asset, from_lovelace, merge, zero}
 use cardano/transaction.{
   InlineDatum, Input, NoDatum, Output, OutputReference, Transaction, find_input,
 }
@@ -165,16 +163,18 @@ validator mint(
         // the denylist's `Deinit`, and here the consequence of getting it wrong
         // is if anything broader.
         //
-        // Burning this root is irreversible: `Init` is gated on a one-shot UTxO
-        // consumed at genesis, and `AddPowerUser` needs an existing element as
-        // its anchor. On a live protocol before `LockUpgrades` the admin could
-        // still point GlobalState at a new list (`MigrateLists`); after the
-        // lock `power_user_linked_list_policy_id` is final, so once the root
-        // is gone no operator could ever be added again — mint, burn, pause,
-        // unpause, seizure and sanctions all authenticate against a node of
-        // THIS list and would be lost for good. If transfers happened to be
-        // paused at that moment they would stay paused forever, since
-        // unpausing needs a `can_pause` node.
+        // Burning this root is irreversible: `Init` is gated by this instance's
+        // one-shot nonce, which is spent, and `AddPowerUser` needs an existing
+        // element as its anchor. Anyone holding a fresh nonce can create a new
+        // instance (a new policy), which stays inert unless `MigrateLists`
+        // adopts it. On a live protocol before `LockUpgrades` the admin could
+        // still point GlobalState at a new list that way; after the lock
+        // `power_user_linked_list_policy_id` is final, so once the root is gone
+        // no operator could ever be added again — mint, burn, pause, unpause,
+        // seizure and sanctions all authenticate against a node of THIS list
+        // and would be lost for good. If transfers happened to be paused at
+        // that moment they would stay paused forever, since unpausing needs a
+        // `can_pause` node.
         //
         // Requiring `deactivated` keeps the branch to its purpose: reclaiming
         // the root's min-ADA after the token has been retired.
@@ -193,7 +193,10 @@ validator mint(
           // can burn the root NFT while the list is empty. Admin now comes
           // from GS datum (rotatable); previously compile-time owner.
           must_be_signed_by_credential(self, gs.admin_credential_hash),
-          dict.size(tokens(self.mint, policy_id)) == 1,
+          // No count of this policy's mint here: the library's `deinit`
+          // already requires the root NFT to be the only asset of this policy
+          // minted, at quantity -1, and traps otherwise.
+          //
           // Only the root is spent, and `deinit` already requires the list to
           // be empty. Defence in depth beside the library's own scan — see the
           // note on the Add branch.
@@ -231,7 +234,11 @@ validator mint(
           // grant out rather than rejecting it up front.
           bytearray.length(new_power_user_key) == 28,
           must_be_signed_by_credential(self, admin),
-          dict.size(tokens(self.mint, policy_id)) == 1,
+          // No count of this policy's mint here: the library's
+          // `insert_ascending` already requires the new node's NFT to be the
+          // only asset of this policy minted, at quantity 1, and traps
+          // otherwise.
+          //
           // An insert spends exactly one element — the anchor, which
           // `insert_ascending` infers from `self.inputs` itself. The new node
           // is an OUTPUT.
@@ -309,7 +316,10 @@ validator mint(
           // Same length pin as the Add branch — see its comment.
           bytearray.length(power_user_key_to_remove) == 28,
           must_be_signed_by_credential(self, admin),
-          dict.size(tokens(self.mint, policy_id)) == 1,
+          // No count of this policy's mint here: the library's `remove`
+          // already requires the removed node's NFT to be the only asset of
+          // this policy minted, at quantity -1, and traps otherwise.
+          //
           // A remove spends exactly two elements: the anchor and the node
           // being removed. Defence in depth beside the library's own exact-two
           // scan — see the note on the Add branch.
@@ -1017,10 +1027,12 @@ test power_users_init_succeeds_on_the_nonce_utxo() {
   )
 }
 
-/// Without the one-shot nonce input, genesis must fail — otherwise anyone
-/// could create a second, parallel power-users list and point a deployment
-/// at it. The library's `init` guards this with `expect nonce_validated`,
-/// which TRAPS, hence `fail`.
+/// Without this instance's one-shot nonce input, `Init` must fail — otherwise
+/// the root of this policy could be created more than once. `Init` is gated
+/// by that nonce alone: anyone holding a fresh nonce can create a new instance
+/// (a new policy), which stays inert unless `MigrateLists` adopts it. The
+/// library's `init` guards this with `expect nonce_validated`, which TRAPS,
+/// hence `fail`.
 test power_users_init_rejects_a_missing_nonce() fail {
   mint.mint(
     t_gs_policy,
@@ -1306,8 +1318,8 @@ test pu_add_rejects_a_node_keyed_other_than_the_redeemer() fail {
 // One refusal per path through which a power-users NFT is minted, moved or
 // kept. Each is an accepted fixture above with only the NFT's destination
 // changed; its accepted control is named in its comment. A `fail` test here
-// is written `… || True`, so a validator that merely returns False cannot
-// pass it — only a trap can.
+// is written `… || True` or `… |> fn(_) { True }`, so a validator that merely
+// returns False cannot pass it — only a trap can.
 
 /// A key (wallet) address outside the list.
 const t_wallet: ByteArray =
@@ -1432,10 +1444,11 @@ test power_users_remove_refuses_an_anchor_continuation_at_a_wallet() fail {
 }
 
 // The removed node's NFT is paid to a wallet instead of burnt, so nothing of
-// this policy is minted and the branch's one-asset mint conjunct returns
-// False, hence `!`.
-test power_users_remove_refuses_a_removed_node_kept_in_a_wallet() {
-  !t_run_pu_remove(
+// this policy is minted. The library's `remove` requires the burn
+// (`expect is_only_mint_under_policy`), finds no entry for this policy and
+// traps, so only a trap passes this `… |> fn(_) { True }` body.
+test power_users_remove_refuses_a_removed_node_kept_in_a_wallet() fail {
+  t_run_pu_remove(
     t_key_28,
     Transaction {
       ..t_pu_remove_tx(t_key_28),
@@ -1446,6 +1459,7 @@ test power_users_remove_refuses_a_removed_node_kept_in_a_wallet() {
       ],
     },
   )
+    |> fn(_) { True }
 }
 
 // The same, with another node NFT minted in place of the burn so that this
@@ -1506,15 +1520,18 @@ fn t_run_pu_deinit(tx: Transaction) -> Bool {
 }
 
 // The root is paid to a wallet instead of burnt: nothing of this policy is
-// minted, so the one-asset mint conjunct returns False, hence `!`.
-test power_users_deinit_refuses_a_root_kept_in_a_wallet() {
-  !t_run_pu_deinit(
+// minted. The library's `deinit` requires the burn
+// (`expect is_only_mint_under_policy`), finds no entry for this policy and
+// traps, so only a trap passes this `… |> fn(_) { True }` body.
+test power_users_deinit_refuses_a_root_kept_in_a_wallet() fail {
+  t_run_pu_deinit(
     Transaction {
       ..t_pu_deinit_tx(),
       mint: zero,
       outputs: [t_at_wallet(t_pu_root_input(0).output)],
     },
   )
+    |> fn(_) { True }
 }
 
 // The same, with a node NFT minted in place of the burn. The library requires

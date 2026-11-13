@@ -1865,35 +1865,36 @@ change. Memory / CPU units:
 | transfer bench, `n = 1` (`transfer_cost_by_party_count`) | 647,956 / 197,895,933 | 638,140 / 194,503,128 | −9,816 / −3,392,805 |
 | seizure bench, `n = 1` (`seizure_cost_by_destination_count`) | 617,609 / 192,233,904 | 608,725 / 189,066,762 | −8,884 / −3,167,142 |
 | minting proxy, per mint or burn | 86,667 / 31,601,583 | 81,539 / 30,040,763 | −5,128 / −1,560,820 |
-| GlobalState proxy and logic, `MintSecurity` | 271,623 / 117,393,487 | 276,223 / 118,582,209 | +4,600 / +1,188,722 |
+| GlobalState proxy and logic, `MintSecurity` | 271,623 / 117,393,487 | 275,023 / 118,390,209 | +3,400 / +996,722 |
 | minting authority, mint, 1 destination | 453,428 / 156,081,166 | 447,744 / 153,878,746 | −5,684 / −2,202,420 |
 | minting authority, mint, 16 destinations | 2,113,103 / 867,864,031 | 2,041,539 / 842,028,046 | −71,564 / −25,835,985 |
 | minting authority, burn | 251,595 / 87,910,950 | 250,303 / 87,284,101 | −1,292 / −626,849 |
-| whole mint, 1 destination | 811,718 / 305,076,236 | 805,506 / 302,501,718 | −6,212 / −2,574,518 |
-| whole mint, 16 destinations | 2,471,393 / 1,016,859,101 | 2,399,301 / 990,651,018 | −72,092 / −26,208,083 |
-| whole burn | 609,885 / 236,906,020 | 608,065 / 235,907,073 | −1,820 / −998,947 |
+| whole mint, 1 destination | 811,718 / 305,076,236 | 804,306 / 302,309,718 | −7,412 / −2,766,518 |
+| whole mint, 16 destinations | 2,471,393 / 1,016,859,101 | 2,398,101 / 990,459,018 | −73,292 / −26,400,083 |
+| whole burn | 609,885 / 236,906,020 | 606,865 / 235,715,073 | −3,020 / −1,190,947 |
 
 The transfer and seizure savings are the same at every `n` on those benches, which authenticate one
 denylist element; each further element authenticated saves about 4.6 K mem more.
 
-Compiled sizes, in bytes, before → after:
+Compiled sizes of the unapplied scripts (`compiledCode` in `plutus.json`), in bytes, before → after:
 
 | Validator | Before | After |
 |---|---:|---:|
 | `minting_logic_validator` | 790 | 780 (−10) |
 | `minting_authority_validator` | 9,279 | 9,186 (−93) |
-| `global_state_logic` | 5,742 | 6,526 (+784) |
+| `global_state_logic` | 5,742 | 5,938 (+196) |
 | `transfer_logic_validator` | 7,233 | 7,175 (−58) |
 | `third_party_transfer_logic_validator` | 7,440 | 7,341 (−99) |
-| `denylist.mint` | 5,772 | 6,176 (+404) |
+| `denylist.mint` | 5,772 | 5,165 (−607) |
 | `denylist_validator` | 2,907 | 2,857 (−50) |
-| `power_users.mint` | 5,105 | 5,558 (+453) |
+| `power_users.mint` | 5,105 | 4,556 (−549) |
 | `power_users_validator` | 2,311 | 2,304 (−7) |
 | `global_state_mint_validator` | 2,335 | 2,335 |
 | `global_state_proxy` | 424 | 424 |
 
 The genesis transaction's scripts (both list mints, the GlobalState mint and `global_state_logic`)
-grow from ≈ 19.0 KB to ≈ 20.6 KB; they are still published as reference scripts before genesis.
+shrink from ≈ 19.0 KB to ≈ 18.0 KB, unapplied; that is still above the 16 KiB transaction limit, so
+they are still published as reference scripts before genesis.
 
 ---
 

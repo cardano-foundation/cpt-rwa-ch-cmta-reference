@@ -2194,8 +2194,8 @@ test denylist_insert_rejects_an_operator_that_is_the_global_state_logic() fail {
 // `validators/denylist.ak` and `validators/power_users.ak`. Each is an
 // accepted fixture above with only the NFT's destination changed; its
 // accepted control is named in its comment. A `fail` test here is written
-// `… || True`, so a validator that merely returns False cannot pass it — only
-// a trap can.
+// `… || True` or `… |> fn(_) { True }`, so a validator that merely returns
+// False cannot pass it — only a trap can.
 
 fn at_wallet(output: Output) -> Output {
   Output {
@@ -2291,15 +2291,18 @@ fn run_denylist_deinit(tx: Transaction) -> Bool {
 }
 
 // The root is paid to a wallet instead of burnt: nothing of this policy is
-// minted, so the one-asset mint conjunct returns False, hence `!`.
-test denylist_deinit_refuses_a_root_kept_in_a_wallet() {
-  !run_denylist_deinit(
+// minted. The library's `deinit` requires the burn
+// (`expect is_only_mint_under_policy`), finds no entry for this policy and
+// traps, so only a trap passes this `… |> fn(_) { True }` body.
+test denylist_deinit_refuses_a_root_kept_in_a_wallet() fail {
+  run_denylist_deinit(
     Transaction {
       ..dl_deinit_tx(),
       mint: zero,
       outputs: [at_wallet(dl_root_input(0).output)],
     },
   )
+    |> fn(_) { True }
 }
 
 // The same, with a node NFT minted in place of the burn. The library requires

@@ -47,8 +47,8 @@ Register the applied stake credential of `global_state_logic` (its `publish` han
 `RegisterCredential`): the genesis transaction runs its withdraw-0, and a withdrawal from an
 unregistered credential fails at ledger phase 1. Publish `global_state_logic` and both list `mint`
 validators as reference-script UTxOs too. Genesis runs those three and the GlobalState mint,
-≈ 20.6 KB of scripts, so they cannot all be inlined under the 16 KiB transaction limit. No
-transaction before genesis may spend one of the three reserved one-shot inputs, so exclude them
+≈ 18.0 KB of scripts (unapplied), so they cannot all be inlined under the 16 KiB transaction limit.
+No transaction before genesis may spend one of the three reserved one-shot inputs, so exclude them
 from coin selection: their output references are baked into the mint parameters, and spending one
 means choosing a new input and re-applying every parameter that depends on it.
 
@@ -96,11 +96,12 @@ its stake credential must be registered first (§0). That proves the script runs
 `max_global_state_datum_bytes` accepts the genesis datum, not that it is the right script: rebuild
 `global_state_logic` from source at a pinned commit with every parameter and compare its hash with
 field 0 before signing. Each list's `Init` reads no GlobalState, so nothing on chain ties fields 3
-and 7 to this repository's list mints: the GlobalState mint requires only that the two policies they
-name differ and mint in this transaction, which any policy can do. So the off-chain check is
-load-bearing: assert that the two list policy IDs are distinct and equal the hashes of the list
-mints applied with their own spend hashes. The datum's `minting_script_credential_hash` must
-identify the intended current minting authority, not the permanent proxy.
+and 7 to this repository's list mints: the GlobalState mint requires that the two policy IDs they
+name are 28 bytes long and differ, and that both policies mint in this transaction, which any policy
+can do. So the off-chain check is load-bearing: assert that the two list policy IDs are distinct and
+equal the hashes of the list mints applied with their own spend hashes. The datum's
+`minting_script_credential_hash` must identify the intended current minting authority, not the
+permanent proxy.
 
 ### 2. Register the other four withdrawal credentials
 

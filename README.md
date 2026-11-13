@@ -555,13 +555,14 @@ holding the NFT requires it), `transfer_logic_validator` (~7.2 KB, every transfe
 `third_party_transfer_logic_validator` (~7.3 KB, every seizure), `minting_authority_validator` (~9.2
 KB, every mint and burn) and the minting proxy `minting_logic_validator` (~0.8 KB, also every mint
 and burn — the proxy's withdraw-0 is what the CIP-113 registry node invokes, and it in turn requires
-the authority's). The four large ones (`global_state_logic` is ~6.5 KB and runs in every mint and
+the authority's). The four large ones (`global_state_logic` is ~5.9 KB and runs in every mint and
 burn too) must be published once as reference-script UTxOs and supplied via reference inputs — not
 inlined (a transaction is capped at 16 KiB); the proxy is small enough to inline but is simplest to
-publish alongside them. The two list `mint` validators (~5.6–6.2 KB) must be treated the same way:
-the genesis transaction runs both, the GlobalState mint and `global_state_logic` — ≈ 20.6 KB of
+publish alongside them. The two list `mint` validators (~4.6–5.2 KB) must be treated the same way:
+the genesis transaction runs both, the GlobalState mint and `global_state_logic` — ≈ 18.0 KB of
 scripts against the 16 KiB limit — so publish them and `global_state_logic` before genesis (step 0
-of [Initialising a token](#initialising-a-token)).
+of [Initialising a token](#initialising-a-token)). Sizes are of the unapplied scripts in
+`plutus.json` (`compiledCode` hex length ÷ 2); applying the parameters adds their encoded bytes.
 
 All five withdraw-0 scripts need their **stake credential registered** on chain before the first
 transaction that names them in `withdrawals` — see steps 0 and 2 of [Initialising a token](#initialising-a-token).
@@ -962,9 +963,9 @@ Genesis is a short sequence of transactions. Apply the parameters first, then su
 dependent transaction after the preceding output is available.
 
 0. **Prepare.** Register the stake credential of `global_state_logic`, applied with this
-   deployment's parameters (its `publish` handler accepts `RegisterCredential`), and publish it
-   and both list `mint` validators as reference-script UTxOs: the genesis transaction runs those
-   three and the GlobalState mint, ≈ 20.6 KB of scripts, which cannot all be inlined under the
+   deployment's parameters (its `publish` handler accepts `RegisterCredential`), and publish it and
+   both list `mint` validators as reference-script UTxOs: the genesis transaction runs those three
+   and the GlobalState mint, ≈ 18.0 KB of scripts (unapplied), which cannot all be inlined under the
    16 KiB transaction limit. No transaction before genesis may spend one of the three reserved
    one-shot inputs, so exclude them from coin selection: they are baked into the mint parameters,
    and spending one means choosing a new input and re-applying every parameter that depends on it.
@@ -981,9 +982,12 @@ dependent transaction after the preceding output is available.
    rejects a root whose payment credential is not `Script(list_script_hash)`, the spend hash that
    list's mint was applied with. `Init` is gated only by the list's one-shot nonce,
    `init_input_out_ref`: it reads no GlobalState and needs no admin signature, so what forces the
-   genesis wiring is the GlobalState mint's requirement above. A new instance of either list, for
-   `MigrateLists` to switch to, is created later with the same `Init`, from that list's mint applied
-   with a fresh nonce, which gives it a new policy ID (see the [list-migration
+   genesis wiring is the GlobalState mint's requirement above. That is safe because whoever creates
+   a list's root gains no control over the list: every change to a list's contents is gated through
+   GlobalState, by the GlobalState admin for the power-users list and by an `is_admin` power user
+   under the current field 3 for the denylist. A new instance of either list, for `MigrateLists` to
+   switch to, is created later with the same `Init`, from that list's mint applied with a fresh
+   nonce, which gives it a new policy ID (see the [list-migration
    runbook](documents/integration-guide.md#migrating-the-lists)). The GlobalState mint also requires
    the withdraw-0 of the logic field 0 names: add it with a `GlobalStateSpendRedeemer` whose
    `global_state_output_index` points at the GlobalState output (its action is ignored at genesis);
