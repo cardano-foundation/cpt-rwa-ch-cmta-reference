@@ -54,8 +54,7 @@ use tests
 use transfer_logic_script as v_transfer
 use types/denylist.{
   AddToDenylist, Deinit as DenylistDeinit, Denylist, Init as DenylistInit,
-  InitAfterGenesis as DenylistInitAfterGenesis, RemoveFromDenylist,
-  StateTransition as DenylistStateTransition,
+  RemoveFromDenylist, StateTransition as DenylistStateTransition,
 }
 use types/global_state.{GlobalStateDatum, GlobalStateReferenced}
 use types/kyc_proof.{Cip30Attestation, Cip30AttestationProof, KycProof}
@@ -2062,199 +2061,97 @@ test negative_covering_index_traps_on_a_later_party() fail {
   )
 }
 
-// ── denylist Init — bound to the genesis GlobalState ─────────────────────────
+// ── denylist Init — nonce-only, at genesis or after it ──────────────────────
 //
-// The GlobalState minted alongside must name THIS denylist; its id changes
-// afterwards only through `MigrateLists`, before the lock, so a mismatch would
-// leave sanctions unenforceable until then (and for good after the lock).
+// `dl_init_tx` is the accepted `Init` of
+// `denylist_init_succeeds_on_the_nonce_utxo`: the nonce spent, the root the
+// only token minted, at the list script, beside a GlobalState output. `Init`
+// reads no GlobalState, so it needs none. Every negative is a one-change copy
+// of it.
 
-fn run_denylist_init(outputs: List<Output>) -> Bool {
+fn dl_init_tx() -> Transaction {
+  Transaction {
+    ..base_tx(),
+    inputs: [nonce_input(50)],
+    mint: from_asset(denylist_policy, constants.linked_list_root_key, 1),
+    outputs: [
+      dl_root_output(None),
+      gs_output(2_000_000, gs_datum(False, False, False, False)),
+    ],
+  }
+}
+
+fn run_denylist_init_tx(tx: Transaction) -> Bool {
   v_denylist.mint.mint(
     gs_policy,
     oref(50),
     denylist_spend_hash,
     DenylistInit { root_output_index: 0 },
     denylist_policy,
-    Transaction {
-      ..base_tx(),
-      inputs: [nonce_input(50)],
-      mint: from_asset(denylist_policy, constants.linked_list_root_key, 1),
-      outputs,
-    },
-  )
-}
-
-test denylist_init_rejects_a_global_state_naming_another_denylist() {
-  !run_denylist_init(
-    [
-      dl_root_output(None),
-      gs_output(
-        2_000_000,
-        GlobalStateDatum {
-          ..gs_datum(False, False, False, False),
-          denylist_linked_list_policy_id: #"0101010101010101010101010101010101010101010101010101010101",
-        },
-      ),
-    ],
-  )
-}
-
-// No GlobalState created in this transaction: nothing to bind to, so genesis
-// cannot proceed (the lookup traps, hence `fail`).
-test denylist_init_rejects_without_a_genesis_global_state() fail {
-  run_denylist_init([dl_root_output(None)])
-}
-
-// ── denylist InitAfterGenesis — a new instance of the list, after genesis ────
-//
-// `dl_iag_tx` creates the root of a new denylist instance, `denylist_policy`
-// here, and passes: the instance's nonce is spent, GlobalState is a reference
-// input naming the CURRENT denylist (not this one), its admin signs, and the
-// root is the only token minted, at the list script. Every negative is a
-// one-change copy of it. The nonce, the root pin and the GlobalState lookup
-// trap (a `fail` test written `… || True`, so only a trap passes it); every
-// other refusal is a False return.
-
-/// The denylist GlobalState names while the new instance is created.
-const current_denylist_policy: ByteArray =
-  #"0101010101010101010101010101010101010101010101010101010101"
-
-fn gs_datum_naming_the_current_denylist(deactivated: Bool) -> GlobalStateDatum {
-  GlobalStateDatum {
-    ..gs_datum(False, deactivated, False, False),
-    denylist_linked_list_policy_id: current_denylist_policy,
-  }
-}
-
-fn dl_iag_tx() -> Transaction {
-  Transaction {
-    ..base_tx(),
-    inputs: [nonce_input(50)],
-    reference_inputs: [
-      gs_utxo(0, 2_000_000, gs_datum_naming_the_current_denylist(False)),
-    ],
-    mint: from_asset(denylist_policy, constants.linked_list_root_key, 1),
-    outputs: [dl_root_output(None)],
-    extra_signatories: [admin],
-  }
-}
-
-fn run_denylist_iag(tx: Transaction) -> Bool {
-  v_denylist.mint.mint(
-    gs_policy,
-    oref(50),
-    denylist_spend_hash,
-    DenylistInitAfterGenesis {
-      root_output_index: 0,
-      global_state_ref_input_index: 0,
-    },
-    denylist_policy,
     tx,
   )
 }
 
-test denylist_init_after_genesis_succeeds_for_the_admin() {
-  run_denylist_iag(dl_iag_tx())
+fn run_denylist_init(outputs: List<Output>) -> Bool {
+  run_denylist_init_tx(Transaction { ..dl_init_tx(), outputs })
 }
 
-// The GlobalState admin, not an `is_admin` power user, chooses a new list.
-test denylist_init_after_genesis_fails_without_the_admin_signature() {
-  !run_denylist_iag(Transaction { ..dl_iag_tx(), extra_signatories: [] })
-}
-
-// Signed, but by a key that is not the admin: a False return, hence `!`.
-test denylist_init_after_genesis_fails_when_signed_by_a_stranger_only() {
-  !run_denylist_iag(
-    Transaction { ..dl_iag_tx(), extra_signatories: [attacker_wallet] },
+// No GlobalState output, no GlobalState mint and no reference input: a new
+// instance of the list after genesis is created exactly as at genesis.
+test denylist_init_succeeds_without_a_global_state() {
+  run_denylist_init_tx(
+    Transaction {
+      ..dl_init_tx(),
+      reference_inputs: [],
+      outputs: [dl_root_output(None)],
+    },
   )
 }
 
-// A decommissioned protocol gets no new list.
-test denylist_init_after_genesis_fails_on_a_deactivated_protocol() {
-  !run_denylist_iag(
+// The nonce is found wherever it sits among the inputs: here in the middle of
+// three, the other two from other transactions.
+test denylist_init_succeeds_with_the_nonce_among_other_inputs() {
+  run_denylist_init_tx(
     Transaction {
-      ..dl_iag_tx(),
-      reference_inputs: [
-        gs_utxo(0, 2_000_000, gs_datum_naming_the_current_denylist(True)),
+      ..dl_init_tx(),
+      inputs: [
+        nonce_input_from_another_transaction(49),
+        nonce_input(50),
+        Input {
+          ..nonce_input(51),
+          output_reference: OutputReference {
+            transaction_id: #"2222222222222222222222222222222222222222222222222222222222222222",
+            output_index: 51,
+          },
+        },
       ],
     },
   )
 }
 
-// The library's `expect nonce_validated` traps.
-test denylist_init_after_genesis_fails_without_the_nonce() fail {
-  run_denylist_iag(Transaction { ..dl_iag_tx(), inputs: [] }) || True
-}
-
-// A UTxO is spent, but not the nonce: the same trap.
-test denylist_init_after_genesis_fails_with_another_utxo_spent_instead_of_the_nonce() fail {
-  run_denylist_iag(Transaction { ..dl_iag_tx(), inputs: [nonce_input(51)] }) || True
-}
-
-// The nonce's output index, but of another transaction: the same trap.
-test denylist_init_after_genesis_fails_with_the_nonce_index_from_another_transaction() fail {
-  run_denylist_iag(
+// An element of this policy is spent: only the no-list-input count refuses
+// it, a False return, hence `!`.
+test denylist_init_fails_with_a_list_input() {
+  !run_denylist_init_tx(
     Transaction {
-      ..dl_iag_tx(),
-      inputs: [nonce_input_from_another_transaction(50)],
-    },
-  ) || True
-}
-
-// The nonce is found wherever it sits among the inputs: here in the middle of
-// three.
-test denylist_init_after_genesis_succeeds_with_the_nonce_among_other_inputs() {
-  run_denylist_iag(
-    Transaction {
-      ..dl_iag_tx(),
-      inputs: [nonce_input(49), nonce_input(50), nonce_input(51)],
+      ..dl_init_tx(),
+      inputs: [nonce_input(50), dl_node_input(1, dl_sanctioned_key, None)],
     },
   )
 }
 
-// The root pin traps, as in `Init`.
-test denylist_init_after_genesis_refuses_a_root_at_a_wallet() fail {
-  run_denylist_iag(
-    Transaction { ..dl_iag_tx(), outputs: [at_wallet(dl_root_output(None))] },
-  ) || True
-}
-
-// An element of this policy is spent and continued at the list script, so
-// only the no-list-input count can refuse it.
-test denylist_init_after_genesis_fails_with_a_list_input() {
-  let node = dl_node_input(1, dl_sanctioned_key, None)
-  !run_denylist_iag(
+// A second token of this policy is minted beside the root: the one-token
+// count refuses it first, a False return, hence `!`.
+test denylist_init_fails_with_a_second_token_minted() {
+  !run_denylist_init_tx(
     Transaction {
-      ..dl_iag_tx(),
-      inputs: [nonce_input(50), node],
-      outputs: [dl_root_output(None), node.output],
-    },
-  )
-}
-
-test denylist_init_after_genesis_fails_with_a_second_token_minted() {
-  !run_denylist_iag(
-    Transaction {
-      ..dl_iag_tx(),
+      ..dl_init_tx(),
       mint: merge(
         from_asset(denylist_policy, constants.linked_list_root_key, 1),
         from_asset(denylist_policy, ll_asset_name(dl_sanctioned_key), 1),
       ),
     },
   )
-}
-
-// The reference input is GlobalState-shaped but carries no GlobalState NFT:
-// the lookup traps.
-test denylist_init_after_genesis_fails_without_a_genuine_global_state() fail {
-  run_denylist_iag(
-    Transaction {
-      ..dl_iag_tx(),
-      reference_inputs: [
-        gs_forged(0, gs_datum_naming_the_current_denylist(False)),
-      ],
-    },
-  ) || True
 }
 
 // ── a sanctions operator can never be the GlobalState logic ──────────────────

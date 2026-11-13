@@ -18,13 +18,10 @@ use cardano/transaction.{
 use constants
 use tests
 use types/denylist.{
-  AddToDenylist, Deinit, Denylist, Init, InitAfterGenesis, MintRedeemer,
-  RemoveFromDenylist, SpendRedeemer, StateTransition, UpdateDenylistEntry,
-  valid_frozen_amount,
+  AddToDenylist, Deinit, Denylist, Init, MintRedeemer, RemoveFromDenylist,
+  SpendRedeemer, StateTransition, UpdateDenylistEntry, valid_frozen_amount,
 }
-use types/global_state.{
-  GlobalStateDatum, genesis_global_state, gs_core_from_ref_input,
-}
+use types/global_state.{GlobalStateDatum, gs_core_from_ref_input}
 use types/power_users.{PowerUser}
 use utils.{must_be_signed_by_credential}
 
@@ -195,69 +192,29 @@ validator mint(
   mint(redeemer: MintRedeemer, policy_id: PolicyId, self: Transaction) {
     when redeemer is {
       Init { root_output_index } -> {
-        // Nonce-gated. GS is only being created in this same transaction (it is
-        // an output, not yet an input) — the operator-held one-shot UTxO is the
-        // implicit gate, same pattern as power_users.
+        // One-shot because of the nonce, as the power-users list's `Init`:
+        // each instance is a mint applied with its own `init_input_out_ref`,
+        // so its own policy id, and its root is created once, when that UTxO
+        // is spent. No GlobalState is read, so the same branch serves at
+        // genesis and after it.
+        //
+        // Whoever creates the root gains no control over the list: every
+        // change to its contents (Add, Remove, UpdateDenylistEntry, Deinit) is
+        // gated through GlobalState, by an `is_admin` power user of the list
+        // it names or by its admin.
+        //
+        // Genesis wiring is still forced by the GlobalState mint: both list
+        // policies must mint in the genesis transaction, and a list mint
+        // cannot mint there except through `Init` (every other branch reads
+        // GlobalState as a reference input, which does not exist yet). That
+        // the policy ids GlobalState names are this repository's lists is
+        // verified off-chain.
         let nonce_validated = list.any(
           self.inputs,
           fn(input) { input.output_reference == init_input_out_ref },
         )
         let root_output = utils.safe_list_at(self.outputs, root_output_index)
         and {
-          dict.size(tokens(self.mint, policy_id)) == 1,
-          // Genesis: no list node exists yet, so none may be spent.
-          (utils.count_inputs_with_policy(self.inputs, policy_id) == 0)?,
-          // Genesis binding: the GlobalState minted in this same transaction
-          // must name THIS list. The GlobalState mint only checks that the
-          // policy its datum names mints something, and the id changes
-          // afterwards only through `MigrateLists`, before `LockUpgrades` — so
-          // a deployment naming another list would leave this one, and the
-          // role or sanctions checks it carries, unreachable. Not circular:
-          // the GlobalState policy is a parameter here.
-          (genesis_global_state(self.outputs, global_state_policy_id).denylist_linked_list_policy_id == policy_id)?,
-          creates_the_root(
-            self,
-            nonce_validated,
-            root_output,
-            policy_id,
-            list_script_hash,
-          ),
-        }
-      }
-      InitAfterGenesis { root_output_index, global_state_ref_input_index } -> {
-        // A NEW INSTANCE OF THIS LIST AFTER GENESIS, so that `MigrateLists`
-        // has a list built from this repository to switch to — same rule and
-        // the same reasoning as the power-users list's `InitAfterGenesis`.
-        // `Init` cannot serve: it needs the GlobalState minted in the same
-        // transaction to name this policy, and once GlobalState exists only
-        // `MigrateLists` writes that field, which needs this root first.
-        //
-        // Each instance is a mint applied with its own `init_input_out_ref`,
-        // so its own policy id, and this branch spends that one-shot UTxO
-        // like `Init`: an instance has one root, created once. Gated by the
-        // GlobalState admin, not by an `is_admin` power user: choosing a new
-        // list is the admin's, as `MigrateLists` is.
-        //
-        // Not gated on `upgrades_locked`: this script can never be redeployed
-        // and reads only the GlobalState core, which does not hold the lock.
-        // A list created after `LockUpgrades` is inert, because `MigrateLists`
-        // is closed then and no reader authenticates under its policy.
-        //
-        // `gs_core_from_ref_input` with an explicit `deactivated` conjunct,
-        // as `Deinit` reads it: a decommissioned protocol gets no new list.
-        let gs = gs_core_from_ref_input(
-          self.reference_inputs,
-          global_state_ref_input_index,
-          global_state_policy_id,
-        )
-        let nonce_validated = list.any(
-          self.inputs,
-          fn(input) { input.output_reference == init_input_out_ref },
-        )
-        let root_output = utils.safe_list_at(self.outputs, root_output_index)
-        and {
-          (!gs.deactivated)?,
-          must_be_signed_by_credential(self, gs.admin_credential_hash)?,
           dict.size(tokens(self.mint, policy_id)) == 1,
           // A new list: no element of this policy exists yet, so none may be
           // spent.
@@ -481,9 +438,8 @@ validator mint(
   }
 }
 
-/// The root's creation, shared by `Init` and `InitAfterGenesis`: the nonce
-/// UTxO is spent, the root is the only token of this policy minted, and it is
-/// pinned to the list spend script.
+/// The root's creation in `Init`: the nonce UTxO is spent, the root is the
+/// only token of this policy minted, and it is pinned to the list spend script.
 ///
 /// The library hands the callback the produced root's address, and the root is
 /// pinned there: its whole payment credential must be
@@ -1048,6 +1004,28 @@ test denylist_remove_rejects_a_27_byte_key() {
 /// Same guard, one byte long.
 test denylist_remove_rejects_a_29_byte_key() {
   !t_run_denylist_remove(t_key_29, t_dl_remove_tx(t_key_29))
+}
+
+// GlobalState's field 7 names another 28-byte policy, as after a
+// `MigrateLists` away from this list, while field 3 is unchanged: the operator
+// still authenticates under it, so a retired list's min-ADA can be reclaimed.
+test denylist_remove_succeeds_on_a_list_global_state_no_longer_names() {
+  t_run_denylist_remove(
+    t_key_28,
+    Transaction {
+      ..t_dl_remove_tx(t_key_28),
+      reference_inputs: [
+        t_gs_utxo(
+          0,
+          GlobalStateDatum {
+            ..t_gs_datum(False),
+            denylist_linked_list_policy_id: #"01010101010101010101010101010101010101010101010101010101",
+          },
+        ),
+        t_pu_node_input(1, t_power_user(True)),
+      ],
+    },
+  )
 }
 
 // Non-upgradeable: must keep reading a GlobalState datum a future version

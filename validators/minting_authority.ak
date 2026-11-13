@@ -144,7 +144,8 @@ use utils.{must_be_signed_by_credential}
 ///      every NFT of its policy at its spend script), so field 3 is the sole
 ///      anchor for which list grants `can_mint` / `can_burn`. It is set
 ///      at genesis and changes only through the GlobalState logic's
-///      `MigrateLists`, admin-signed and before `LockUpgrades` (see the
+///      `MigrateLists`, admin-signed and before `LockUpgrades`, to an id the
+///      admin is trusted with and which is verified off-chain (see the
 ///      replacement-logic invariants in global_state_logic.ak).
 ///   7. A MintBurn THAT CHANGES NO SUPPLY AUTHORISES NOTHING.
 ///      A zero-delta MintBurn would let any `can_mint`

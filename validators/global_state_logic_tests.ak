@@ -9,7 +9,7 @@ use aiken/collection/list
 use aiken/collection/pairs
 use aiken/fuzz
 use aiken/primitive/bytearray
-use aiken_design_patterns/linked_list.{Element, Node, Root}
+use aiken_design_patterns/linked_list.{Element, Node}
 use cardano/address.{Address, Credential, Script, VerificationKey}
 use cardano/assets.{Assets, from_asset, from_lovelace, merge, zero}
 use cardano/certificate.{RegisterCredential, UnregisterCredential}
@@ -21,7 +21,6 @@ use global_state_logic as v_logic
 use global_state_proxy as v_proxy
 use minting_authority as v_authority
 use minting_logic_script as v_minting_proxy
-use power_users as v_power_users
 use tests/global_state_fixtures.{
   rotated, t_admin, t_data_of_raw_length, t_datum, t_datum_size, t_dl_ll_policy,
   t_gs_logic, t_gs_policy, t_input, t_many_entities, t_max_datum_bytes,
@@ -40,7 +39,7 @@ use types/global_state.{
   idx_deactivated, idx_mintable_amount, idx_transfers_paused, set_security_info,
 }
 use types/minting_authority.{MintBurn}
-use types/power_users.{InitAfterGenesis, PowerUser}
+use types/power_users.{PowerUser}
 use utils
 
 // ============================================================================
@@ -2257,23 +2256,16 @@ test deactivated_input_rejects_set_mintable_amount() fail {
 
 // ── MigrateLists — the admin switches the list policy ids, before the lock ───
 //
-// `t_migrate_tx` builds a switch that passes: the admin signs, reference
-// inputs 0 and 1 hold the roots of the power-users and denylist lists the
-// redeemer names, and the output is the input with fields 3 and 7 set to
-// those ids. Every negative is a one-change copy of it. The root checks trap
-// (the library `expect`s), so their refusals are `fail` tests; every other
-// refusal is a False return.
+// `t_migrate_tx` builds a switch that passes: the admin signs and the output is
+// the input with fields 3 and 7 set to the redeemer's ids. It carries no
+// reference input: the branch needs none. Every negative is a one-change copy
+// of it and is refused by a False return.
 
 const t_new_pu_ll_policy: ByteArray =
   #"3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a"
 
 const t_new_dl_ll_policy: ByteArray =
   #"4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b"
-
-// A list spend script, where the list mints keep their NFTs. Not checked by
-// the branch, which authenticates a root by its policy alone.
-const t_list_script_hash: ByteArray =
-  #"d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2"
 
 /// The input datum of every MigrateLists test: the current lists are
 /// `t_pu_ll_policy` and `t_dl_ll_policy`.
@@ -2285,44 +2277,6 @@ fn t_migrate_datum() -> GlobalStateDatum {
   }
 }
 
-/// A list element under `policy` named `asset_name`, carrying `data`.
-fn t_list_element(
-  policy: ByteArray,
-  asset_name: ByteArray,
-  data: Element<Data, Data>,
-) -> Input {
-  Input {
-    output_reference: t_out_ref(6),
-    output: Output {
-      address: Address {
-        payment_credential: Script(t_list_script_hash),
-        stake_credential: None,
-      },
-      value: merge(from_lovelace(2_000_000), from_asset(policy, asset_name, 1)),
-      datum: InlineDatum(data),
-      reference_script: None,
-    },
-  }
-}
-
-/// The initialised root of the list minted under `policy`.
-fn t_list_root(policy: ByteArray) -> Input {
-  t_list_element(
-    policy,
-    constants.linked_list_root_key,
-    Element { data: Root { data: builtin.constr_data(0, []) }, link: None },
-  )
-}
-
-/// A node (not the root) of the list minted under `policy`.
-fn t_list_node(policy: ByteArray) -> Input {
-  t_list_element(
-    policy,
-    bytearray.concat(constants.linked_list_node_key_prefix, t_new_admin),
-    Element { data: Node { data: builtin.constr_data(0, []) }, link: None },
-  )
-}
-
 fn migrate_lists_redeemer(
   new_pu: ByteArray,
   new_dl: ByteArray,
@@ -2332,8 +2286,6 @@ fn migrate_lists_redeemer(
     action: MigrateLists {
       new_power_user_linked_list_policy_id: new_pu,
       new_denylist_linked_list_policy_id: new_dl,
-      power_user_root_ref_input_index: 0,
-      denylist_root_ref_input_index: 1,
     },
   }
 }
@@ -2350,17 +2302,14 @@ fn t_migrated(
   }
 }
 
-/// Admin-signed; reference inputs 0 and 1 are the roots of `new_pu` and
-/// `new_dl`; the output is the input with fields 3 and 7 switched to them.
+/// Admin-signed; the output is the input with fields 3 and 7 switched to
+/// `new_pu` and `new_dl`; no reference input.
 fn t_migrate_tx(
   input_datum: GlobalStateDatum,
   new_pu: ByteArray,
   new_dl: ByteArray,
 ) -> Transaction {
-  Transaction {
-    ..t_tx(input_datum, t_migrated(input_datum, new_pu, new_dl), [t_admin]),
-    reference_inputs: [t_list_root(new_pu), t_list_root(new_dl)],
-  }
+  t_tx(input_datum, t_migrated(input_datum, new_pu, new_dl), [t_admin])
 }
 
 fn migrate(
@@ -2382,7 +2331,6 @@ test migrate_lists_switches_both_policy_ids() {
   )
 }
 
-// The unchanged denylist cites its current root.
 test migrate_lists_switches_only_the_power_users_list() {
   let d = t_migrate_datum()
   migrate(
@@ -2393,7 +2341,6 @@ test migrate_lists_switches_only_the_power_users_list() {
   )
 }
 
-// The unchanged power-users list cites its current root.
 test migrate_lists_switches_only_the_denylist() {
   let d = t_migrate_datum()
   migrate(
@@ -2401,6 +2348,19 @@ test migrate_lists_switches_only_the_denylist() {
     t_pu_ll_policy,
     t_new_dl_ll_policy,
     t_migrate_tx(d, t_pu_ll_policy, t_new_dl_ll_policy),
+  )
+}
+
+// Each list moves to the other's field. The admin is trusted with the new ids,
+// so nothing on chain refuses it: keeping the lists apart is verified
+// off-chain.
+test migrate_lists_accepts_a_swap_of_the_two_lists() {
+  let d = t_migrate_datum()
+  migrate(
+    d,
+    t_dl_ll_policy,
+    t_pu_ll_policy,
+    t_migrate_tx(d, t_dl_ll_policy, t_pu_ll_policy),
   )
 }
 
@@ -2417,6 +2377,21 @@ test migrate_lists_fails_without_the_admin_signature() {
   )
 }
 
+// One signer, and not the admin (nor the minting authority, which the datum
+// keeps distinct from the admin): a False return, hence `!`.
+test migrate_lists_fails_when_signed_by_a_stranger_only() {
+  let d = t_migrate_datum()
+  !migrate(
+    d,
+    t_new_pu_ll_policy,
+    t_new_dl_ll_policy,
+    Transaction {
+      ..t_migrate_tx(d, t_new_pu_ll_policy, t_new_dl_ll_policy),
+      extra_signatories: [t_wallet_vkey],
+    },
+  )
+}
+
 test migrate_lists_fails_once_upgrades_are_locked() {
   // LockUpgrades makes the lists final, like the cap and the rules.
   let d = GlobalStateDatum { ..t_migrate_datum(), upgrades_locked: True }
@@ -2428,8 +2403,7 @@ test migrate_lists_fails_once_upgrades_are_locked() {
   )
 }
 
-// Both ids are the current ones, each citing its current root: the output
-// equals the input.
+// Both ids are the current ones: the output equals the input.
 test migrate_lists_fails_as_a_no_op() {
   let d = t_migrate_datum()
   !migrate(
@@ -2440,8 +2414,8 @@ test migrate_lists_fails_as_a_no_op() {
   )
 }
 
-// A 27-byte id; the reference input holds a root under exactly that id, so
-// only the length check can refuse it.
+// A 27-byte id, written to the output as named, so only the length check can
+// refuse it.
 test migrate_lists_fails_on_a_short_power_users_policy_id() {
   let d = t_migrate_datum()
   let short = bytearray.drop(t_new_pu_ll_policy, 1)
@@ -2461,128 +2435,6 @@ test migrate_lists_fails_on_a_short_denylist_policy_id() {
     t_new_pu_ll_policy,
     short,
     t_migrate_tx(d, t_new_pu_ll_policy, short),
-  )
-}
-
-test migrate_lists_fails_when_both_ids_are_equal() {
-  let d = t_migrate_datum()
-  !migrate(
-    d,
-    t_new_pu_ll_policy,
-    t_new_pu_ll_policy,
-    t_migrate_tx(d, t_new_pu_ll_policy, t_new_pu_ll_policy),
-  )
-}
-
-// The power-users id is the issuance policy (with a root under it, so only
-// the policy check can refuse).
-test migrate_lists_fails_to_the_issuance_policy() {
-  let d = t_migrate_datum()
-  !migrate(
-    d,
-    t_issuance_policy,
-    t_new_dl_ll_policy,
-    t_migrate_tx(d, t_issuance_policy, t_new_dl_ll_policy),
-  )
-}
-
-test migrate_lists_fails_to_the_global_state_policy() {
-  let d = t_migrate_datum()
-  !migrate(
-    d,
-    t_gs_policy,
-    t_new_dl_ll_policy,
-    t_migrate_tx(d, t_gs_policy, t_new_dl_ll_policy),
-  )
-}
-
-// The same two refusals for the denylist id, one per check.
-test migrate_lists_fails_to_the_issuance_policy_as_the_denylist() {
-  let d = t_migrate_datum()
-  !migrate(
-    d,
-    t_new_pu_ll_policy,
-    t_issuance_policy,
-    t_migrate_tx(d, t_new_pu_ll_policy, t_issuance_policy),
-  )
-}
-
-test migrate_lists_fails_to_the_global_state_policy_as_the_denylist() {
-  let d = t_migrate_datum()
-  !migrate(
-    d,
-    t_new_pu_ll_policy,
-    t_gs_policy,
-    t_migrate_tx(d, t_new_pu_ll_policy, t_gs_policy),
-  )
-}
-
-// Reference input 0 is the OLD power-users list's root, not one under the new
-// id: the root check traps (no NFT under the new policy).
-test migrate_lists_fails_without_the_new_power_users_root() fail {
-  let d = t_migrate_datum()
-  migrate(
-    d,
-    t_new_pu_ll_policy,
-    t_new_dl_ll_policy,
-    Transaction {
-      ..t_migrate_tx(d, t_new_pu_ll_policy, t_new_dl_ll_policy),
-      reference_inputs: [
-        t_list_root(t_pu_ll_policy),
-        t_list_root(t_new_dl_ll_policy),
-      ],
-    },
-  )
-}
-
-test migrate_lists_fails_without_the_new_denylist_root() fail {
-  let d = t_migrate_datum()
-  migrate(
-    d,
-    t_new_pu_ll_policy,
-    t_new_dl_ll_policy,
-    Transaction {
-      ..t_migrate_tx(d, t_new_pu_ll_policy, t_new_dl_ll_policy),
-      reference_inputs: [
-        t_list_root(t_new_pu_ll_policy),
-        t_list_root(t_dl_ll_policy),
-      ],
-    },
-  )
-}
-
-// Reference input 0 is a genuine element of the new power-users list, but a
-// node: the root check traps on its asset name.
-test migrate_lists_fails_when_the_root_ref_is_a_node_not_the_root() fail {
-  let d = t_migrate_datum()
-  migrate(
-    d,
-    t_new_pu_ll_policy,
-    t_new_dl_ll_policy,
-    Transaction {
-      ..t_migrate_tx(d, t_new_pu_ll_policy, t_new_dl_ll_policy),
-      reference_inputs: [
-        t_list_node(t_new_pu_ll_policy),
-        t_list_root(t_new_dl_ll_policy),
-      ],
-    },
-  )
-}
-
-// The same for the denylist's root check.
-test migrate_lists_fails_when_the_denylist_root_ref_is_a_node_not_the_root() fail {
-  let d = t_migrate_datum()
-  migrate(
-    d,
-    t_new_pu_ll_policy,
-    t_new_dl_ll_policy,
-    Transaction {
-      ..t_migrate_tx(d, t_new_pu_ll_policy, t_new_dl_ll_policy),
-      reference_inputs: [
-        t_list_root(t_new_pu_ll_policy),
-        t_list_node(t_new_dl_ll_policy),
-      ],
-    },
   )
 }
 
@@ -2645,159 +2497,6 @@ test migrate_lists_fails_on_a_deactivated_protocol() fail {
     t_new_dl_ll_policy,
     t_migrate_tx(d, t_new_pu_ll_policy, t_new_dl_ll_policy),
   )
-}
-
-/// `root` moved to a key address: the list script's hash under a key
-/// credential, so only the credential's kind differs.
-fn t_at_a_key(root: Input) -> Input {
-  Input {
-    ..root,
-    output: Output {
-      ..root.output,
-      address: Address {
-        payment_credential: VerificationKey(t_list_script_hash),
-        stake_credential: None,
-      },
-    },
-  }
-}
-
-// Each root is otherwise genuine, so the root check passes and only the
-// key-address guard refuses: once for each list.
-test migrate_lists_fails_when_a_root_sits_at_a_key_address() {
-  let d = t_migrate_datum()
-  let tx = t_migrate_tx(d, t_new_pu_ll_policy, t_new_dl_ll_policy)
-  and {
-    !migrate(
-      d,
-      t_new_pu_ll_policy,
-      t_new_dl_ll_policy,
-      Transaction {
-        ..tx,
-        reference_inputs: [
-          t_at_a_key(t_list_root(t_new_pu_ll_policy)),
-          t_list_root(t_new_dl_ll_policy),
-        ],
-      },
-    ),
-    !migrate(
-      d,
-      t_new_pu_ll_policy,
-      t_new_dl_ll_policy,
-      Transaction {
-        ..tx,
-        reference_inputs: [
-          t_list_root(t_new_pu_ll_policy),
-          t_at_a_key(t_list_root(t_new_dl_ll_policy)),
-        ],
-      },
-    ),
-  }
-}
-
-// Each list moves to the other's field, each citing its current root. Both
-// no-swap guards refuse it.
-test migrate_lists_fails_as_a_swap() {
-  let d = t_migrate_datum()
-  !migrate(
-    d,
-    t_dl_ll_policy,
-    t_pu_ll_policy,
-    t_migrate_tx(d, t_dl_ll_policy, t_pu_ll_policy),
-  )
-}
-
-// One half of a swap at a time: the other id is new, so only one no-swap
-// guard refuses.
-test migrate_lists_fails_when_the_new_power_users_id_is_the_current_denylist_id() {
-  let d = t_migrate_datum()
-  !migrate(
-    d,
-    t_dl_ll_policy,
-    t_new_dl_ll_policy,
-    t_migrate_tx(d, t_dl_ll_policy, t_new_dl_ll_policy),
-  )
-}
-
-test migrate_lists_fails_when_the_new_denylist_id_is_the_current_power_users_id() {
-  let d = t_migrate_datum()
-  !migrate(
-    d,
-    t_new_pu_ll_policy,
-    t_pu_ll_policy,
-    t_migrate_tx(d, t_new_pu_ll_policy, t_pu_ll_policy),
-  )
-}
-
-// End to end, this proves a target built from this repository is reachable.
-// A new power-users instance, under `t_new_pu_ll_policy`, is created after
-// genesis by this repository's list mint (`InitAfterGenesis`, built as in
-// `power_users_init_after_genesis_succeeds_for_the_admin`: its nonce spent,
-// GlobalState as a reference input, the admin signing), which accepts. The
-// root it produced is then the reference input of a `MigrateLists` switching
-// the power-users list to it, which accepts too.
-test migrate_lists_switches_to_a_list_created_after_genesis() {
-  let d = t_migrate_datum()
-  let nonce = Input {
-    output_reference: t_out_ref(50),
-    output: Output {
-      address: Address {
-        payment_credential: VerificationKey(t_admin),
-        stake_credential: None,
-      },
-      value: from_lovelace(5_000_000),
-      datum: NoDatum,
-      reference_script: None,
-    },
-  }
-  let creation = Transaction {
-    ..t_tx(d, d, [t_admin]),
-    inputs: [nonce],
-    reference_inputs: [t_input(d)],
-    mint: from_asset(t_new_pu_ll_policy, constants.linked_list_root_key, 1),
-    outputs: [
-      Output {
-        address: Address {
-          payment_credential: Script(t_list_script_hash),
-          stake_credential: None,
-        },
-        value: merge(
-          from_lovelace(2_000_000),
-          from_asset(t_new_pu_ll_policy, constants.linked_list_root_key, 1),
-        ),
-        datum: InlineDatum(
-          Element {
-            data: Root { data: builtin.constr_data(0, []) },
-            link: None,
-          },
-        ),
-        reference_script: None,
-      },
-    ],
-  }
-  expect [new_root] = creation.outputs
-  and {
-    v_power_users.mint.mint(
-      t_gs_policy,
-      t_out_ref(50),
-      t_list_script_hash,
-      InitAfterGenesis { root_output_index: 0, global_state_ref_input_index: 0 },
-      t_new_pu_ll_policy,
-      creation,
-    ),
-    migrate(
-      d,
-      t_new_pu_ll_policy,
-      t_dl_ll_policy,
-      Transaction {
-        ..t_migrate_tx(d, t_new_pu_ll_policy, t_dl_ll_policy),
-        reference_inputs: [
-          Input { output_reference: t_out_ref(7), output: new_root },
-          t_list_root(t_dl_ll_policy),
-        ],
-      },
-    ),
-  }
 }
 
 // ── Burns after SetMintableAmount — headroom semantics ───────────────────────

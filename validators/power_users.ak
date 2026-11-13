@@ -18,12 +18,11 @@ use cardano/transaction.{
 use constants
 use tests
 use types/global_state.{
-  GlobalStateDatum, active_admin_from_ref_input, genesis_global_state,
-  gs_core_from_ref_input,
+  GlobalStateDatum, active_admin_from_ref_input, gs_core_from_ref_input,
 }
 use types/power_users.{
-  AddPowerUser, Deinit, Init, InitAfterGenesis, MintRedeemer, ModifyPowerUser,
-  PowerUser, RemovePowerUser, SpendRedeemer, StateTransition,
+  AddPowerUser, Deinit, Init, MintRedeemer, ModifyPowerUser, PowerUser,
+  RemovePowerUser, SpendRedeemer, StateTransition,
 }
 use utils.{must_be_signed_by_credential}
 
@@ -124,70 +123,27 @@ validator mint(
   mint(redeemer: MintRedeemer, policy_id: PolicyId, self: Transaction) {
     when redeemer is {
       Init { root_output_index } -> {
-        // Init is nonce-gated — GS is only being created in this same
-        // transaction (an output, not yet an input), so admin-via-datum lookup
-        // isn't feasible. The one-shot UTxO is
-        // operator-held, which implicitly gates this action to the operator.
+        // One-shot because of the nonce: each instance of this list is a mint
+        // applied with its own `init_input_out_ref`, so its own policy id, and
+        // its root is created once, when that UTxO is spent. No GlobalState is
+        // read, so the same branch serves at genesis and after it.
+        //
+        // Whoever creates the root gains no control over the list: every
+        // change to its contents (Add, Remove, Modify, Deinit) is gated
+        // through GlobalState, by the admin it names.
+        //
+        // Genesis wiring is still forced by the GlobalState mint: both list
+        // policies must mint in the genesis transaction, and a list mint
+        // cannot mint there except through `Init` (every other branch reads
+        // GlobalState as a reference input, which does not exist yet). That
+        // the policy ids GlobalState names are this repository's lists is
+        // verified off-chain.
         let nonce_validated = list.any(
           self.inputs,
           fn(input) { input.output_reference == init_input_out_ref },
         )
         let root_output = utils.safe_list_at(self.outputs, root_output_index)
         and {
-          //Only 1 token of this policy must be minted (the root NFT)
-          dict.size(tokens(self.mint, policy_id)) == 1,
-          // Genesis: no list node exists yet, so none may be spent.
-          (utils.count_inputs_with_policy(self.inputs, policy_id) == 0)?,
-          // Genesis binding: the GlobalState minted in this same transaction
-          // must name THIS list. The GlobalState mint only checks that the
-          // policy its datum names mints something, and the id changes
-          // afterwards only through `MigrateLists`, before `LockUpgrades` — so
-          // a deployment naming another list would leave this one, and the
-          // role or sanctions checks it carries, unreachable. Not circular:
-          // the GlobalState policy is a parameter here.
-          (genesis_global_state(self.outputs, global_state_policy_id).power_user_linked_list_policy_id == policy_id)?,
-          creates_the_root(
-            self,
-            nonce_validated,
-            root_output,
-            policy_id,
-            list_script_hash,
-          ),
-        }
-      }
-      InitAfterGenesis { root_output_index, global_state_ref_input_index } -> {
-        // A NEW INSTANCE OF THIS LIST AFTER GENESIS, so that `MigrateLists`
-        // has a list built from this repository to switch to. `Init` cannot
-        // serve: it needs the GlobalState minted in the same transaction to
-        // name this policy, and once GlobalState exists only `MigrateLists`
-        // writes that field, which in turn needs this root to exist first.
-        //
-        // Each instance is a mint applied with its own `init_input_out_ref`,
-        // so its own policy id, and this branch spends that one-shot UTxO
-        // like `Init`: an instance has one root, created by one branch or the
-        // other, once. GlobalState already exists, so it is read as a
-        // reference input, and the admin it names must sign.
-        //
-        // Not gated on `upgrades_locked`: this script can never be redeployed
-        // and reads only the GlobalState core, which does not hold the lock.
-        // A list created after `LockUpgrades` is inert, because `MigrateLists`
-        // is closed then and no reader authenticates under its policy.
-        //
-        // `gs_core_from_ref_input` with an explicit `deactivated` conjunct,
-        // as `Deinit` reads it: a decommissioned protocol gets no new list.
-        let gs = gs_core_from_ref_input(
-          self.reference_inputs,
-          global_state_ref_input_index,
-          global_state_policy_id,
-        )
-        let nonce_validated = list.any(
-          self.inputs,
-          fn(input) { input.output_reference == init_input_out_ref },
-        )
-        let root_output = utils.safe_list_at(self.outputs, root_output_index)
-        and {
-          (!gs.deactivated)?,
-          must_be_signed_by_credential(self, gs.admin_credential_hash)?,
           //Only 1 token of this policy must be minted (the root NFT)
           dict.size(tokens(self.mint, policy_id)) == 1,
           // A new list: no element of this policy exists yet, so none may be
@@ -395,9 +351,8 @@ validator mint(
   }
 }
 
-/// The root's creation, shared by `Init` and `InitAfterGenesis`: the nonce
-/// UTxO is spent, the root is the only token of this policy minted, and it is
-/// pinned to the list spend script.
+/// The root's creation in `Init`: the nonce UTxO is spent, the root is the
+/// only token of this policy minted, and it is pinned to the list spend script.
 ///
 /// The library hands the callback the produced root's address, and the root is
 /// pinned there: its whole payment credential must be
@@ -947,6 +902,27 @@ test power_users_remove_rejects_a_29_byte_key() {
   !t_run_pu_remove(t_key_29, t_pu_remove_tx(t_key_29))
 }
 
+// GlobalState's field 3 names another 28-byte policy, as after a
+// `MigrateLists` away from this list: Remove still authenticates by the admin
+// alone, so a retired list's min-ADA can be reclaimed.
+test power_users_remove_succeeds_on_a_list_global_state_no_longer_names() {
+  t_run_pu_remove(
+    t_key_28,
+    Transaction {
+      ..t_pu_remove_tx(t_key_28),
+      reference_inputs: [
+        t_gs_utxo(
+          0,
+          GlobalStateDatum {
+            ..t_gs_datum(False),
+            power_user_linked_list_policy_id: #"01010101010101010101010101010101010101010101010101010101",
+          },
+        ),
+      ],
+    },
+  )
+}
+
 // ── ModifyPowerUser branch coverage ─────────────────────────────────────────
 
 fn t_pu_modify_tx(old_pu: PowerUser, new_pu: PowerUser) -> Transaction {
@@ -1180,225 +1156,97 @@ test power_users_insert_accepts_a_global_state_with_trailing_fields() {
   )
 }
 
-// ── Init — bound to the genesis GlobalState ──────────────────────────────────
+// ── Init — nonce-only, at genesis or after it ───────────────────────────────
 //
-// The GlobalState minted alongside must name THIS list; its id changes
-// afterwards only through `MigrateLists`, before `LockUpgrades`, so a mismatch
-// would leave every role on this list unreachable.
+// `t_pu_init_tx` is the accepted `Init` of
+// `power_users_init_succeeds_on_the_nonce_utxo`: the nonce spent, the root the
+// only token minted, at the list script, beside a GlobalState output. `Init`
+// reads no GlobalState, so it needs none. Every negative is a one-change copy
+// of it.
 
-fn t_run_pu_init(outputs: List<Output>) -> Bool {
+fn t_pu_init_tx() -> Transaction {
+  Transaction {
+    ..t_base_tx(),
+    inputs: [t_nonce_input(50)],
+    mint: from_asset(t_pu_policy, constants.linked_list_root_key, 1),
+    outputs: [t_pu_root_output(None), t_gs_utxo(0, t_gs_datum(False)).output],
+  }
+}
+
+fn t_run_pu_init_tx(tx: Transaction) -> Bool {
   mint.mint(
     t_gs_policy,
     t_oref(50),
     t_pu_script_hash,
     Init { root_output_index: 0 },
     t_pu_policy,
-    Transaction {
-      ..t_base_tx(),
-      inputs: [t_nonce_input(50)],
-      mint: from_asset(t_pu_policy, constants.linked_list_root_key, 1),
-      outputs,
-    },
-  )
-}
-
-test power_users_init_rejects_a_global_state_naming_another_list() {
-  !t_run_pu_init(
-    [
-      t_pu_root_output(None),
-      t_gs_utxo(
-        0,
-        GlobalStateDatum {
-          ..t_gs_datum(False),
-          power_user_linked_list_policy_id: #"0101010101010101010101010101010101010101010101010101010101",
-        },
-      ).output,
-    ],
-  )
-}
-
-// No GlobalState created in this transaction: nothing to bind to, so genesis
-// cannot proceed (the lookup traps, hence `fail`).
-test power_users_init_rejects_without_a_genesis_global_state() fail {
-  t_run_pu_init([t_pu_root_output(None)])
-}
-
-// ── InitAfterGenesis — a new instance of the list, after genesis ─────────────
-//
-// `t_pu_iag_tx` creates the root of a new power-users instance, `t_pu_policy`
-// here, and passes: the instance's nonce is spent, GlobalState is a reference
-// input naming the CURRENT list (not this one), its admin signs, and the root
-// is the only token minted, at the list script. Every negative is a one-change
-// copy of it. The nonce, the root pin and the GlobalState lookup trap (a
-// `fail` test written `… || True`, so only a trap passes it); every other
-// refusal is a False return.
-
-/// The list GlobalState names while the new instance is created.
-const t_current_pu_policy: ByteArray =
-  #"0101010101010101010101010101010101010101010101010101010101"
-
-fn t_gs_naming_the_current_list(deactivated: Bool) -> Input {
-  t_gs_utxo(
-    0,
-    GlobalStateDatum {
-      ..t_gs_datum(deactivated),
-      power_user_linked_list_policy_id: t_current_pu_policy,
-    },
-  )
-}
-
-fn t_pu_iag_tx() -> Transaction {
-  Transaction {
-    ..t_base_tx(),
-    inputs: [t_nonce_input(50)],
-    reference_inputs: [t_gs_naming_the_current_list(False)],
-    mint: from_asset(t_pu_policy, constants.linked_list_root_key, 1),
-    outputs: [t_pu_root_output(None)],
-    extra_signatories: [t_admin],
-  }
-}
-
-fn t_run_pu_iag(tx: Transaction) -> Bool {
-  mint.mint(
-    t_gs_policy,
-    t_oref(50),
-    t_pu_script_hash,
-    InitAfterGenesis { root_output_index: 0, global_state_ref_input_index: 0 },
-    t_pu_policy,
     tx,
   )
 }
 
-test power_users_init_after_genesis_succeeds_for_the_admin() {
-  t_run_pu_iag(t_pu_iag_tx())
+fn t_run_pu_init(outputs: List<Output>) -> Bool {
+  t_run_pu_init_tx(Transaction { ..t_pu_init_tx(), outputs })
 }
 
-test power_users_init_after_genesis_fails_without_the_admin_signature() {
-  !t_run_pu_iag(Transaction { ..t_pu_iag_tx(), extra_signatories: [] })
-}
-
-// Signed, but by a key that is not the admin: a False return, hence `!`.
-test power_users_init_after_genesis_fails_when_signed_by_a_stranger_only() {
-  !t_run_pu_iag(Transaction { ..t_pu_iag_tx(), extra_signatories: [t_wallet] })
-}
-
-// A decommissioned protocol gets no new list.
-test power_users_init_after_genesis_fails_on_a_deactivated_protocol() {
-  !t_run_pu_iag(
+// No GlobalState output, no GlobalState mint and no reference input: a new
+// instance of the list after genesis is created exactly as at genesis.
+test power_users_init_succeeds_without_a_global_state() {
+  t_run_pu_init_tx(
     Transaction {
-      ..t_pu_iag_tx(),
-      reference_inputs: [t_gs_naming_the_current_list(True)],
+      ..t_pu_init_tx(),
+      reference_inputs: [],
+      outputs: [t_pu_root_output(None)],
     },
   )
-}
-
-// The library's `expect nonce_validated` traps.
-test power_users_init_after_genesis_fails_without_the_nonce() fail {
-  t_run_pu_iag(Transaction { ..t_pu_iag_tx(), inputs: [] }) || True
-}
-
-// A UTxO is spent, but not the nonce: the same trap.
-test power_users_init_after_genesis_fails_with_another_utxo_spent_instead_of_the_nonce() fail {
-  t_run_pu_iag(Transaction { ..t_pu_iag_tx(), inputs: [t_nonce_input(51)] }) || True
-}
-
-// The nonce's output index, but of another transaction: the same trap.
-test power_users_init_after_genesis_fails_with_the_nonce_index_from_another_transaction() fail {
-  t_run_pu_iag(
-    Transaction {
-      ..t_pu_iag_tx(),
-      inputs: [t_nonce_input_from_another_transaction(50)],
-    },
-  ) || True
 }
 
 // The nonce is found wherever it sits among the inputs: here in the middle of
-// three.
-test power_users_init_after_genesis_succeeds_with_the_nonce_among_other_inputs() {
-  t_run_pu_iag(
+// three, the other two from other transactions.
+test power_users_init_succeeds_with_the_nonce_among_other_inputs() {
+  t_run_pu_init_tx(
     Transaction {
-      ..t_pu_iag_tx(),
-      inputs: [t_nonce_input(49), t_nonce_input(50), t_nonce_input(51)],
-    },
-  )
-}
-
-/// A minting-authority credential distinct from `t_admin`.
-const t_minting_authority: ByteArray =
-  #"0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f"
-
-// GlobalState names a minting authority distinct from its admin, and only the
-// authority signs: the admin's field is the one that must sign, so a False
-// return, hence `!`.
-test power_users_init_after_genesis_fails_when_signed_by_the_minting_authority_only() {
-  !t_run_pu_iag(
-    Transaction {
-      ..t_pu_iag_tx(),
-      reference_inputs: [
-        t_gs_utxo(
-          0,
-          GlobalStateDatum {
-            ..t_gs_datum(False),
-            power_user_linked_list_policy_id: t_current_pu_policy,
-            minting_script_credential_hash: t_minting_authority,
+      ..t_pu_init_tx(),
+      inputs: [
+        t_nonce_input_from_another_transaction(49),
+        t_nonce_input(50),
+        Input {
+          ..t_nonce_input(51),
+          output_reference: OutputReference {
+            transaction_id: #"2222222222222222222222222222222222222222222222222222222222222222",
+            output_index: 51,
           },
-        ),
+        },
       ],
-      extra_signatories: [t_minting_authority],
     },
   )
 }
 
-// The root pin traps, as in `Init`.
-test power_users_init_after_genesis_refuses_a_root_at_a_wallet() fail {
-  t_run_pu_iag(
+// An element of this policy is spent: only the no-list-input count refuses
+// it, a False return, hence `!`.
+test power_users_init_fails_with_a_list_input() {
+  !t_run_pu_init_tx(
     Transaction {
-      ..t_pu_iag_tx(),
-      outputs: [t_at_wallet(t_pu_root_output(None))],
-    },
-  ) || True
-}
-
-// An element of this policy is spent and continued at the list script, so
-// only the no-list-input count can refuse it.
-test power_users_init_after_genesis_fails_with_a_list_input() {
-  let pu = t_power_user(True, False, False, False, False)
-  !t_run_pu_iag(
-    Transaction {
-      ..t_pu_iag_tx(),
-      inputs: [t_nonce_input(50), t_pu_node_input(1, pu)],
-      outputs: [t_pu_root_output(None), t_pu_node_output(pu)],
+      ..t_pu_init_tx(),
+      inputs: [
+        t_nonce_input(50),
+        t_pu_node_input(1, t_power_user(True, False, False, False, False)),
+      ],
     },
   )
 }
 
-test power_users_init_after_genesis_fails_with_a_second_token_minted() {
-  !t_run_pu_iag(
+// A second token of this policy is minted beside the root: the one-token
+// count refuses it first, a False return, hence `!`.
+test power_users_init_fails_with_a_second_token_minted() {
+  !t_run_pu_init_tx(
     Transaction {
-      ..t_pu_iag_tx(),
+      ..t_pu_init_tx(),
       mint: merge(
         from_asset(t_pu_policy, constants.linked_list_root_key, 1),
         from_asset(t_pu_policy, t_ll_asset_name(t_key_28), 1),
       ),
     },
   )
-}
-
-// The reference input is GlobalState-shaped but carries no GlobalState NFT:
-// the lookup traps.
-test power_users_init_after_genesis_fails_without_a_genuine_global_state() fail {
-  let gs = t_gs_naming_the_current_list(False)
-  t_run_pu_iag(
-    Transaction {
-      ..t_pu_iag_tx(),
-      reference_inputs: [
-        Input {
-          ..gs,
-          output: Output { ..gs.output, value: from_lovelace(2_000_000) },
-        },
-      ],
-    },
-  ) || True
 }
 
 // Frozen core: both GlobalState read paths (the admin read and Deinit's) are

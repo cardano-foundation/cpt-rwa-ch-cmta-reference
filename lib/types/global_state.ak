@@ -516,30 +516,6 @@ pub fn gs_datum_from_output(
   decode_global_state(gs_raw)
 }
 
-/// The GlobalState created by the genesis transaction, read from its OUTPUTS
-/// (it does not exist as an input yet) and authenticated by the NFT. Used by
-/// the two linked lists' `Init`, which can only run in that same transaction:
-/// the GlobalState mint requires both list roots to mint alongside it, and each
-/// `Init` is gated on a one-shot UTxO.
-///
-/// Fails (UPLC error) if no output carries the NFT, or its datum is malformed.
-pub fn genesis_global_state(
-  outputs: List<Output>,
-  global_state_policy_id: ByteArray,
-) -> GlobalStateDatum {
-  expect Some(gs_output) = list.find(
-    outputs,
-    fn(output) {
-      value.quantity_of(
-        assets.to_value(output.value),
-        global_state_policy_id,
-        constants.global_state_asset_name,
-      ) == 1
-    },
-  )
-  gs_datum_from_output(gs_output, global_state_policy_id)
-}
-
 /// Number of `GlobalStateDatum` fields this version defines and reads.
 pub const gs_field_count = 15
 
@@ -775,15 +751,13 @@ pub type GlobalStateSpendAction {
   /// list elements by these policy ids alone, so this is the only way to
   /// replace a list with a bug.
   ///
-  /// Admin-signed and closed by `LockUpgrades`. Both new ids are 28 bytes,
-  /// differ from each other and from the issuance and GlobalState policies,
-  /// and at least one differs from its current value. Neither is the other
-  /// list's current id (no swap). Each reference input named here must hold a
-  /// root element of its new list, at a script address (an unchanged list
-  /// cites its current root). That catches a mistyped id or an uninitialised
-  /// list; it does not prove the new list is built from this repository,
-  /// which is verified off-chain. A list built from this repository is
-  /// created after genesis with its mint's `InitAfterGenesis`.
+  /// Admin-signed and closed by `LockUpgrades`. Both new ids are 28 bytes and
+  /// at least one differs from its current value; nothing else is checked.
+  /// The admin is trusted with the new ids: no on-chain check could prove a
+  /// new list runs this repository's code, so which code a new id runs, and
+  /// that it is not the other list or another policy of this deployment, is
+  /// verified off-chain. A list built from this repository is created with
+  /// its mint's `Init`, at genesis or after it.
   ///
   /// It does not check what the new lists contain: copying the operators and
   /// the sanctions over is the off-chain migration's duty. Appended last: the
@@ -791,8 +765,6 @@ pub type GlobalStateSpendAction {
   MigrateLists {
     new_power_user_linked_list_policy_id: ByteArray,
     new_denylist_linked_list_policy_id: ByteArray,
-    power_user_root_ref_input_index: Int,
-    denylist_root_ref_input_index: Int,
   }
 }
 
