@@ -200,10 +200,11 @@ validator mint(
           // minted, at quantity -1, and traps otherwise.
           //
           // Only the root is spent, and `deinit` already requires the list to
-          // be empty. This INPUT count is what keeps a stray token of this
-          // policy out of the transaction (see the note on the Add branch), so
-          // once the root is burnt no token of the policy is left anywhere.
-          (utils.count_inputs_with_policy(self.inputs, policy_id) == 1)?,
+          // be empty. No count of this policy's inputs either: `deinit`'s
+          // input scan traps on a second element of the policy, and no token
+          // of the policy exists outside an element (see the note on the
+          // `AddPowerUser` branch), so once the root is burnt no token of the
+          // policy is left anywhere.
           deinit(self.inputs, self.mint, fn(_, _, _) { True })
             |> run_root_with(policy_id, constants.linked_list_root_key),
         }
@@ -243,19 +244,34 @@ validator mint(
           // `insert_ascending` infers from `self.inputs` itself. The new node
           // is an OUTPUT.
           //
-          // This count is what keeps a stray token of this policy out of the
-          // transaction. The library's own exact-one scan only recognises
-          // CANONICAL elements (exactly ADA plus one list NFT) and silently
-          // IGNORES an input carrying the list policy in any other value
-          // shape, whereas this one counts every input bearing the policy.
+          // No count of this policy's inputs either, here or on
+          // `RemovePowerUser` and `Deinit`. The library's input scan
+          // recognises only CANONICAL elements (ADA plus exactly that one
+          // NFT, quantity 1, an inline datum, no reference script), and every
+          // token of this policy is always in one, at the list spend script.
+          // By induction over transactions:
           //
-          // With it, the anchor's token and the new node's are the only ones
-          // of this policy in the transaction, and the library places both:
-          // the continued anchor keeps the anchor's full address and the new
-          // node shares its payment credential. The anchor is at the list
-          // spend script by induction from the root that `Init` pins, so every
-          // token of this policy stays there.
-          (utils.count_inputs_with_policy(self.inputs, policy_id) == 1)?,
+          // * Before `Init` no token exists. `Init` mints one, in a root the
+          //   library authenticates as canonical, pinned to
+          //   `Script(list_script_hash)`.
+          // * A transaction minting or burning under the policy runs this
+          //   handler. Every input bearing the policy is canonical and at the
+          //   list script, so the library's scan sees each one: `deinit` and
+          //   the insertion trap on a second element input of the policy, and
+          //   `remove` refuses any input at the list's credential beyond its
+          //   pair. With the mint fixed by `is_only_mint_under_policy`, value
+          //   conservation leaves every token of the policy in an output the
+          //   library authenticates as canonical: the continued anchor at the
+          //   anchor's address, or the new node at the anchor's payment
+          //   credential.
+          // * Any other transaction: every element spent is at the list spend
+          //   script, so runs it, and its only arms are `StateTransition`,
+          //   which requires a mint under the policy, and `ModifyPowerUser`,
+          //   whose `spend_for_updating_elements_data` requires a canonical
+          //   continuation at the same address with the same NFT.
+          //
+          // So an input carrying the policy in another value shape, which the
+          // scan would not see, cannot exist.
           insert_ascending(
             anchor_output,
             new_node_output,
@@ -316,11 +332,10 @@ validator mint(
           // this policy minted, at quantity -1, and traps otherwise.
           //
           // A remove spends exactly two elements: the anchor and the node
-          // being removed. As on the Add branch, this count is what keeps a
-          // stray token of this policy out of the transaction, so the library
-          // places every token: `remove` keeps the continued anchor at the
+          // being removed. No count of this policy's inputs (see the note on
+          // the `AddPowerUser` branch): `remove`'s input scan refuses any
+          // element input beyond the pair, keeps the continued anchor at the
           // anchor's address and burns the other.
-          (utils.count_inputs_with_policy(self.inputs, policy_id) == 2)?,
           remove(
             anchor_out_ref,
             anchor_output,

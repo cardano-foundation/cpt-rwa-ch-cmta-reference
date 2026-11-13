@@ -152,11 +152,11 @@ pub fn verify_denylist_permits(
 /// back the element's own key, its data and its link.
 ///
 /// The element's ADDRESS is not checked here: the list guarantees that every
-/// NFT of its policy lives at its spend script — the list mint's Init pin, the
-/// library's own address checks on nodes and continuations, and the mint's
-/// input counts on every other branch, which keep any token of the policy the
-/// library does not place out of the transaction — so the policy id alone
-/// identifies a list element.
+/// NFT of its policy lives at its spend script — the list mint's Init pin, and
+/// the library's own address checks on nodes and continuations, whose input
+/// scan refuses any spent element they do not place (the argument is on the
+/// list mint's `AddToDenylist` branch) — so the policy id alone identifies a
+/// list element.
 ///
 /// Fails loudly (UPLC error) if the reference input does not carry the denylist
 /// NFT or has a malformed `Element` datum.

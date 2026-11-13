@@ -47,7 +47,7 @@ Register the applied stake credential of `global_state_logic` (its `publish` han
 `RegisterCredential`): the genesis transaction runs its withdraw-0, and a withdrawal from an
 unregistered credential fails at ledger phase 1. Publish `global_state_logic` and both list `mint`
 validators as reference-script UTxOs too. Genesis runs those three and the GlobalState mint,
-≈ 17.6 KB of scripts (unapplied), so they cannot all be inlined under the 16 KiB transaction limit.
+≈ 17.1 KB of scripts (unapplied), so they cannot all be inlined under the 16 KiB transaction limit.
 No transaction before genesis may spend one of the three reserved one-shot inputs, so exclude them
 from coin selection: their output references are baked into the mint parameters, and spending one
 means choosing a new input and re-applying every parameter that depends on it.

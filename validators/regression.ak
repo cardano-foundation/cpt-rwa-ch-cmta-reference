@@ -887,10 +887,9 @@ test transfer_accepts_a_clean_holder_with_a_high_successor_link() {
 // a denylist node in a wallet, keyed at the lowest key with no successor, would
 // certify absence for every credential on chain, and a power-user node in a
 // wallet would grant whatever role flags its holder writes. What makes such an
-// element unreachable is the list itself: its mint pins the root at Init, the
-// library keeps nodes and continuations at the anchor's address, and the
-// mint's input counts on every other branch keep any token of the policy the
-// library does not place out of the transaction. The two
+// element unreachable is the list itself: its mint pins the root at Init, and
+// the library keeps nodes and continuations at the anchor's address, its input
+// scan refusing any spent element it does not place. The two
 // `*_trusts_the_policy_alone` tests below pin the reliance; the list-side
 // tests named in their comments pin the guarantee.
 
@@ -989,27 +988,33 @@ test authenticated_power_user_refuses_a_node_under_a_foreign_policy() fail {
 
 /// THE DEFECT — how the NFT gets out. `denylist_validator.spend` delegates
 /// everything to the mint validator and asks only "is SOME denylist token
-/// minted or burnt in this transaction". The mint validator's
-/// `insert_ascending` inspects exactly three element UTxOs, so any FOURTH
-/// denylist node spent alongside a legitimate insert is unconstrained — its NFT
-/// can go anywhere, including an attacker's wallet, where a reader would take
-/// it for list state (`denylist_element_trusts_the_policy_alone`).
+/// minted or burnt in this transaction". The library's `insert_ascending` once
+/// inspected only the three element UTxOs it was handed, so a FOURTH denylist
+/// node spent alongside a legitimate insert was unconstrained — its NFT could
+/// go anywhere, including an attacker's wallet, where a reader would take it
+/// for list state (`denylist_element_trusts_the_policy_alone`).
 ///
-/// REWRITTEN to invoke the MINT validator.
-/// The `spend` handler's `StateTransition` path is unchanged by the fix (it
-/// still just asks the mint field a question), so probing it would prove
-/// nothing; the constraint lives in the mint branches, which must run for any
-/// insert or remove. This is a
+/// REWRITTEN to invoke the MINT validator. The `spend` handler's
+/// `StateTransition` path is unchanged by the fix (it still just asks the mint
+/// field a question), so probing it would prove nothing; the constraint lives
+/// in the mint branches, which must run for any insert or remove. This is a
 /// legitimate `AddToDenylist` insert — admin power user, correct anchor, one
-/// NFT minted — with ONE EXTRA denylist node spent alongside. The branch pins
-/// the list-policy input count at 1, so it returns False, hence `!`.
-test denylist_insert_rejects_a_smuggled_extra_node_input() {
+/// NFT minted — with ONE EXTRA denylist node spent alongside.
+///
+/// The library refuses it. Its input scan
+/// (`validate_singular_authentic_input`) folds from the last input, so it
+/// takes the extra node as the anchor, and the insertion's check 6 traps:
+/// `expect anchor_element_asset_name == cont_anchor_element_asset_name`, the
+/// continued anchor being the root. With outputs fitted to that node instead,
+/// the scan would trap on the root as a second element input. A trap either
+/// way, hence `fail`; the body discards the result, so a False return fails
+/// the test.
+test denylist_insert_rejects_a_smuggled_extra_node_input() fail {
   // Exactly `dl_insert_tx`'s shape — proven valid by
   // `denylist_insert_succeeds_for_an_admin_power_user_in_the_list` — with
   // ONE EXTRA denylist node spent alongside, whose NFT would otherwise be free
   // to land in `attacker_held_ll_nft` below. Building on the known-good shape
-  // is what makes this test isolate the input count rather than pass for some
-  // unrelated reason.
+  // is what makes the extra input the only reason it is refused.
   let valid = dl_insert_tx(
     pu_node_input(1, power_user(True, False, False, False, False)),
   )
@@ -1021,7 +1026,7 @@ test denylist_insert_rejects_a_smuggled_extra_node_input() {
       [attacker_held_ll_nft(denylist_policy, dl_sanctioned_key)],
     ),
   }
-  !run_denylist_add(tx)
+  run_denylist_add(tx) |> fn(_) { True }
 }
 
 // ── Remove, Init and Deinit through the mint validators ─────────────────────
@@ -1337,7 +1342,7 @@ test denylist_deinit_rejects_a_missing_admin_signature() {
 /// `UpdateDenylistEntry` path runs no mint and is pinned in
 /// `validators/denylist.ak`.) That is fine — it is no longer
 /// reachable with an unconstrained extra element, because the mint validator
-/// must also run and now counts inputs.
+/// must also run, and the library's input scan refuses one.
 test denylist_spend_handler_is_pure_delegation() {
   let no_datum: Option<Data> = None
   v_denylist.denylist_validator.spend(
@@ -1410,15 +1415,14 @@ test denylist_insert_succeeds_for_an_admin_power_user_in_the_list() {
 /// `get_element_info` ignores the address, that NFT then authenticates a
 /// power-user datum with EVERY role flag set, wherever it sits.
 ///
-/// Rewritten against `power_users.mint` for the
-/// same reason as its denylist twin. A legitimate admin-signed `AddPowerUser`
-/// insert with
-/// one extra power-user node spent alongside; the branch pins the list-policy
-/// input count at 1.
+/// Rewritten against `power_users.mint` for the same reason as its denylist
+/// twin. A legitimate admin-signed `AddPowerUser` insert with one extra
+/// power-user node spent alongside; the library's input scan refuses it the
+/// same way.
 /// A legitimate admin-signed `AddPowerUser`: the root anchor spent and
 /// reproduced pointing at the new node, one NFT minted. Positive control for
 /// the smuggled-input test below — without it, that test could pass for a
-/// reason unrelated to the input count.
+/// reason unrelated to the extra input.
 fn pu_insert_tx() -> Transaction {
   Transaction {
     ..base_tx(),
@@ -1455,10 +1459,18 @@ test power_user_insert_succeeds_when_the_admin_signs() {
   run_power_users_add(pu_insert_tx())
 }
 
-test power_user_insert_rejects_a_smuggled_extra_node_input() {
+test power_user_insert_rejects_a_smuggled_extra_node_input() fail {
   // `pu_insert_tx`'s shape with ONE EXTRA power-user node spent alongside —
   // the node whose NFT then lands in the attacker's wallet, still
   // authenticating a datum with every role flag set.
+  //
+  // The library refuses it, as it does the denylist twin: its input scan
+  // (`validate_singular_authentic_input`) folds from the last input, so it
+  // takes the extra node as the anchor, and the insertion's check 6 traps
+  // (`expect anchor_element_asset_name == cont_anchor_element_asset_name`);
+  // fitted outputs would meet the scan's trap on a second element input
+  // instead. Hence `fail`, and the result is discarded, so a False return
+  // fails the test.
   let valid = pu_insert_tx()
   let tx = Transaction {
     ..valid,
@@ -1471,7 +1483,7 @@ test power_user_insert_rejects_a_smuggled_extra_node_input() {
       [attacker_held_ll_nft(pu_policy, pu_cred)],
     ),
   }
-  !run_power_users_add(tx)
+  run_power_users_add(tx) |> fn(_) { True }
 }
 
 /// The power-users ROOT as an INPUT with a settable link.

@@ -333,7 +333,7 @@ script, so that entry can never be removed properly.
 
 `Init`'s count was dropped in 2026-11 (§22): no token of the policy can exist before the root,
 because `Init` is one-shot (its nonce) and every other branch needs an existing element, as its
-input or burnt. The other three counts stand.
+input or burnt. The other three were removed later in 2026-11 (below).
 
 Outputs needed no separate constraint *for the count*: with inputs pinned and the mint field already
 restricted to a single asset, value conservation forces the count, and the library already validates
@@ -352,6 +352,22 @@ list used as an access-control structure is the wrong place to rely on "should",
 one fold. Since 2026-11 our counts are also what makes the library's placement checks cover every
 token: no input bearing the policy is spent beyond the elements the library authenticates, so every
 token of the policy in the transaction is one the library places.
+
+**Removed in 2026-11.** The `Deinit`, `Add…` and `Remove…` counts and `count_inputs_with_policy`
+are gone. The non-canonical input they guarded against cannot exist, because every output that
+receives a token of the policy is authenticated by the library as canonical, at the list spend
+script. By induction over transactions: before `Init` no token exists, and `Init` creates one in a
+root the library authenticates as canonical and this repository pins to `Script(list_script_hash)`.
+In a transaction that mints or burns under the policy, every input bearing it is such an element,
+so the library's scan sees each one: the singular scan (insert, `deinit`) traps on a second element
+input, and the dual scan (`remove`) refuses any input at the list's credential beyond the pair.
+With the mint fixed by `is_only_mint_under_policy`, value conservation then leaves every token in an
+output the library authenticates: the continued anchor at the anchor's address, or the new node at
+the anchor's payment credential. Any other transaction can only spend an element through the list
+spend validator, whose arms are `StateTransition`, which requires a mint under the policy, and the
+in-place update, which requires a canonical continuation at the same address with the same NFT. So
+the "should" above is no longer an assumption: the shape the scanner ignores is unreachable, and
+the scan the library already runs is the whole check.
 
 **Then the primitive.** Every place that reads an element for authority now asserts the element's
 payment credential is its list's spend-validator hash, threaded in as a compile-time parameter.
@@ -375,9 +391,8 @@ gone (§22). In its place, each list keeps every NFT of its policy at its own sp
 mint takes its spend validator's hash (`list_script_hash`) and pins the root's payment credential to
 `Script(list_script_hash)` at `Init`; the library's induction keeps each continuation at its
 anchor's exact address and each new node at its anchor's payment credential (its stake part is free)
-from that root on; the input counts on `Add…`, `Remove…` and `Deinit` keep any token of the policy
-the library does not place out of the transaction; and tests on every list path refuse moving a list
-NFT off its list script.
+from that root on, and its input scan refuses any element spent beyond the ones it places; and tests
+on every list path refuse moving a list NFT off its list script.
 Readers now authenticate an element by its policy id alone. The reason is identity: with the pin, a
 list was named twice — by its policy id in the GlobalState datum and by its spend hash compiled into
 every reader — so replacing a list meant rebuilding every reader, the permanent ones included. Now a
@@ -396,8 +411,10 @@ nothing is deployed to mainnet, and because in `global_state.spend` the check is
 defence rather than a belt-and-braces one: that validator cannot be rotated later.
 
 **Pinned by** `denylist_insert_rejects_a_smuggled_extra_node_input` and
-`power_user_insert_rejects_a_smuggled_extra_node_input` (each built from a proven-valid insert plus
-exactly one extra input, so they isolate the count). The reader-side pin was pinned by (all five
+`power_user_insert_rejects_a_smuggled_extra_node_input`, each built from a proven-valid insert plus
+exactly one extra element input. Since the counts were removed they pin the library's refusal: its
+input scan takes the extra node as the anchor, and the insertion traps on the anchor NFT the
+continuation does not keep. The reader-side pin was pinned by (all five
 historical, removed in 2026-11 with the pin itself; the tests that replace them are listed in §22)
 `absence_proof_rejects_a_covering_node_in_a_wallet`,
 `wallet_held_power_user_node_cannot_authorise_a_sanction`,
@@ -1692,9 +1709,11 @@ checked the element's address against a compile-time copy of the list spend hash
   credential with the same hash is refused; the stake part stays free.
 * From that root on, the library places every element: an insert keeps the continued anchor at the
   anchor's full address and the new node at the anchor's payment credential, a remove keeps the
-  continued anchor at its address, and an in-place update keeps the element at its address. The
-  input counts on `Add…` (1), `Remove…` (2) and `Deinit` (1) keep any token of the policy the
-  library does not place out of the transaction, so every list NFT stays at the list spend script.
+  continued anchor at its address, and an in-place update keeps the element at its address. Its
+  input scan refuses any element input beyond the one or two an operation spends; it sees only
+  canonical elements, and every token of the policy is in one
+  ([§3](#3-a-list-element-was-trusted-wherever-it-sat)), so every list NFT stays at the list spend
+  script. The list mints count no inputs of their own.
 * There is no cycle: list spend (GlobalState policy) → list mint (GlobalState policy, one-shot
   input, list spend hash) → list policy id → GlobalState genesis datum.
 * Readers authenticate an element by its policy id alone, read from field 3 or 7. The
@@ -1852,8 +1871,12 @@ an old list after a switch, `power_users_remove_succeeds_on_a_list_global_state_
   revision of this fix also checked, on every list mint branch, that every output carrying the
   policy paid to the list spend script (`utils.policy_only_at_script`). No fixture was refused by
   it alone: on every path where a list NFT could leave its script, the library's own checks or this
-  repository's input counts refused first. No shipped test isolates the library's placement checks
-  or its one-token rule; they are re-verified on any library bump (see Reliance).
+  repository's input counts refused first.
+* **The input counts are gone, and the property rests on the library.** The counts on `Add…`,
+  `Remove…` and `Deinit` were removed too ([§3](#3-a-list-element-was-trusted-wherever-it-sat)), so
+  beside this repository's `Init` pin the property rests on the library alone. No shipped test
+  isolates the library's placement checks, its one-token rule or its input scan; they are
+  re-verified on any library bump (see Reliance).
 * **The own-input policy derivation does not check that the spent value lists lovelace first.** A
   ledger value always does, so that check could not fail and was dropped.
 * **The own-input derivation reads the second policy without checking its names or quantities**,
@@ -1866,14 +1889,15 @@ an old list after a switch, `power_users_remove_succeeds_on_a_list_global_state_
 ### Reliance
 
 Readers rely on the lists keeping every NFT of their policy at their own spend script. That rests on
-three things: this repository's `Init` pin; the linked-list library's placement checks
-(`anastasia-labs/aiken-design-patterns` v1.9.0: the insertion keeps the continued anchor's full
-address and gives the new node the anchor's payment credential, `remove` keeps the continued
-anchor's address, and `spend_for_updating_elements_data` keeps an element's address); and this
-repository's input counts on `Add…`, `Remove…` and `Deinit`. The library's one-token rule
-(`is_only_mint_under_policy`) is relied on as well, by the own-input derivation. It is relied on,
-not re-checked; re-verify the placement checks and the one-token rule on any change of the library
-version. See the README's [What is relied on from the linked-list
+two things: this repository's `Init` pin, and the linked-list library
+(`anastasia-labs/aiken-design-patterns` v1.9.0). From the library: its placement checks (the
+insertion keeps the continued anchor's full address and gives the new node the anchor's payment
+credential, `remove` keeps the continued anchor's address, and `spend_for_updating_elements_data`
+keeps an element's address); its one-token rule (`is_only_mint_under_policy`), also relied on by the
+own-input derivation; and its input scan (`validate_singular_authentic_input` on an insert and on
+`deinit`, `validate_dual_authentic_inputs` on `remove`), which refuses any extra element input. It
+is relied on, not re-checked; re-verify the placement checks, the one-token rule and the input scan
+on any change of the library version. See the README's [What is relied on from the linked-list
 library](../../README.md#what-is-relied-on-from-the-linked-list-library) and [the base-layer
 table](#what-the-cip-113-base-layer-actually-guarantees).
 
@@ -1909,15 +1933,15 @@ Compiled sizes of the unapplied scripts (`compiledCode` in `plutus.json`), in by
 | `global_state_logic` | 5,742 | 5,938 (+196) |
 | `transfer_logic_validator` | 7,233 | 7,175 (−58) |
 | `third_party_transfer_logic_validator` | 7,440 | 7,341 (−99) |
-| `denylist.mint` | 5,772 | 4,949 (−823) |
+| `denylist.mint` | 5,772 | 4,699 (−1,073) |
 | `denylist_validator` | 2,907 | 2,802 (−105) |
-| `power_users.mint` | 5,105 | 4,340 (−765) |
+| `power_users.mint` | 5,105 | 4,089 (−1,016) |
 | `power_users_validator` | 2,311 | 2,253 (−58) |
 | `global_state_mint_validator` | 2,335 | 2,335 |
 | `global_state_proxy` | 424 | 424 |
 
 The genesis transaction's scripts (both list mints, the GlobalState mint and `global_state_logic`)
-shrink from ≈ 19.0 KB to ≈ 17.6 KB, unapplied; that is still above the 16 KiB transaction limit, so
+shrink from ≈ 19.0 KB to ≈ 17.1 KB, unapplied; that is still above the 16 KiB transaction limit, so
 they are still published as reference scripts before genesis.
 
 ---
@@ -2140,7 +2164,7 @@ the notes above apply to any redeploy onto current `main`.
 | A registry-node spend can never mint or burn that node's own token | **True** | `registry_spend` hoists `!mint_has_policy(self.mint, spent_node.key)` above its `when`, so it covers both the in-place update and the covering-node spend | `UpgradeRegistryNode`'s belt-and-braces no-mint re-check removal (2026-08-21) |
 | The seizure path is the only one that skips owner consent | **True** | the third-party path never calls `authorised_stake_cred`; the transfer path always does | — |
 | `issuance_mint` requires the minting logic's withdraw-0 on every mint or burn | **True** | `issuance_mint` (`validators/issuance_mint.ak`, `95e99ac`) requires `has_key_or_fail(withdrawals, minting_logic_cred)`, the credential it is parameterised by, on every mint or burn of its policy | [§21](#21-the-supply-cap-is-debited-by-the-minting-authority)'s reliance: the minting proxy, and through it the authority's same-transaction debit, runs on every mint or burn |
-| Every list NFT stays at its list spend script (a linked-list library guarantee, not the base layer's) | **Relied on** — re-verify on any library change | `anastasia-labs/aiken-design-patterns` v1.9.0 keeps each continuation at its anchor's exact address and each new node at its anchor's payment credential (its stake part is free), and its insert and remove count the list's inputs (since v1.8.0; [the linked-list dependency](#the-linked-list-dependency)), its in-place update keeps an element's address, and its one-token rule (`is_only_mint_under_policy`) makes each mint or burn change exactly one token; this repository's list mints pin the root to `Script(list_script_hash)` at `Init`, and their input counts on `Add…`, `Remove…` and `Deinit` keep any token of the policy the library does not place out of the transaction | The readers' list-element address check removal (2026-11, [§22](#22-a-rotation-could-rewrite-the-datum-and-a-list-could-never-be-replaced)): power-user nodes and denylist elements are authenticated by policy id alone |
+| Every list NFT stays at its list spend script (a linked-list library guarantee, not the base layer's) | **Relied on** — re-verify on any library change | Two parts. This repository's list mints pin the root to `Script(list_script_hash)` at `Init`. `anastasia-labs/aiken-design-patterns` v1.9.0 keeps each continuation at its anchor's exact address and each new node at its anchor's payment credential (its stake part is free), its in-place update keeps an element's address, its one-token rule (`is_only_mint_under_policy`) makes each mint or burn change exactly one token, and its insert, `deinit` and remove scan the full `inputs` list and refuse any extra element input (since v1.8.0; [the linked-list dependency](#the-linked-list-dependency)); every token of the policy is in a canonical element the scan sees ([§3](#3-a-list-element-was-trusted-wherever-it-sat)) | The readers' list-element address check removal (2026-11, [§22](#22-a-rotation-could-rewrite-the-datum-and-a-list-could-never-be-replaced)): power-user nodes and denylist elements are authenticated by policy id alone |
 
 Two things this settled:
 
