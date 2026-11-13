@@ -209,13 +209,16 @@ validator mint(
         // GlobalState as a reference input, which does not exist yet). That
         // the policy ids GlobalState names are this repository's lists is
         // verified off-chain.
+        //
+        // No count of this policy's mint here: the library's `init` already
+        // requires the root NFT to be the only asset of this policy minted, at
+        // quantity 1, and traps otherwise.
         let nonce_validated = list.any(
           self.inputs,
           fn(input) { input.output_reference == init_input_out_ref },
         )
         let root_output = utils.safe_list_at(self.outputs, root_output_index)
         and {
-          dict.size(tokens(self.mint, policy_id)) == 1,
           // A new list: no element of this policy exists yet, so none may be
           // spent.
           (utils.count_inputs_with_policy(self.inputs, policy_id) == 0)?,
@@ -231,11 +234,13 @@ validator mint(
       Deinit { global_state_ref_input_index } -> {
         // POST-DECOMMISSION CLEANUP ONLY.
         //
-        // Burning the root is irreversible: `Init` is gated on a one-shot UTxO
-        // consumed at genesis, so a root can never be re-created. Only
-        // `MigrateLists` writes `denylist_linked_list_policy_id`, admin-signed
-        // and before `LockUpgrades`, and it needs GlobalState spent — so after
-        // the lock, or once deactivated, GlobalState can never be pointed at a
+        // Burning the root is irreversible: this list instance's root can never
+        // be re-created, because its `Init` nonce is spent. A new instance (a
+        // new policy) can be created with `Init` at any time, but it is inert
+        // unless `MigrateLists` adopts it. Only `MigrateLists` writes
+        // `denylist_linked_list_policy_id`, admin-signed and before
+        // `LockUpgrades`, and it needs GlobalState spent — so after the lock,
+        // or once deactivated, GlobalState can never be pointed at a
         // replacement list either.
         //
         // What that costs while the protocol is LIVE: every movement of the

@@ -1222,8 +1222,10 @@ test denylist_init_fails_with_the_nonce_index_from_another_transaction() fail {
 // ============================================================================
 //
 // THE DEFECT. `Deinit` used to require only the admin's signature on an empty
-// list. Burning the root is irreversible — `Init` is nonce-gated to a UTxO
-// spent at genesis, and the GlobalState datum's denylist policy id changes only
+// list. Burning the root is irreversible — this list instance's root can never
+// be re-created, because its nonce is spent; a new instance (a new policy) can
+// be created with `Init` at any time, but it is inert unless `MigrateLists`
+// adopts it, and the GlobalState datum's denylist policy id changes only
 // through `MigrateLists`, before the lock — while EVERY movement of the
 // security token needs a covering node of this list as a reference input. So
 // one admin signature could permanently freeze the register with the token
@@ -2140,10 +2142,11 @@ test denylist_init_fails_with_a_list_input() {
   )
 }
 
-// A second token of this policy is minted beside the root: the one-token
-// count refuses it first, a False return, hence `!`.
-test denylist_init_fails_with_a_second_token_minted() {
-  !run_denylist_init_tx(
+// A second token of this policy is minted beside the root: the library's
+// `init` refuses it (`expect is_only_mint_under_policy`), a trap, so only a
+// trap passes this `… |> fn(_) { True }` body.
+test denylist_init_fails_with_a_second_token_minted() fail {
+  run_denylist_init_tx(
     Transaction {
       ..dl_init_tx(),
       mint: merge(
@@ -2152,6 +2155,7 @@ test denylist_init_fails_with_a_second_token_minted() {
       ),
     },
   )
+    |> fn(_) { True }
 }
 
 // ── a sanctions operator can never be the GlobalState logic ──────────────────

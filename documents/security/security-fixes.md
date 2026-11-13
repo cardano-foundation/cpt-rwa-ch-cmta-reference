@@ -326,7 +326,7 @@ script, so that entry can never be removed properly.
 
 | Branch | Expected list-policy inputs | Why |
 |---|---|---|
-| `Init` | 0 | genesis — no node exists yet; the root is an *output* |
+| `Init` | 0 | creation — no node exists yet; the root is an *output* |
 | `Deinit` | 1 | only the root, and `deinit` already requires an empty list |
 | `Add…` | 1 | an insert spends the anchor only; the new node is an *output* |
 | `Remove…` | 2 | the anchor and the node being removed |
@@ -611,7 +611,8 @@ node and the sanctions list would be inert from day one.
 
 Both fields were immutable afterwards — every spend branch reproduced the datum wholesale — so
 genesis was the only chance to catch it. (Since 2026-11 `MigrateLists` can rewrite both,
-admin-signed and before `LockUpgrades`, and refuses two equal ids too; see §22.)
+admin-signed and before `LockUpgrades`. It trusts the admin with the new ids and does not refuse two
+equal ids; see §22.)
 
 ### The fix
 
@@ -760,8 +761,9 @@ root's `link` to be `None`). Nothing checked whether the protocol was still runn
 
 Burning a root is irreversible in both directions:
 
-* `Init` is gated on a one-shot `OutputReference` consumed at genesis, so a root can never be
-  re-created; and
+* `Init` is gated on the list instance's one-shot `OutputReference`, so once that nonce is spent
+  this list instance's root can never be re-created; a new instance (a new policy) can be created
+  with `Init` at any time, but it is inert unless `MigrateLists` adopts it; and
 * `denylist_linked_list_policy_id` / `power_user_linked_list_policy_id` were immutable in the
   GlobalState datum — no spend branch wrote them — so GlobalState could never be pointed at a
   replacement list either. (Since 2026-11 `MigrateLists` can, before `LockUpgrades`, so on a live
@@ -1678,10 +1680,9 @@ checked the element's address against a compile-time copy of the list spend hash
 * Each list mint takes its spend validator's hash, `list_script_hash`, after `init_input_out_ref`.
   `Init` requires the root's whole payment credential to be `Script(list_script_hash)`, so a key
   credential with the same hash is refused; the stake part stays free.
-* Every mint branch (`Init`, `InitAfterGenesis` (e), `Add…`, `Remove…`, `Deinit`) checks, in one
-  fold over the outputs, that every output carrying a token of the policy pays to
-  `Script(list_script_hash)` (`utils.policy_only_at_script`), as defence in depth on top of the
-  library's own checks.
+* Every mint branch (`Init`, `Add…`, `Remove…`, `Deinit`) checks, in one fold over the outputs, that
+  every output carrying a token of the policy pays to `Script(list_script_hash)`
+  (`utils.policy_only_at_script`), as defence in depth on top of the library's own checks.
 * There is no cycle: list spend (GlobalState policy) → list mint (GlobalState policy, one-shot
   input, list spend hash) → list policy id → GlobalState genesis datum.
 * Readers authenticate an element by its policy id alone, read from field 3 or 7. The
@@ -1750,87 +1751,84 @@ For every list path refusing to move a list NFT off its list script, each with a
 authenticating by policy id alone, the policy id is a list's only identity, so a list with a bug
 could never be replaced.
 
-**The fix.** `MigrateLists`, appended as the last `GlobalStateSpendAction` constructor (index 15) so
-no existing index moves, rewrites both fields in one write. It requires: upgrades not locked and the
-admin's signature; both new ids 28 bytes long, different from each other, and neither the issuance
-nor the GlobalState policy; at least one id different from its current value; the reference input
-at each named index to hold the genuine root element of that list, authenticated by the library's
-root helper under the new policy (ADA plus exactly the root NFT, an inline `Root` datum, no
-reference script) — an unchanged list cites its current root, and an id with no initialised list
-root behind it, a node in place of the root, or the old list's root traps; and the output datum to
-equal the input with fields 3 and 7 replaced, nothing else changed or appended. The guards common
-to every action — terminal guard, security token untouched, datum cap, address, NFT, value, no
-reference script — apply unchanged. `LockUpgrades` closes it (invariants 2 and 11 of
-`validators/global_state_logic.ak`). It does not check what the new lists contain; the runbook is
-in the [integration guide](../integration-guide.md#migrating-the-lists).
+**The fix.** `MigrateLists { new_power_user_linked_list_policy_id,
+new_denylist_linked_list_policy_id }`, appended as the last `GlobalStateSpendAction` constructor
+(index 15) so no existing index moves, rewrites both fields in one write. Its redeemer has two
+fields, the two new policy ids. It checks only five things: the admin's signature; upgrades not
+locked; both new ids 28 bytes long; at least one id different from its current value; and the output
+datum equal to the input with fields 3 and 7 replaced, nothing else changed or appended. The guards
+common to every action — terminal guard, security token untouched, datum cap, address, NFT, value,
+no reference script — apply unchanged. `LockUpgrades` closes it (invariants 2 and 11 of
+`validators/global_state_logic.ak`). It does not check the new lists' roots, addresses, contents or
+code, nor any relation between the ids, so a swap of the two lists or two equal ids pass. The admin
+is trusted for this choice. On chain, a check cannot prove that a policy id runs this repository's
+list code, so the new ids are verified off-chain before signing: recompute each policy id from this
+repository's list mint, applied with its GlobalState policy, the chosen nonce and its
+`list_script_hash`, and confirm each list's contents. The runbook is in the [integration
+guide](../integration-guide.md#migrating-the-lists).
+
+**Considered and dropped.** An earlier revision of this fix also required a root of each new list,
+at a script address, as a reference input, the two ids to differ from each other and from the
+issuance and GlobalState policies, and no swap with the other list's current id. Those checks only
+guarded the admin's own mistakes, and none of them could prove the target runs this repository's
+code, so they were removed.
 
 **Pinned by** `migrate_lists_switches_both_policy_ids`,
 `migrate_lists_switches_only_the_power_users_list`, `migrate_lists_switches_only_the_denylist`,
-`migrate_lists_fails_without_the_admin_signature`, `migrate_lists_fails_once_upgrades_are_locked`,
-`migrate_lists_fails_as_a_no_op`, `migrate_lists_fails_on_a_short_power_users_policy_id`,
-`migrate_lists_fails_on_a_short_denylist_policy_id`, `migrate_lists_fails_when_both_ids_are_equal`,
-`migrate_lists_fails_to_the_issuance_policy`, `migrate_lists_fails_to_the_global_state_policy`,
-`migrate_lists_fails_to_the_issuance_policy_as_the_denylist`,
-`migrate_lists_fails_to_the_global_state_policy_as_the_denylist`,
-`migrate_lists_fails_without_the_new_power_users_root`,
-`migrate_lists_fails_without_the_new_denylist_root`,
-`migrate_lists_fails_when_the_root_ref_is_a_node_not_the_root`,
-`migrate_lists_fails_when_the_denylist_root_ref_is_a_node_not_the_root`,
+`migrate_lists_accepts_a_swap_of_the_two_lists`, `migrate_lists_fails_without_the_admin_signature`,
+`migrate_lists_fails_when_signed_by_a_stranger_only`,
+`migrate_lists_fails_once_upgrades_are_locked`, `migrate_lists_fails_as_a_no_op`,
+`migrate_lists_fails_on_a_short_power_users_policy_id`,
+`migrate_lists_fails_on_a_short_denylist_policy_id`,
 `migrate_lists_fails_when_another_field_changes`, `migrate_lists_fails_when_a_field_is_appended`,
 `migrate_lists_fails_with_a_concurrent_security_mint` and
 `migrate_lists_fails_on_a_deactivated_protocol` (`validators/global_state_logic_tests.ak`).
 
 ### (e) No list built from this repository could be created after genesis
 
-**Before.** Each list mint's only creation branch, `Init`, requires the GlobalState minted in the
-same transaction to name the new policy (`genesis_global_state`). After genesis only `MigrateLists`
-writes fields 3 and 7, and it needs the new root to exist first, so no new instance of this
-repository's list code could ever be initialised and switched to. The only reachable targets were
-foreign list code or any policy with a root-shaped UTxO, which the root check in (d) cannot tell
-apart from a list built here.
+**Before.** Each list mint's only creation branch, `Init`, required the GlobalState minted in the
+same transaction to name the new policy. After genesis only `MigrateLists` writes fields 3 and 7, so
+no new instance of this repository's list code could ever be initialised and switched to.
 
 **The fix.**
 
-* Each list mint gains `InitAfterGenesis { root_output_index, global_state_ref_input_index }`,
-  appended last to its `MintRedeemer` (constructor 4; no index moves). It requires the instance's
-  one-shot nonce to be spent, exactly one token of the policy minted (the root), no input carrying
-  the policy, GlobalState as a reference input read through the core reader and not deactivated,
-  the admin's signature, and the root pinned exactly as in `Init` with the per-branch outputs check;
-  the two branches share that code. Each instance is the mint applied with its own nonce, so it has
-  its own policy ID even with identical code, and one root. `Init` is unchanged.
-* It does not read the upgrade lock: the list scripts can never be redeployed and read only the
+* `Init` is nonce-only: it creates a list's root at genesis or at any later time, gated only by the
+  instance's one-shot nonce `init_input_out_ref`. Each instance is the mint applied with its own
+  nonce, so a fresh nonce gives a new policy id even with identical code, and one root. It still
+  requires the nonce spent, no input carrying the policy, and the root pinned to
+  `Script(list_script_hash)` with the per-branch outputs check; the library's `init` requires the
+  root NFT to be the only asset of the policy minted, at quantity 1.
+* It needs no GlobalState and no admin signature. The root's creator gains no control, because every
+  content change is gated through GlobalState: by the GlobalState admin for the power-users list,
+  and by an `is_admin` power user under the current field 3 for the denylist.
+* Genesis wiring is still forced by the GlobalState mint, which requires both list policies its
+  datum names to mint in the genesis transaction.
+* `Init` does not read the upgrade lock: the list scripts can never be redeployed and read only the
   GlobalState core. A list created after `LockUpgrades` is inert, because `MigrateLists` is closed
   then.
-* `MigrateLists` gains two guards. Each presented root's payment credential must be a script's: a
-  list built from this repository roots at its spend script, so a root held by a key is a mistake.
-  And no swap: the new power-users id must differ from the current denylist id, and the new denylist
-  id from the current power-users id.
+* `InitAfterGenesis`, a separate creation branch an earlier revision of this fix added, no longer
+  exists.
 
-**The limit.** The root check catches a mistyped id or an uninitialised list. It does not prove the
-target is a list built from this repository; that is not provable on chain without a hash pin, so
-the runbook re-derives each new policy ID off-chain before the switch. Accepted.
+**The limit.** Nothing on chain proves that a policy id GlobalState names runs this repository's
+list code; that is not provable without a hash pin, so the runbook recomputes each new policy id
+off-chain before the switch. Accepted.
 
-**Pinned by** `power_users_init_after_genesis_succeeds_for_the_admin`,
-`power_users_init_after_genesis_fails_without_the_admin_signature`,
-`power_users_init_after_genesis_fails_on_a_deactivated_protocol`,
-`power_users_init_after_genesis_fails_without_the_nonce`,
-`power_users_init_after_genesis_refuses_a_root_at_a_wallet`,
-`power_users_init_after_genesis_fails_with_a_list_input`,
-`power_users_init_after_genesis_fails_with_a_second_token_minted` and
-`power_users_init_after_genesis_fails_without_a_genuine_global_state` (`validators/power_users.ak`);
-the same eight for the denylist, `denylist_init_after_genesis_succeeds_for_the_admin`,
-`denylist_init_after_genesis_fails_without_the_admin_signature`,
-`denylist_init_after_genesis_fails_on_a_deactivated_protocol`,
-`denylist_init_after_genesis_fails_without_the_nonce`,
-`denylist_init_after_genesis_refuses_a_root_at_a_wallet`,
-`denylist_init_after_genesis_fails_with_a_list_input`,
-`denylist_init_after_genesis_fails_with_a_second_token_minted` and
-`denylist_init_after_genesis_fails_without_a_genuine_global_state` (`validators/regression.ak`); and
-`migrate_lists_fails_when_a_root_sits_at_a_key_address`, `migrate_lists_fails_as_a_swap`,
-`migrate_lists_fails_when_the_new_power_users_id_is_the_current_denylist_id`,
-`migrate_lists_fails_when_the_new_denylist_id_is_the_current_power_users_id` and, end to end,
-`migrate_lists_switches_to_a_list_created_after_genesis`, which creates a power-users instance with
-this repository's list mint and switches to it (`validators/global_state_logic_tests.ak`).
+**Pinned by** `power_users_init_succeeds_on_the_nonce_utxo`,
+`power_users_init_succeeds_without_a_global_state`,
+`power_users_init_succeeds_with_the_nonce_among_other_inputs`,
+`power_users_init_rejects_a_missing_nonce`,
+`power_users_init_fails_with_another_utxo_spent_instead_of_the_nonce`,
+`power_users_init_fails_with_the_nonce_index_from_another_transaction`,
+`power_users_init_fails_with_a_list_input` and `power_users_init_fails_with_a_second_token_minted`
+(`validators/power_users.ak`); the same eight for the denylist,
+`denylist_init_succeeds_on_the_nonce_utxo`, `denylist_init_succeeds_without_a_global_state`,
+`denylist_init_succeeds_with_the_nonce_among_other_inputs`, `denylist_init_rejects_a_missing_nonce`,
+`denylist_init_fails_with_another_utxo_spent_instead_of_the_nonce`,
+`denylist_init_fails_with_the_nonce_index_from_another_transaction`,
+`denylist_init_fails_with_a_list_input` and `denylist_init_fails_with_a_second_token_minted`
+(`validators/regression.ak`); and, for reclaiming an old list after a switch,
+`power_users_remove_succeeds_on_a_list_global_state_no_longer_names` (`validators/power_users.ak`)
+and `denylist_remove_succeeds_on_a_list_global_state_no_longer_names` (`validators/denylist.ak`).
 
 ### Accepted residue
 
@@ -2169,10 +2167,9 @@ the datum order and one redeemer.
   field 6 again; every other field keeps its index. A rotation now keeps every field but field 0
   and may only append.
 * **Redeemers.** `GlobalStateSpendAction` gains `MigrateLists {
-  new_power_user_linked_list_policy_id, new_denylist_linked_list_policy_id,
-  power_user_root_ref_input_index, denylist_root_ref_input_index }` at constructor 15, and both list
-  `MintRedeemer` types gain `InitAfterGenesis { root_output_index, global_state_ref_input_index }`
-  at constructor 4; no other index moves.
+  new_power_user_linked_list_policy_id, new_denylist_linked_list_policy_id }` at constructor 15; no
+  other index moves. Both list `MintRedeemer` types are unchanged: `Init` serves at genesis and
+  after it.
 * **Transaction shapes.** Mints and burns write `mintable_amount` at field 6. Each list root must
   sit at `Script(list_script_hash)` at genesis, which the mints now enforce.
 * **Hashes.** Every validator hash except `global_state_proxy`'s moves, including both list policies

@@ -295,14 +295,15 @@ referenced by compact identifiers or hashes.
   [`documents/security/security-fixes.md`](documents/security/security-fixes.md).
 * Deactivation is one-way and requires a paused protocol first — it is a decommissioning switch, not
   a stronger pause. **Dismantling the two linked lists (`Deinit`) is only possible afterwards**, and
-  is equally irreversible: burning a list's root NFT can never be undone, because `Init` is gated on
-  a genesis UTxO that has been spent, and the deactivated GlobalState can no longer be spent, so
-  `MigrateLists` can no longer point it at a replacement list. **Decommissioning has a required
-  order** — sweep the GlobalState UTxO's surplus ADA, pause, empty the denylist, empty the
-  power-users list, deactivate, then `Deinit` both lists. Each step becomes unavailable once a later
-  one has happened: the deactivated GlobalState UTxO can never be spent again (so any ADA left on it
-  is locked with it), and node removal is blocked after deactivation while `Deinit` requires an
-  empty list. The full runbook and what each skipped step costs are in
+  is equally irreversible: burning a list's root NFT can never be undone, because that list
+  instance's root can never be re-created (its `Init` nonce is spent), and a new instance, which
+  `Init` can create at any time, stays inert: the deactivated GlobalState can no longer be spent, so
+  `MigrateLists` can no longer adopt it. **Decommissioning has a required order** — sweep the
+  GlobalState UTxO's surplus ADA, pause, empty the denylist, empty the power-users list, deactivate,
+  then `Deinit` both lists. Each step becomes unavailable once a later one has happened: the
+  deactivated GlobalState UTxO can never be spent again (so any ADA left on it is locked with it),
+  and node removal is blocked after deactivation while `Deinit` requires an empty list. The full
+  runbook and what each skipped step costs are in
   [`documents/security/security-fixes.md`](documents/security/security-fixes.md) §12.
 * **Sanctions are single-signer and have no exempt list.** Any power user holding `is_admin` can
   denylist any address, including the admin's or another operator's. That freezes the address's
@@ -384,18 +385,20 @@ The GlobalState admin has four distinct upgrade paths, plus control over the sup
   scripts through the new authority's `UpgradeRegistryNode`, then the GlobalState logic — all
   before `LockUpgrades`. The invariants every replacement logic must keep are listed in
   `validators/global_state_logic.ak`.
-* `MigrateLists { new_power_user_linked_list_policy_id, new_denylist_linked_list_policy_id,
-  power_user_root_ref_input_index, denylist_root_ref_input_index }` points the token at new lists:
-  it rewrites fields 3 and 7 together, and nothing else. Readers authenticate list elements by these
-  two policy ids alone, so this is the only way to replace a list with a bug. Admin-signed. Both ids
-  must be 28 bytes, differ from each other and from the issuance and GlobalState policies, and at
-  least one must differ from its current value; neither may be the other list's current id (no
-  swap). The reference input at each index must hold a root of that list at a script address (an
-  unchanged list cites its current root), which catches a mistyped id or an uninitialised list. It
-  does not prove the new list is built from this repository: that is checked off-chain, by
-  re-deriving its policy ID. A list built from this repository is created after genesis with its
-  mint's `InitAfterGenesis`. It does not check what the new lists contain: copying the operators and
-  the sanctions over is the operator's job (see the [list-migration
+* `MigrateLists { new_power_user_linked_list_policy_id, new_denylist_linked_list_policy_id }` points
+  the token at new lists: its redeemer carries only the two new policy ids, and it rewrites fields 3
+  and 7 together, and nothing else. Readers authenticate list elements by these two policy ids
+  alone, so this is the only way to replace a list with a bug. Beyond the guards every GlobalState
+  action shares, it checks only five things: the admin's signature, upgrades not locked, both ids 28
+  bytes, at least one id different from its current value, and the output datum equal to the input
+  with fields 3 and 7 replaced. It does not check the new lists' roots, addresses, contents or code,
+  nor any relation between the ids: a swap of the two lists, or two equal ids, passes. The admin is
+  trusted with this choice, because no on-chain check can prove that a policy id runs this
+  repository's list code. So verify the new ids off-chain before signing: recompute each policy id
+  from this repository's list mint applied with its GlobalState policy, the chosen nonce and its
+  `list_script_hash`, and confirm each list's contents. A list built from this repository is created
+  with its mint's `Init`, at genesis or at any later time; `InitAfterGenesis` no longer exists.
+  Copying the operators and the sanctions over is the operator's job (see the [list-migration
   runbook](documents/integration-guide.md#migrating-the-lists)).
 
 `LockUpgrades` is an admin-signed, one-way GlobalState action that closes **all five** for later
@@ -576,22 +579,20 @@ runs, so forgetting the proxy's registration makes every mint and burn fail from
 
 > **Verify before genesis, off-chain:** that the two linked-list policy IDs differ and each equals
 > the hash of its list's `mint` applied with that list's own spend-validator hash (rows 2–5), and
-> that datum field 0 is the hash of
-> `global_state_logic` rebuilt from source with this deployment's parameters. The on-chain code
-> checks what it can (the IDs must differ and be 28 bytes; the NFT must land at
-> `global_state_proxy`; field 0 must be 28 bytes, differ from the admin, the minting authority and
-> the proxy, and run in the genesis transaction, where this logic accepts only a datum that names
-> it and fits its own cap; each list's `Init` requires the GlobalState minted alongside to name
-> that list's policy id, and pins the root to `Script(list_script_hash)`) but cannot bind field 0
-> to a hash: field 0 depends on the GlobalState
-> policy, which depends on the mint's own parameters. A field 0 that cannot run now fails genesis;
-> one that runs and accepts it — another validator, or this logic applied with a wrong parameter —
-> still gets through and then governs GlobalState. Smoke-test one GlobalState action right after
-> genesis. The power-users policy ID (field 3) is the only anchor for which list's nodes are
-> operators: the minting authority, the denylist, seizure and `PauseTransfers` authenticate
-> them under it, with no compile-time copy, so a wrong field 3 hands those roles to whoever
-> controls that policy. Field 3, like the denylist's field 7, changes only through `MigrateLists`,
-> admin-signed and before `LockUpgrades`.
+> that datum field 0 is the hash of `global_state_logic` rebuilt from source with this deployment's
+> parameters. The on-chain code checks what it can (the IDs must differ and be 28 bytes; the NFT
+> must land at `global_state_proxy`; field 0 must be 28 bytes, differ from the admin, the minting
+> authority and the proxy, and run in the genesis transaction, where this logic accepts only a datum
+> that names it and fits its own cap; the GlobalState mint requires both list policies the datum
+> names to mint alongside it; each list's `Init` pins the root to `Script(list_script_hash)`) but
+> cannot bind field 0 to a hash: field 0 depends on the GlobalState policy, which depends on the
+> mint's own parameters. A field 0 that cannot run now fails genesis; one that runs and accepts it —
+> another validator, or this logic applied with a wrong parameter — still gets through and then
+> governs GlobalState. Smoke-test one GlobalState action right after genesis. The power-users policy
+> ID (field 3) is the only anchor for which list's nodes are operators: the minting authority, the
+> denylist, seizure and `PauseTransfers` authenticate them under it, with no compile-time copy, so a
+> wrong field 3 hands those roles to whoever controls that policy. Field 3, like the denylist's
+> field 7, changes only through `MigrateLists`, admin-signed and before `LockUpgrades`.
 
 ### Deployment checklist
 
@@ -803,11 +804,11 @@ above all, runs in every metadata update.
 Figures below are measured with `aiken bench` (`aiken bench -m "transfer_logic_script.{..}"
 --max-size 40`; the per-test execution units `aiken check -D` prints are the other source) against
 the current, cost-optimised implementation, and were all re-measured on 2026-11-12 under Aiken
-v1.1.24. In the bullets, a single transaction's figure is a named test's execution units; a
-per-party increment is the slope of the named bench from `n = 1` to `n = 4`, halved where each step
-adds a sender and a destination. They are for this deployment's scripts alone — the CIP-113 base
-layer shares the same per-transaction budget, 10 000 M CPU / 14 M memory, and **memory is the
-binding axis**.
+v1.1.24 (the GlobalState proxy and logic figures again on 2026-11-13). In the bullets, a single
+transaction's figure is a named test's execution units; a per-party increment is the slope of the
+named bench from `n = 1` to `n = 4`, halved where each step adds a sender and a destination. They
+are for this deployment's scripts alone — the CIP-113 base layer shares the same per-transaction
+budget, 10 000 M CPU / 14 M memory, and **memory is the binding axis**.
 
 * **Ordinary transfer**, denylist-only, one sender and one destination: ≈ 0.59 M mem / 0.18 G CPU
   (`transfer_succeeds_when_clean`). Each further party on a side that cites the same denylist
@@ -870,28 +871,29 @@ with the number of destination actions), and the GlobalState figure assumes Glob
 transaction input (each input before it adds about 11.5 K mem); the transfer and seizure
 benches above build theirs in the bench body, which adds the fixture's cost to their figures.
 
-Per mint or burn, whatever the destination count: the minting proxy 81,539 mem / 30,040,763 CPU,
-the GlobalState proxy and logic 275,823 mem / 118,518,209 CPU.
+Per mint or burn, whatever the destination count: the minting proxy 81,539 mem / 30,040,763 CPU, the
+GlobalState proxy and logic 275,023 mem / 118,390,209 CPU.
 
 | n | authority mem | authority CPU | whole mint mem | whole mint CPU |
 |---:|---:|---:|---:|---:|
-| 1 | 447,744 | 153,878,746 | 805,106 | 302,437,718 |
-| 4 | 714,339 | 254,656,270 | 1,071,701 | 403,215,242 |
-| 8 | 1,110,371 | 417,689,230 | 1,467,733 | 566,248,202 |
-| 16 | 2,041,539 | 842,028,046 | 2,398,901 | 990,587,018 |
+| 1 | 447,744 | 153,878,746 | 804,306 | 302,309,718 |
+| 4 | 714,339 | 254,656,270 | 1,070,901 | 403,087,242 |
+| 8 | 1,110,371 | 417,689,230 | 1,466,933 | 566,120,202 |
+| 16 | 2,041,539 | 842,028,046 | 2,398,101 | 990,459,018 |
 
 `mint_cost_by_destination_count` is one `MintBurn` to `n` distinct destinations, denylist-only,
 every destination citing the empty denylist root; "whole mint" adds the two constant figures above.
-A burn (`burn_cost`, no destinations): authority 250,303 mem / 87,284,101 CPU, whole burn 607,665
-mem / 235,843,073 CPU. Sixteen destinations use about 17% of the memory budget before redeemer
+A burn (`burn_cost`, no destinations): authority 250,303 mem / 87,284,101 CPU, whole burn 606,865
+mem / 235,715,073 CPU. Sixteen destinations use about 17% of the memory budget before redeemer
 decoding, somewhat more with it; the CIP-113 base layer's own scripts in the same transaction are
 not included.
 
 What moved since the previous measurement: the minting proxy is 5,128 mem / 1,560,820 CPU cheaper,
-because `mintable_amount` left the core it decodes; the GlobalState proxy and logic cost 4,200 mem /
-1,124,722 CPU more; the authority is 5,684 mem / 2,202,420 CPU cheaper at one destination and
-71,564 mem / 25,835,985 CPU at sixteen, because a destination's denylist element is no longer
-address-checked; the authority's burn is 1,292 mem / 626,849 CPU cheaper.
+because `mintable_amount` left the core it decodes; the GlobalState proxy and logic, last given here
+as 275,823 mem / 118,518,209 CPU, now cost 800 mem / 128,000 CPU less; the authority is 5,684 mem /
+2,202,420 CPU cheaper at one destination and 71,564 mem / 25,835,985 CPU at sixteen, because a
+destination's denylist element is no longer address-checked; the authority's burn is 1,292 mem /
+626,849 CPU cheaper.
 
 ## KYC proof formats
 
@@ -976,11 +978,12 @@ dependent transaction after the preceding output is available.
    `mintable_amount` (the supply cap), 7 the denylist policy ID, 8 `security_info`, 9 the trusted
    entity keys, 10 `member_root_hash`, 11/12 the sender/receiver KYC flags, 13 the network ID and 14
    `upgrades_locked = False`. Put each root at its own list spend validator. Each list's `Init`
-   rejects a GlobalState datum that does not name it, and a root whose payment credential is not
-   `Script(list_script_hash)`, the spend hash that list's mint was applied with. A new instance of
-   either list after genesis, for `MigrateLists` to switch to, is created with that list mint's
-   `InitAfterGenesis` instead, applied with its own fresh one-shot input, admin-signed and citing
-   GlobalState as a reference input (see the [list-migration
+   rejects a root whose payment credential is not `Script(list_script_hash)`, the spend hash that
+   list's mint was applied with. `Init` is gated only by the list's one-shot nonce,
+   `init_input_out_ref`: it reads no GlobalState and needs no admin signature, so what forces the
+   genesis wiring is the GlobalState mint's requirement above. A new instance of either list, for
+   `MigrateLists` to switch to, is created later with the same `Init`, from that list's mint applied
+   with a fresh nonce, which gives it a new policy ID (see the [list-migration
    runbook](documents/integration-guide.md#migrating-the-lists)). The GlobalState mint also requires
    the withdraw-0 of the logic field 0 names: add it with a `GlobalStateSpendRedeemer` whose
    `global_state_output_index` points at the GlobalState output (its action is ignored at genesis);
